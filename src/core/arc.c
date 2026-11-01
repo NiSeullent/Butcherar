@@ -627,7 +627,11 @@ static int try_format(gz_archive **out, const gz_format *f, gz_src *src, const g
                 int cr = open_level(&child, v, o, c, depth + 1, a, (u32)pick);
                 gz_src_free(v);
                 if (!cr) {
-                    child->owns_parent = 1;
+                    /* child may itself sit on a container opened below (image ->
+                     * partition map -> file system): the link to a is the owner */
+                    gz_archive *link = child;
+                    while (link->parent && link->parent != a) link = link->parent;
+                    link->owns_parent = 1;
                     char tn[40];
                     u32 k = 0;
                     for (const char *p = child->type_name; *p && k < 22; p++) tn[k++] = *p;
