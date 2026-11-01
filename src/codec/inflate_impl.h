@@ -97,7 +97,7 @@ GZV_ATTR int GZV_FN(gz_inflater *z, const gz_stream_io *io)
     const u8 *in = z->ibuf + GZ_ILOOKBEHIND;
     const u8 *in_fast_end = z->in_fast_end;
     u8 *const obuf = z->obuf;
-    u8 *out = obuf;
+    u8 *out = z->flushed;    /* obuf, or after a preset dictionary (gz_inflate_run_dict) */
     u8 *const out_fast_end = obuf + GZ_WSIZE + GZ_OCHUNK;
     const int d64 = z->deflate64;
     const u32 *ltempl = d64 ? gz_lit_templ64 : gz_lit_templ;

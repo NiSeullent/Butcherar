@@ -234,6 +234,27 @@ int gz_inflate_run(gz_inflater *z, const gz_stream_io *io, int deflate64)
     return gz_inflate_kernel(z, io);
 }
 
+int gz_inflate_run_dict(gz_inflater *z, const gz_stream_io *io, const u8 *dict, u32 dict_len)
+{
+    if (dict_len > GZ_INFLATE_DICT_MAX) {          /* only the last 32 KiB can be referenced */
+        dict += dict_len - GZ_INFLATE_DICT_MAX;
+        dict_len = GZ_INFLATE_DICT_MAX;
+    }
+    u8 *base = z->ibuf + GZ_ILOOKBEHIND;
+    __builtin_memset(z->ibuf, 0, GZ_ILOOKBEHIND);
+    z->deflate64 = 0;
+    z->crc = 0;
+    z->total_out = 0;
+    z->in_eof = 0;
+    z->in_end = base;
+    z->in_fast_end = base;
+    if (dict_len) __builtin_memmove(z->obuf, dict, dict_len);   /* dict may live in obuf */
+    z->flushed = z->obuf + dict_len;   /* the kernel starts writing here */
+    z->rest = 0;
+    z->rest_len = 0;
+    return gz_inflate_kernel(z, io);
+}
+
 int gz_store_run(gz_inflater *z, const gz_stream_io *io)
 {
     z->crc = 0;
