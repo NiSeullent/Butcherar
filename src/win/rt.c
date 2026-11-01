@@ -111,6 +111,14 @@ int gz_plat_acp(void)
 }
 
 int gz_plat_oemcp(void) { return (int)GetOEMCP(); }
+
+int gz_plat_mb_valid(int cp, const u8 *s, int n)
+{
+    if (n <= 0) return 1;
+    /* MB_ERR_INVALID_CHARS: Windows 2000 SP4+ for DBCS code pages; older systems
+     * simply report "valid" and the caller falls back to its other evidence. */
+    return MultiByteToWideChar((UINT)cp, MB_ERR_INVALID_CHARS, (LPCSTR)s, n, NULL, 0) > 0;
+}
 int gz_plat_cp_valid(int cp) { return cp == 65001 || IsValidCodePage((UINT)cp); }
 
 /* ---------------- entry point ---------------- */

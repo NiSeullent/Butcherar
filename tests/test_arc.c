@@ -22,9 +22,22 @@ void gz_free(void *p) { free(p); }
 void *gz_alloc_big(size_t n) { return calloc(1, n); }
 void gz_free_big(void *p, size_t n) { (void)n; free(p); }
 
-int gz_plat_acp(void) { return 949; }
+static int test_acp(void) { const char *e = getenv("GZ_TEST_ACP"); return e ? atoi(e) : 949; }
+int gz_plat_acp(void) { return test_acp(); }
+int gz_plat_mb_valid(int cp, const u8 *s, int n)
+{
+    char name[16];
+    snprintf(name, sizeof name, "CP%d", cp);
+    iconv_t ic = iconv_open("UTF-16LE", name);
+    if (ic == (iconv_t)-1) return 1;
+    char buf[4096], *in = (char *)s, *o = buf;
+    size_t inl = n, outl = sizeof buf;
+    size_t r = iconv(ic, &in, &inl, &o, &outl);
+    iconv_close(ic);
+    return r != (size_t)-1;
+}
 int gz_plat_oemcp(void) { return 437; }
-int gz_plat_cp_valid(int cp) { return cp == 949 || cp == 437 || cp == 932 || cp == 936 || cp == 1252 || cp == 65001; }
+int gz_plat_cp_valid(int cp) { return cp == 949 || cp == 437 || cp == 932 || cp == 936 || cp == 950 || cp == 1252 || cp == 65001; }
 int gz_plat_mb2wc(int cp, const u8 *s, int n, wchar_t *out, int cap)
 {
     char name[16];

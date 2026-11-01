@@ -126,6 +126,7 @@ u64  gz_unix_to_filetime(i64 t);
 /* Platform hooks */
 int gz_plat_mb2wc(int cp, const u8 *s, int n, wchar_t *out, int cap);
 int gz_plat_acp(void);
+int gz_plat_mb_valid(int cp, const u8 *s, int n);              /* 1 if s is valid in cp */
 int gz_plat_oemcp(void);
 int gz_plat_cp_valid(int cp);
 

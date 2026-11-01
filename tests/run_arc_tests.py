@@ -93,7 +93,7 @@ add_zip_case(p, names=cp_names)
 
 # 2b) CP949 names that happen to be valid UTF-8 ("캡처" = C4 B8 C3 B3) must stay CP949
 p = os.path.join(WORK, "cp949_ambiguous.zip")
-amb = ["캡처.png", "readme.txt"]
+amb = ["캡처.png", "캡처v2.png", "Win캡처.png", "readme.txt"]
 with zipfile.ZipFile(p, "w") as z:
     for k in amb:
         z.writestr(RawInfo(k.encode("cp949")), k.encode())
@@ -101,7 +101,8 @@ add_zip_case(p, names=amb)
 
 # 2c) genuine UTF-8 names without the flag that use only 2-byte sequences must stay UTF-8
 p = os.path.join(WORK, "latin_utf8.zip")
-lat = ["Résumé.pdf", "café/menu.txt", unicodedata.normalize("NFD", "été.txt")]
+lat = ["Résumé.pdf", "café/menu.txt", unicodedata.normalize("NFD", "été.txt"), "Ångström.txt",
+       "Отчёт.txt", "Αθήνα.txt"]
 with zipfile.ZipFile(p, "w") as z:
     for k in lat:
         z.writestr(RawInfo(k.encode("utf-8")), k.encode())
@@ -111,6 +112,15 @@ with tarfile.open(p, "w", format=tarfile.GNU_FORMAT, encoding="utf-8") as t:
     ti = tarfile.TarInfo("Отчёт.txt"); ti.size = 3; t.addfile(ti, io.BytesIO(b"abc"))
 with tarfile.open(p, encoding="utf-8") as t:
     cases.append((p, None, {i: (m.name, t.extractfile(m).read()) for i, m in enumerate(t.getmembers())}))
+
+# 2d) GBK names on Chinese Windows (ACP 936) must stay GBK ("通" = CD A8 looks like UTF-8)
+p = os.path.join(WORK, "gbk.zip")
+gbk = ["通知.doc", "通讯录.xls", "readme.txt"]
+with zipfile.ZipFile(p, "w") as z:
+    for k in gbk:
+        z.writestr(RawInfo(k.encode("gbk")), k.encode())
+ACP_FOR = {p: "936"}
+add_zip_case(p, names=gbk)
 
 # 3) macOS style: decomposed Hangul (NFD) UTF-8 without flag, plus backslashes
 p = os.path.join(WORK, "macnfd.zip")
@@ -263,7 +273,10 @@ for path, pw, exp in cases:
     out = os.path.join(WORK, "out_" + os.path.basename(path))
     shutil.rmtree(out, ignore_errors=True)
     args = [BIN, path, out] + ([pw] if pw else [])
-    r = subprocess.run(args, capture_output=True)
+    env = dict(os.environ)
+    if path in ACP_FOR:
+        env["GZ_TEST_ACP"] = ACP_FOR[path]
+    r = subprocess.run(args, capture_output=True, env=env)
     if r.returncode:
         print("FAIL run", path, r.stdout.decode()[:300], r.stderr.decode()[:300])
         fails += 1
