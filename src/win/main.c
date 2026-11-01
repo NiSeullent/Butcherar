@@ -60,10 +60,15 @@ int do_extract(HWND owner, gz_open_arc *oa, int mode, const wchar_t *to, const u
         wcopy(o.dest, here, GZ_COUNTOF(o.dest));
         o.make_folder = 1;
         break;
-    case X_TO:
-        if (!GetFullPathNameW(to, GZ_COUNTOF(o.dest), o.dest, NULL)) wcopy(o.dest, to, GZ_COUNTOF(o.dest));
+    case X_TO: {
+        DWORD n = GetFullPathNameW(to, GZ_COUNTOF(o.dest), o.dest, NULL);
+        if (!n || n >= GZ_COUNTOF(o.dest)) {
+            msg_box(owner, S(S_E_CREATE), MB_ICONWARNING);
+            return GZ_E_CREATE;
+        }
         o.make_folder = 0;
         break;
+    }
     case X_TEST:
         o.open_folder = 0;
         break;

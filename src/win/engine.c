@@ -56,7 +56,13 @@ gz_open_arc *arc_open_path(const wchar_t *path, int codepage, volatile long *can
     *err = GZ_E_NOMEM;
     if (!oa) return 0;
     wchar_t full[MAX_PATH * 2];
-    if (!GetFullPathNameW(path, GZ_COUNTOF(full), full, NULL)) wcopy(full, path, GZ_COUNTOF(full));
+    DWORD fl = GetFullPathNameW(path, GZ_COUNTOF(full), full, NULL);
+    if (fl >= GZ_COUNTOF(full) || (!fl && wlen(path) >= GZ_COUNTOF(full))) {
+        *err = GZ_E_IO;
+        mem_free(oa);
+        return 0;
+    }
+    if (!fl) wcopy(full, path, GZ_COUNTOF(full));
     oa->path = wdup(full);
     if (!src_open(&oa->src, full)) { *err = GZ_E_IO; arc_close(oa); return 0; }
     gz_inflater *z = gz_inflater_new();
@@ -105,27 +111,30 @@ static int lower3_eq(const wchar_t *c, const char *w)
     return 1;
 }
 
-/* CON, PRN, AUX, NUL, COM1-9, LPT1-9 (with or without extension) */
+/* CON, PRN, AUX, NUL, COM1-9, LPT1-9 (also "NUL .txt", "COM¹") */
 static int is_reserved(const wchar_t *c, size_t n)
 {
     size_t base = 0;
     while (base < n && c[base] != '.') base++;
+    while (base && c[base - 1] == ' ') base--;       /* Windows ignores spaces before the dot */
     if (base == 3)
         return lower3_eq(c, "con") || lower3_eq(c, "prn") || lower3_eq(c, "aux") || lower3_eq(c, "nul");
-    if (base == 4 && c[3] >= '1' && c[3] <= '9')
+    if (base == 4 && ((c[3] >= '1' && c[3] <= '9') || c[3] == 0x00B9 || c[3] == 0x00B2 || c[3] == 0x00B3))
         return lower3_eq(c, "com") || lower3_eq(c, "lpt");
     return 0;
 }
 
-/* Build "<dest>\<sanitised relative path>" for entry e. Returns 0 if the entry
- * is outside the stripped prefix (or is the prefix folder itself). */
+/* Build "<dest>\<sanitised relative path>" for entry e.
+ * Returns 1 on success, 0 if the entry is outside the stripped prefix (or is the
+ * prefix folder itself), -1 if the result would be too long. Room is kept for a
+ * \\?\UNC\ prefix and a " (12345)" rename suffix. */
+#define OUT_RESERVE 24
 static int build_out_path(gz_job *j, const gz_entry *e, wchar_t *out, size_t cap)
 {
     const wchar_t *rel = e->name;
     if (j->strip && j->strip[0]) {
         size_t sl = wlen(j->strip);
-        for (size_t i = 0; i < sl; i++) if (rel[i] != j->strip[i]) return 0;
-        if (rel[sl] != '/') return 0;
+        if (!prefix_ieq(rel, j->strip, sl) || rel[sl] != '/') return 0;
         rel += sl + 1;
     }
     if (!rel[0]) return 0;
@@ -140,7 +149,7 @@ static int build_out_path(gz_job *j, const gz_entry *e, wchar_t *out, size_t cap
         size_t n = (size_t)(p - st);
         if (*p) p++;
         if (!n) continue;
-        if (o + n + 4 >= cap) return 0;
+        if (o + n + 4 + OUT_RESERVE >= cap) return -1;
         if (!first) out[o++] = '\\';
         first = 0;
         if (is_reserved(st, n)) out[o++] = '_';
@@ -156,6 +165,11 @@ static int build_out_path(gz_job *j, const gz_entry *e, wchar_t *out, size_t cap
     }
     out[o] = 0;
     return !first;
+}
+
+int job_out_path(gz_job *j, const gz_entry *e, wchar_t *out, size_t cap)
+{
+    return build_out_path(j, e, out, cap);
 }
 
 /* "name.txt" -> "name (2).txt" ... until the path is free */
@@ -234,7 +248,8 @@ static int decide_overwrite(worker *w, const gz_entry *e, wchar_t *lp)
     gz_job *j = w->j;
     EnterCriticalSection(&j->ask_lock);
     int mode = j->overwrite;
-    if (mode == OW_ASK && !j->cancel) {
+    if (mode == OW_ASK && j->cancel) mode = -1;
+    if (mode == OW_ASK) {
         gz_ask a;
         WIN32_FILE_ATTRIBUTE_DATA fa;
         __builtin_memset(&a, 0, sizeof a);
@@ -274,7 +289,11 @@ static int w_open(gz_out *o, u32 idx)
         return GZ_E_SKIP;
     }
     if (j->test_only) return GZ_OK;
-    if (!build_out_path(j, e, w->path, GZ_COUNTOF(w->path))) return GZ_E_SKIP;
+    {
+        int b = build_out_path(j, e, w->path, GZ_COUNTOF(w->path));
+        if (b < 0) { add_error(j, e->name, GZ_E_CREATE); return GZ_E_CREATE; }
+        if (!b) return GZ_E_SKIP;
+    }
 
     wchar_t lp[MAX_PATH * 4];
     path_long(lp, w->path, GZ_COUNTOF(lp));
@@ -290,7 +309,7 @@ static int w_open(gz_out *o, u32 idx)
     DWORD attr = GetFileAttributesW(lp);
     if (attr != INVALID_FILE_ATTRIBUTES) {
         int mode = (attr & FILE_ATTRIBUTE_DIRECTORY) ? OW_RENAME : decide_overwrite(w, e, lp);
-        if (mode < 0) return GZ_E_CANCEL;
+        if (mode != OW_ALL && mode != OW_SKIP && mode != OW_RENAME) return GZ_E_CANCEL;
         if (mode == OW_SKIP) {
             EnterCriticalSection(&j->lock);
             j->skipped++;
@@ -301,10 +320,13 @@ static int w_open(gz_out *o, u32 idx)
         if (mode == OW_RENAME) {
             unique_name(w->path, GZ_COUNTOF(w->path));
             path_long(lp, w->path, GZ_COUNTOF(lp));
-        } else if (attr & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) {
-            SetFileAttributesW(lp, FILE_ATTRIBUTE_NORMAL);
+        } else {
+            if (j->cancel) return GZ_E_CANCEL;       /* never truncate after a cancel */
+            if (attr & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))
+                SetFileAttributesW(lp, FILE_ATTRIBUTE_NORMAL);
         }
     }
+    if (j->cancel) return GZ_E_CANCEL;
     w->h = CreateFileW(lp, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (w->h == INVALID_HANDLE_VALUE) {
@@ -360,7 +382,21 @@ static int w_close(gz_out *o, u32 idx, int st)
         wchar_t lp[MAX_PATH * 4];
         path_long(lp, w->path, GZ_COUNTOF(lp));
         if (st != GZ_OK) DeleteFileW(lp);
-        else if (e->attr & 7) SetFileAttributesW(lp, e->attr & 7);
+        else {
+            if (j->zone_n) {
+                /* carry the archive's Mark-of-the-Web (Zone.Identifier stream) */
+                wchar_t zp[MAX_PATH * 4 + 24];
+                wcopy(zp, lp, GZ_COUNTOF(zp));
+                wcat(zp, L":Zone.Identifier", GZ_COUNTOF(zp));
+                HANDLE z = CreateFileW(zp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (z != INVALID_HANDLE_VALUE) {
+                    DWORD wr;
+                    WriteFile(z, j->zone, j->zone_n, &wr, NULL);
+                    CloseHandle(z);
+                }
+            }
+            if (e->attr & 7) SetFileAttributesW(lp, e->attr & 7);
+        }
     }
     EnterCriticalSection(&j->lock);
     if (!e->is_dir) j->done_files++;
@@ -369,11 +405,31 @@ static int w_close(gz_out *o, u32 idx, int st)
     return GZ_OK;
 }
 
-/* Make sure the worker holds a password that opens entry idx. */
+/* Try one password encoding. Returns 1 when extraction should go ahead with it:
+ * either it is right, or the entry fails for a reason that is not the password
+ * (unsupported method, damaged header...), which extraction will then report. */
+static int try_password(worker *w, u32 idx, const u8 *p, size_t n, int gen)
+{
+    int rc = gz_arc_check_password(w->j->oa->arc, &w->src, idx, p, n);
+    if (rc == GZ_E_PASSWORD) return 0;
+    if (n > sizeof w->pw) n = sizeof w->pw;
+    __builtin_memcpy(w->pw, p, n);
+    w->pwn = n;
+    w->pw_gen = gen;
+    return 1;
+}
+
+/* Make sure the worker holds a password for entry idx.
+ * Returns GZ_OK, or GZ_E_CANCEL when the user cancels the prompt. */
 static int ensure_password(worker *w, u32 idx)
 {
     gz_job *j = w->j;
     gz_open_arc *oa = j->oa;
+    /* entries that cannot be opened with any password are not a password question */
+    if (gz_arc_check_password(oa->arc, &w->src, idx, 0, 0) != GZ_E_PASSWORD) {
+        w->pwn = 0;
+        return GZ_OK;
+    }
     int tried_gen = -1;
     for (;;) {
         if (j->cancel) return GZ_E_CANCEL;
@@ -391,17 +447,9 @@ static int ensure_password(worker *w, u32 idx)
 
         if (have && gen != tried_gen) {
             tried_gen = gen;
-            if (w->pw_gen == gen && w->pwn &&
-                gz_arc_check_password(oa->arc, &w->src, idx, w->pw, w->pwn) == GZ_OK)
-                return GZ_OK;
-            if (gz_arc_check_password(oa->arc, &w->src, idx, a, an) == GZ_OK) {
-                __builtin_memcpy(w->pw, a, an); w->pwn = an; w->pw_gen = gen;
-                return GZ_OK;
-            }
-            if (un && gz_arc_check_password(oa->arc, &w->src, idx, u, un) == GZ_OK) {
-                __builtin_memcpy(w->pw, u, un); w->pwn = un; w->pw_gen = gen;
-                return GZ_OK;
-            }
+            if (w->pw_gen == gen && w->pwn && try_password(w, idx, w->pw, w->pwn, gen)) return GZ_OK;
+            if (try_password(w, idx, a, an, gen)) return GZ_OK;
+            if (un && try_password(w, idx, u, un, gen)) return GZ_OK;
         }
 
         EnterCriticalSection(&j->ask_lock);
@@ -460,7 +508,7 @@ static DWORD WINAPI worker_main(void *arg)
         size_t pwn = 0;
         if (e->enc && !e->is_dir) {
             if (ensure_password(w, idx)) break;
-            pw = w->pw;
+            pw = w->pwn ? w->pw : 0;
             pwn = w->pwn;
         }
         w->opened = 0;
@@ -494,7 +542,7 @@ static void fix_dir_times(gz_job *j)
         if (!e->is_dir) continue;
         u64 ft = entry_filetime(e);
         wchar_t p[MAX_PATH * 4], lp[MAX_PATH * 4];
-        if (!ft || !build_out_path(j, e, p, GZ_COUNTOF(p))) continue;
+        if (!ft || build_out_path(j, e, p, GZ_COUNTOF(p)) <= 0) continue;
         path_long(lp, p, GZ_COUNTOF(lp));
         HANDLE h = CreateFileW(lp, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
@@ -576,6 +624,17 @@ gz_job *job_new(gz_open_arc *oa)
     InitializeCriticalSection(&j->lock);
     InitializeCriticalSection(&j->ask_lock);
     j->run_event = CreateEventW(NULL, TRUE, TRUE, NULL);
+    {
+        wchar_t zp[MAX_PATH * 4 + 24];
+        path_long(zp, oa->path, MAX_PATH * 4);
+        wcat(zp, L":Zone.Identifier", GZ_COUNTOF(zp));
+        HANDLE z = CreateFileW(zp, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (z != INVALID_HANDLE_VALUE) {
+            DWORD rd = 0;
+            if (ReadFile(z, j->zone, sizeof j->zone, &rd, NULL) && rd < sizeof j->zone) j->zone_n = rd;
+            CloseHandle(z);
+        }
+    }
     return j;
 }
 
@@ -600,8 +659,7 @@ static int in_scope(gz_job *j, const gz_entry *e)
     if (!e->name[0]) return 0;
     if (!j->strip || !j->strip[0]) return 1;
     size_t sl = wlen(j->strip);
-    for (size_t i = 0; i < sl; i++) if (e->name[i] != j->strip[i]) return 0;
-    return e->name[sl] == '/';
+    return prefix_ieq(e->name, j->strip, sl) && e->name[sl] == '/';
 }
 
 static gz_archive *s_sort_arc;
@@ -630,6 +688,36 @@ static void sort_order(u32 *v, u32 n)
     mem_free(tmp);
 }
 
+/* Do two entries map to the same output file? Then they must not be written by
+ * two threads at once (case-insensitive, as NTFS/FAT compare names). */
+static int has_name_collisions(gz_job *j)
+{
+    gz_archive *a = j->oa->arc;
+    u32 cap = 16;
+    while (cap < j->count * 2 + 2) cap <<= 1;
+    u64 *tab = (u64 *)mem_alloc((size_t)cap * sizeof(u64));
+    if (!tab) return 1;
+    wchar_t p[MAX_PATH * 4];
+    int coll = 0;
+    for (u32 k = 0; k < j->count && !coll; k++) {
+        const gz_entry *e = &a->e[j->order[k]];
+        if (e->is_dir || build_out_path(j, e, p, GZ_COUNTOF(p)) <= 0) continue;
+        DWORD n = (DWORD)wlen(p);
+        CharUpperBuffW(p, n);
+        u64 h = 1469598103934665603ULL;
+        for (DWORD i = 0; i < n; i++) h = (h ^ (u16)p[i]) * 1099511628211ULL;
+        if (!h) h = 1;
+        u32 i = (u32)h & (cap - 1);
+        while (tab[i]) {
+            if (tab[i] == h) { coll = 1; break; }
+            i = (i + 1) & (cap - 1);
+        }
+        tab[i] = h;
+    }
+    mem_free(tab);
+    return coll;
+}
+
 void job_start(gz_job *j)
 {
     gz_archive *a = j->oa->arc;
@@ -646,6 +734,7 @@ void job_start(gz_job *j)
     }
     s_sort_arc = a;
     if (!a->solid) sort_order(j->order, j->count);
+    if (!a->solid && !j->test_only && j->threads > 1 && has_name_collisions(j)) j->threads = 1;
     if (a->solid && j->strip && j->strip[0] && !j->sel) {
         j->sel = j->sel_owned = (u8 *)mem_alloc(a->n + 1);
         if (j->sel) for (u32 k = 0; k < j->count; k++) j->sel[j->order[k]] = 1;
@@ -666,17 +755,14 @@ int smart_needs_folder(gz_open_arc *oa, const u8 *sel, const wchar_t *strip)
         const wchar_t *n = e->name;
         if (!n[0]) continue;
         if (sl) {
-            size_t k;
-            for (k = 0; k < sl && n[k] == strip[k]; k++) {}
-            if (k < sl || n[sl] != '/') continue;
+            if (!prefix_ieq(n, strip, sl) || n[sl] != '/') continue;
             n += sl + 1;
         }
         size_t l = 0;
         while (n[l] && n[l] != '/') l++;
         int dir = n[l] == '/' || e->is_dir;
         if (!top) { top = n; toplen = l; top_is_dir = dir; continue; }
-        if (l != toplen) return 1;
-        for (size_t k = 0; k < l; k++) if (n[k] != top[k]) return 1;
+        if (l != toplen || !prefix_ieq(n, top, l)) return 1;
         if (dir) top_is_dir = 1;
     }
     (void)top_is_dir;

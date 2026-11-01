@@ -190,10 +190,24 @@ static int name_is_ascii(const u8 *s, size_t n)
     return 1;
 }
 
+/* Longest UTF-8 sequence length found in s (1 = ASCII only). */
+static int utf8_max_seq(const u8 *s, size_t n)
+{
+    int m = 1;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] >= 0xF0) return 4;
+        if (s[i] >= 0xE0) m = 3;
+        else if (s[i] >= 0xC0 && m < 2) m = 2;
+    }
+    return m;
+}
+
 static int choose_codepage(gz_archive *a)
 {
     if (a->codepage != GZ_CP_AUTO) return a->codepage;
-    int legacy = 0, all_utf8 = 1;
+    int acp = gz_plat_acp();
+    int dbcs = acp == 932 || acp == 936 || acp == 949 || acp == 950;
+    int legacy = 0, all_utf8 = 1, wide = 0;
     for (u32 i = 0; i < a->n; i++) {
         gz_entry *e = &a->e[i];
         if (e->uni_len || e->utf8) continue;
@@ -201,9 +215,13 @@ static int choose_codepage(gz_archive *a)
         if (name_is_ascii(r, e->raw_len)) continue;
         legacy = 1;
         if (!gz_utf8_valid(r, e->raw_len)) { all_utf8 = 0; break; }
+        if (utf8_max_seq(r, e->raw_len) >= 3) wide = 1;
     }
-    if (legacy && all_utf8) return GZ_CP_UTF8;
-    return gz_plat_acp();
+    /* Many CP949/GBK/Big5 names are accidentally valid UTF-8 made of 2-byte
+     * sequences only ("캡처" = C4 B8 C3 B3). Real Hangul/CJK UTF-8 always uses
+     * 3-byte sequences, so on a DBCS system require one before choosing UTF-8. */
+    if (legacy && all_utf8 && (wide || !dbcs)) return GZ_CP_UTF8;
+    return acp;
 }
 
 /* Decode + normalise one name into out (capacity >= raw_len*2+4). Returns length. */

@@ -87,7 +87,14 @@ void   wcopy(wchar_t *d, const wchar_t *s, size_t cap);
 void   wcat(wchar_t *d, const wchar_t *s, size_t cap);
 int    wcmp(const wchar_t *a, const wchar_t *b);
 int    wicmp(const wchar_t *a, const wchar_t *b);
-wchar_t *wfmt(wchar_t *buf, const wchar_t *fmt, ...);          /* wsprintfW */
+/* wsprintfW into a buffer of known capacity (never overflows: wvsprintfW itself
+ * stops at 1024 characters, and the result is copied with a bound). */
+wchar_t *wfmtn(wchar_t *buf, size_t cap, const wchar_t *fmt, ...);
+#define GZ_BUFCAP(b) __builtin_choose_expr(                                         \
+        __builtin_types_compatible_p(__typeof__(b), __typeof__(&(b)[0])),          \
+        (size_t)1024, sizeof(b) >> 1 /* wchar_t is 2 bytes on Windows */)
+#define wfmt(b, ...) wfmtn((b), GZ_BUFCAP(b), __VA_ARGS__)
+int    prefix_ieq(const wchar_t *s, const wchar_t *p, size_t n);   /* ASCII case-folded */
 void   fmt_u64(wchar_t *o, u64 v);
 void   fmt_thousands(wchar_t *o, u64 v);
 void   fmt_size(wchar_t *o, u64 v);                            /* 1.5 MB    */
@@ -238,6 +245,8 @@ struct gz_job {
     volatile LONG wait_ms;    /* time spent waiting for the user */
     int finished, result;
     HANDLE thread;
+    u8 zone[1024];            /* archive's Zone.Identifier (Mark-of-the-Web) */
+    DWORD zone_n;
 };
 
 gz_open_arc *arc_open_path(const wchar_t *path, int codepage, volatile long *cancel, int *err);
@@ -248,6 +257,7 @@ void src_close(gz_src *s);
 gz_job *job_new(gz_open_arc *oa);
 void job_free(gz_job *j);
 void job_start(gz_job *j);
+int  job_out_path(gz_job *j, const gz_entry *e, wchar_t *out, size_t cap);  /* 1 ok, 0 n/a, -1 too long */
 const wchar_t *err_text(int code);
 int  smart_needs_folder(gz_open_arc *oa, const u8 *sel, const wchar_t *strip);
 

@@ -21,7 +21,7 @@ enum {
 #define ID_TREE 10
 #define ID_LIST 11
 
-typedef struct { u8 kind; i32 idx; } row;     /* kind 0 = "..", 1 = folder, 2 = file */
+typedef struct { u8 kind; u8 st; i32 idx; } row;   /* kind 0 = "..", 1 = folder, 2 = file; st = sort scratch */
 
 static struct {
     HWND hwnd, tb, path, tree, list, status, welcome;
@@ -49,7 +49,7 @@ static wchar_t s_txt[1024];
 
 typedef struct { wchar_t ext[16]; int icon; wchar_t type[64]; } ext_info;
 static ext_info s_ext[512];
-static int s_next;
+static int s_next, s_recycle;
 
 static const ext_info *ext_lookup(const wchar_t *base)
 {
@@ -65,7 +65,7 @@ static const ext_info *ext_lookup(const wchar_t *base)
     }
     e[n] = 0;
     for (int i = 0; i < s_next; i++) if (!wcmp(s_ext[i].ext, e)) return &s_ext[i];
-    ext_info *x = &s_ext[s_next < 511 ? s_next++ : 511];
+    ext_info *x = s_next < 512 ? &s_ext[s_next++] : &s_ext[s_recycle++ & 511];
     wcopy(x->ext, e, 16);
     SHFILEINFOW fi;
     __builtin_memset(&fi, 0, sizeof fi);
@@ -123,7 +123,12 @@ static int row_cmp(const row *a, const row *b)
         switch (M.sort_col) {
         case 1: r = u64cmp(x->usize, y->usize); break;
         case 2: r = u64cmp(x->csize, y->csize); break;
-        case 3: r = lstrcmpiW(ext_lookup(x->base)->type, ext_lookup(y->base)->type); break;
+        case 3: {   /* copy first: the second lookup may recycle the slot */
+            wchar_t t[64];
+            wcopy(t, ext_lookup(x->base)->type, 64);
+            r = lstrcmpiW(t, ext_lookup(y->base)->type);
+            break;
+        }
         case 4: r = u64cmp(entry_filetime(x), entry_filetime(y)); break;
         case 5: r = u64cmp(x->usize ? x->csize * 1000 / x->usize : 0, y->usize ? y->csize * 1000 / y->usize : 0); break;
         case 6: r = lstrcmpiW(gz_arc_method_name(ar, x), gz_arc_method_name(ar, y)); break;
@@ -163,6 +168,7 @@ static void push_row(u8 kind, i32 idx)
         M.caprows = nc;
     }
     M.rows[M.nrows].kind = kind;
+    M.rows[M.nrows].st = 0;
     M.rows[M.nrows].idx = idx;
     M.nrows++;
 }
@@ -932,9 +938,7 @@ static int collect_selection(u8 **mask, int *count)
         size_t fl = wlen(fn);
         for (u32 k = 0; k < a->n; k++) {
             const wchar_t *n = a->e[k].name;
-            size_t j;
-            for (j = 0; j < fl && n[j] == fn[j]; j++) {}
-            if (j == fl && (n[fl] == '/' || n[fl] == 0)) m[k] = 1;
+            if (prefix_ieq(n, fn, fl) && (n[fl] == '/' || n[fl] == 0)) m[k] = 1;
         }
     }
     if (!any) { mem_free(m); return 0; }
@@ -956,10 +960,15 @@ static void cmd_extract(int mode, int selected_only)
     SetFocus(M.list);
 }
 
-static void temp_root(wchar_t *o)
+/* %TEMP%\GogitZIP\<pid>: each running copy owns (and later deletes) only its own folder */
+static int temp_root(wchar_t *o)
 {
-    GetTempPathW(MAX_PATH, o);
-    wcat(o, L"GogitZIP", MAX_PATH);
+    DWORD n = GetTempPathW(MAX_PATH, o);
+    if (!n || n >= MAX_PATH - 32) { o[0] = 0; return 0; }
+    wchar_t t[32];
+    wfmt(t, L"GogitZIP\\%u", (unsigned)GetCurrentProcessId());
+    wcat(o, t, MAX_PATH);
+    return 1;
 }
 
 static void view_entry(u32 idx)
@@ -967,7 +976,7 @@ static void view_entry(u32 idx)
     gz_archive *a = M.oa->arc;
     gz_entry *e = &a->e[idx];
     wchar_t dir[MAX_PATH * 2], t[24];
-    temp_root(dir);
+    if (!temp_root(dir)) return;
     wfmt(t, L"\\%08x", GetTickCount() ^ (idx * 2654435761u));
     wcat(dir, t, MAX_PATH * 2);
     gz_job *j = job_new(M.oa);
@@ -982,8 +991,8 @@ static void view_entry(u32 idx)
     j->threads = 1;
     int r = run_job_with_progress(M.hwnd, j);
     if (r == GZ_OK && !j->nerr) {
-        wchar_t p[MAX_PATH * 2];
-        path_join(p, dir, e->base, GZ_COUNTOF(p));
+        wchar_t p[MAX_PATH * 4];
+        if (job_out_path(j, e, p, GZ_COUNTOF(p)) <= 0) path_join(p, dir, e->base, GZ_COUNTOF(p));
         if ((INT_PTR)ShellExecuteW(M.hwnd, NULL, p, NULL, dir, SW_SHOWNORMAL) <= 32)
             ShellExecuteW(M.hwnd, L"openas", p, NULL, dir, SW_SHOWNORMAL);
     } else if (r != GZ_E_CANCEL) {
@@ -1004,7 +1013,9 @@ static void delete_tree(const wchar_t *dir)
             if (!wcmp(fd.cFileName, L".") || !wcmp(fd.cFileName, L"..")) continue;
             wchar_t p[MAX_PATH * 2];
             path_join(p, dir, fd.cFileName, GZ_COUNTOF(p));
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) delete_tree(p);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                delete_tree(p);
+            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(p);   /* junction: unlink only */
             else { SetFileAttributesW(p, FILE_ATTRIBUTE_NORMAL); DeleteFileW(p); }
         } while (FindNextFileW(h, &fd));
         FindClose(h);
@@ -1194,7 +1205,21 @@ static LRESULT on_notify(NMHDR *nh)
             else { M.sort_col = c; M.sort_desc = 0; }
             update_header_arrows();
             if (M.oa) {
+                int i = -1;
+                for (u32 k = 0; k < M.nrows; k++) M.rows[k].st = 0;
+                while ((i = (int)SendMessageW(M.list, LVM_GETNEXTITEM, (WPARAM)i, LVNI_SELECTED)) >= 0 &&
+                       (u32)i < M.nrows)
+                    M.rows[i].st |= 1;
+                i = (int)SendMessageW(M.list, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_FOCUSED);
+                if (i >= 0 && (u32)i < M.nrows) M.rows[i].st |= 2;
                 sort_rows();
+                ListView_SetItemState(M.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+                for (u32 k = 0; k < M.nrows; k++) {
+                    if (!M.rows[k].st) continue;
+                    UINT stt = ((M.rows[k].st & 1) ? LVIS_SELECTED : 0) | ((M.rows[k].st & 2) ? LVIS_FOCUSED : 0);
+                    ListView_SetItemState(M.list, (int)k, stt, stt);
+                    if (M.rows[k].st & 2) ListView_EnsureVisible(M.list, (int)k, FALSE);
+                }
                 InvalidateRect(M.list, NULL, FALSE);
             }
             return 0;
@@ -1203,6 +1228,23 @@ static LRESULT on_notify(NMHDR *nh)
         case LVN_ODSTATECHANGED:
             SetTimer(M.hwnd, 7, 40, NULL);
             return 0;
+        case LVN_ODFINDITEMW: {
+            /* typing in the list jumps to the next name starting with the typed text */
+            NMLVFINDITEMW *fi = (NMLVFINDITEMW *)nh;
+            const wchar_t *q = fi->lvfi.psz;
+            if (!M.oa || !M.nrows || !q || !q[0] || !(fi->lvfi.flags & (LVFI_STRING | LVFI_PARTIAL))) return -1;
+            int n = (int)M.nrows, ql = lstrlenW(q);
+            int start = (fi->iStart >= 0 && fi->iStart < n) ? fi->iStart : 0;
+            for (int k = 0; k < n; k++) {
+                int r = (start + k) % n;
+                if (!(fi->lvfi.flags & LVFI_WRAP) && start + k >= n) break;
+                const wchar_t *nm = row_name(&M.rows[r]);
+                int nl = lstrlenW(nm);
+                if (nl >= ql && CompareStringW(LOCALE_USER_DEFAULT, NORM_IGNORECASE, nm, ql, q, ql) == CSTR_EQUAL)
+                    return r;
+            }
+            return -1;
+        }
         case NM_RCLICK: {
             POINT pt;
             GetCursorPos(&pt);
@@ -1366,8 +1408,11 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     case WM_DESTROY: {
         close_archive();
         wchar_t t[MAX_PATH];
-        temp_root(t);
-        delete_tree(t);
+        if (temp_root(t)) {
+            delete_tree(t);
+            wchar_t *b = (wchar_t *)path_base(t);   /* also drop %TEMP%\GogitZIP if now empty */
+            if (b > t) { b[-1] = 0; RemoveDirectoryW(t); }
+        }
         PostQuitMessage(0);
         return 0;
     }

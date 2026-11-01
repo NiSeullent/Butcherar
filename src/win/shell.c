@@ -101,6 +101,7 @@ int shell_register(int assoc)
 
     for (u32 i = 0; i < GZ_COUNTOF(k_exts); i++) {
         const wchar_t *e = k_exts[i];
+        int assoc_this = assoc;       /* per extension: never leaks into later ones */
         wfmt(k, CLS L"%s\\OpenWithProgids", e);
         set_str(k, PROGID, L"");
         if (win7) {
@@ -129,10 +130,10 @@ int shell_register(int assoc)
                 wfmt(k, GZ_REGKEY L"\\Win2kVerbs");
                 set_str(k, e, prog);
             } else {
-                assoc = 1;
+                assoc_this = 1;
             }
         }
-        if (assoc) {
+        if (assoc_this) {
             wchar_t prev[128];
             wfmt(k, CLS L"%s", e);
             if (get_str(HKEY_CURRENT_USER, k, NULL, prev, 128) && prev[0] && wicmp(prev, PROGID))

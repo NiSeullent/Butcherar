@@ -91,6 +91,14 @@ with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as z:
         cp_names.append(k)
 add_zip_case(p, names=cp_names)
 
+# 2b) CP949 names that happen to be valid UTF-8 ("캡처" = C4 B8 C3 B3) must stay CP949
+p = os.path.join(WORK, "cp949_ambiguous.zip")
+amb = ["캡처.png", "readme.txt"]
+with zipfile.ZipFile(p, "w") as z:
+    for k in amb:
+        z.writestr(RawInfo(k.encode("cp949")), k.encode())
+add_zip_case(p, names=amb)
+
 # 3) macOS style: decomposed Hangul (NFD) UTF-8 without flag, plus backslashes
 p = os.path.join(WORK, "macnfd.zip")
 nfd_names = []
@@ -211,6 +219,31 @@ with open(p, "wb") as f:
     f.write(gzip.compress(FILES["readme.txt"], mtime=0))
 cases.append((p, None, {0: ("multi.dat", b"first member\n" + FILES["readme.txt"])}))
 
+# 11) hostile tar headers: must terminate quickly without crashing
+def tar_header(name, size_field, typeflag=b"0"):
+    h = bytearray(512)
+    h[0:len(name)] = name
+    h[100:108] = b"0000644\0"
+    h[124:136] = size_field
+    h[136:148] = b"00000000000\0"
+    h[156:157] = typeflag
+    h[257:263] = b"ustar\0"
+    h[263:265] = b"00"
+    h[148:156] = b"        "
+    h[148:156] = b"%06o\0 " % sum(h)
+    return bytes(h)
+hostile = []
+p = os.path.join(WORK, "evil_pax.tar")           # pax record shorter than its own length field
+meta = b"1 path=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
+with open(p, "wb") as f:
+    f.write(tar_header(b"pax", b"%011o\0" % len(meta), b"x") + meta.ljust(512, b"\0"))
+    f.write(tar_header(b"ok.txt", b"%011o\0" % 2) + b"ok".ljust(512, b"\0") + bytes(1024))
+hostile.append(p)
+p = os.path.join(WORK, "evil_wrap.tar")          # base-256 size 2^64-512: offset wraps back to 0
+with open(p, "wb") as f:
+    f.write(tar_header(b"big.bin", b"\x80\x00\x00\x00" + b"\xff" * 6 + b"\xfe\x00") + bytes(2048))
+hostile.append(p)
+
 # ---------------- run ----------------
 fails = 0
 for path, pw, exp in cases:
@@ -241,6 +274,15 @@ for path, pw, exp in cases:
     info = r.stderr.decode().strip().splitlines()[0] if r.stderr else ""
     print("%-4s %-22s %4d entries  %s" % ("ok" if not bad else "FAIL", os.path.basename(path), len(exp), info))
     fails += bad != 0
+
+for hp in hostile:
+    try:
+        r = subprocess.run([BIN, hp, os.path.join(WORK, "out_hostile")], capture_output=True, timeout=20)
+        ok = r.returncode in (0, 1) and b"AddressSanitizer" not in r.stderr
+    except subprocess.TimeoutExpired:
+        ok = False
+    print("%-4s %-22s hostile input handled" % ("ok" if ok else "FAIL", os.path.basename(hp)))
+    fails += not ok
 
 # wrong password must be rejected cleanly
 wrong_src = os.path.join(WORK, "aes256.zip" if HAVE_7Z else "pyaes256.zip")

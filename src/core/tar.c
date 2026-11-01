@@ -99,8 +99,12 @@ static void pax_parse(tar_parser *t)
     const u8 *m = t->meta;
     while (i < n) {
         u32 len = 0, j = i;
-        while (j < n && m[j] >= '0' && m[j] <= '9') len = len * 10 + (m[j++] - '0');
-        if (j >= n || m[j] != ' ' || len == 0 || i + len > n) break;
+        while (j < n && m[j] >= '0' && m[j] <= '9') {
+            len = len * 10 + (m[j++] - '0');
+            if (len > n) break;                         /* cannot overflow u32 */
+        }
+        /* the record "<len> <key>=<value>\n" must cover its own length field */
+        if (j >= n || m[j] != ' ' || len <= j + 1 - i || len > n - i) break;
         const u8 *kv = m + j + 1;
         u32 kvn = i + len - (j + 1);
         if (kvn && kv[kvn - 1] == '\n') kvn--;
@@ -205,18 +209,14 @@ static int tp_header(tar_parser *t)
             u32 idx = t->next_idx;
             t->cur = -1;
             if (idx < t->a->n && t->sel[idx]) {
-                gz_entry *e = &t->a->e[idx];
-                if (e->is_link) {
-                    /* links are skipped (reported by the engine) */
-                } else {
-                    int r = t->out->open(t->out, idx);
-                    if (r == GZ_OK) {
-                        if (!is_file || size == 0) t->out->close(t->out, idx, GZ_OK);
-                        else { t->cur = (i32)idx; t->cur_status = GZ_OK; }
-                    } else if (r != GZ_E_SKIP && r != GZ_E_CANCEL) {
-                        /* open failed: error already reported by engine */
-                    } else if (r == GZ_E_CANCEL) return GZ_E_CANCEL;
-                }
+                /* links go through open() too, so the engine can report them as skipped */
+                int r = t->out->open(t->out, idx);
+                if (r == GZ_OK) {
+                    if (!is_file || size == 0) t->out->close(t->out, idx, GZ_OK);
+                    else { t->cur = (i32)idx; t->cur_status = GZ_OK; }
+                } else if (r == GZ_E_CANCEL) {
+                    return GZ_E_CANCEL;
+                }   /* other errors were already reported by the engine */
             }
         }
         t->next_idx++;
@@ -312,6 +312,8 @@ int gz_tar_open(gz_archive *a, gz_src *s)
             r = tp_header(&t);
             if (r) break;
         } else if (t.mode == 1 || t.mode == 3) {     /* skip data */
+            u64 rem = s->size - off;                  /* off <= size here */
+            if (t.left > rem || t.pad > rem - t.left) { r = GZ_E_TRUNC; break; }
             off += t.left + t.pad;
             t.pos = off;
             t.left = t.pad = 0;
@@ -364,10 +366,9 @@ static int pr_write(void *ctx, const u8 *p, size_t n)
 int gz_tar_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, gz_inflater *z)
 {
     gz_entry *e = &a->e[idx];
-    if (e->is_link) return GZ_E_SKIP;
-    int r = out->open(out, idx);
+    int r = out->open(out, idx);              /* the engine reports links as skipped */
     if (r) return r;
-    if (e->is_dir || !e->usize) return out->close(out, idx, GZ_OK);
+    if (e->is_dir || e->is_link || !e->usize) return out->close(out, idx, GZ_OK);
     plain_reader pr = { s, e->off, e->off + e->usize, out };
     gz_stream_io io = { pr_read, pr_write, &pr };
     int st = gz_store_run(z, &io);

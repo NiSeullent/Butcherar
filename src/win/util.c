@@ -28,13 +28,31 @@ void wcat(wchar_t *d, const wchar_t *s, size_t cap)
 int wcmp(const wchar_t *a, const wchar_t *b) { return gz_wcscmp(a, b); }
 int wicmp(const wchar_t *a, const wchar_t *b) { return lstrcmpiW(a, b); }
 
-wchar_t *wfmt(wchar_t *buf, const wchar_t *fmt, ...)
+wchar_t *wfmtn(wchar_t *buf, size_t cap, const wchar_t *fmt, ...)
 {
+    wchar_t tmp[1025];
     va_list ap;
     va_start(ap, fmt);
-    wvsprintfW(buf, fmt, ap);
+    int n = wvsprintfW(tmp, fmt, ap);
     va_end(ap);
+    if (n < 0) n = 0;
+    if (n > 1024) n = 1024;
+    tmp[n] = 0;
+    wcopy(buf, tmp, cap);
     return buf;
+}
+
+/* Same folding as the archive's folder hash (ASCII letters only), so a
+ * folder prefix matches every entry that was merged into that folder. */
+int prefix_ieq(const wchar_t *s, const wchar_t *p, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        wchar_t x = s[i], y = p[i];
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y || !x) return 0;
+    }
+    return 1;
 }
 
 void fmt_u64(wchar_t *o, u64 v)

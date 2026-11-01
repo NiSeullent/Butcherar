@@ -347,6 +347,20 @@ static LRESULT CALLBACK btn_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)old);
     } else if (m == WM_ERASEBKGND) {
         return 1;
+    } else if (m == WM_GETDLGCODE) {
+        /* Owner-drawn buttons are not "push buttons" to the dialog manager, so
+         * Enter would run the dialog's default button instead of the focused
+         * one (Tab to "Skip" + Enter must skip, not overwrite). Take Enter here. */
+        const MSG *msg = (const MSG *)lp;
+        LRESULT r = CallWindowProcW(old, h, m, wp, lp);
+        if (msg && msg->message == WM_KEYDOWN && msg->wParam == VK_RETURN) r |= DLGC_WANTMESSAGE;
+        return r;
+    } else if (m == WM_KEYDOWN && wp == VK_RETURN) {
+        if (IsWindowEnabled(h))
+            SendMessageW(GetParent(h), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(h), BN_CLICKED), (LPARAM)h);
+        return 0;
+    } else if (m == WM_CHAR && wp == '\r') {
+        return 0;
     }
     return CallWindowProcW(old, h, m, wp, lp);
 }

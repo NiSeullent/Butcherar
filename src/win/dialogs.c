@@ -73,8 +73,11 @@ static void dlg_setup(HWND h, dlg_base *b, int primary_id)
     if (!b->icon_px) b->icon_px = scale(32);
     EnumChildWindows(h, hook_child, primary_id);
     if (primary_id != IDCANCEL) SendMessageW(h, DM_SETDEFID, (WPARAM)primary_id, 0);
-    SendMessageW(h, WM_SETICON, ICON_SMALL, (LPARAM)gfx_app_icon(GetSystemMetrics(SM_CXSMICON)));
-    SendMessageW(h, WM_SETICON, ICON_BIG, (LPARAM)gfx_app_icon(GetSystemMetrics(SM_CXICON)));
+    static HICON s_ic_sm, s_ic_big;      /* loaded once, shared by every dialog */
+    if (!s_ic_sm) s_ic_sm = gfx_app_icon(GetSystemMetrics(SM_CXSMICON));
+    if (!s_ic_big) s_ic_big = gfx_app_icon(GetSystemMetrics(SM_CXICON));
+    SendMessageW(h, WM_SETICON, ICON_SMALL, (LPARAM)s_ic_sm);
+    SendMessageW(h, WM_SETICON, ICON_BIG, (LPARAM)s_ic_big);
     center_window(h);
 }
 
