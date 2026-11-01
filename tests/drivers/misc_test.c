@@ -184,7 +184,7 @@ static int cmd_fuzz(int argc, char **argv)
         u8 *in = dup_exact(work, m);
         /* output capacity: the true size, or a random smaller/larger one */
         size_t oc = cap;
-        if (strcmp(argv[2], "xhuff") && (rnd() % 4) == 0) oc = rnd() % (cap + 1);
+        if ((rnd() % 4) == 0) oc = rnd() % (cap + cap / 2 + 1);
         u8 *out = (u8 *)gz_malloc_exact(oc);
         size_t on = 0, iu = 0;
         int r = f(in, m, out, oc, &on, &iu);

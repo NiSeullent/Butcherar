@@ -20,17 +20,18 @@ static int lznt1_chunk(const u8 *ip, const u8 *ce, u8 *cs, u8 *oe, u8 **pop)
     int r = GZ_OK;
     while (ip < ce) {
         u32 flags = (u32)*ip++ | 0x100;         /* bit 8: end of this group of 8 tokens */
+        if (ip >= ce) break;                    /* flag byte without tokens ends the chunk */
         for (;;) {
             /* literals up to the next match flag */
             u32 run = (u32)__builtin_ctz(flags);
             if (run) {
                 size_t n = run < (size_t)(ce - ip) ? run : (size_t)(ce - ip);
+                if ((size_t)(op - cs) + n > CHUNK) { r = GZ_E_DATA; goto out; }
                 if (n > (size_t)(oe - op)) {     /* output full */
                     __builtin_memcpy(op, ip, (size_t)(oe - op));
                     op = oe;
                     goto out;
                 }
-                if ((size_t)(op - cs) + n > CHUNK) { r = GZ_E_DATA; goto out; }
                 if (oe - op >= 8 && ce - ip >= 8) gz_cp8(op, ip);
                 else for (size_t i = 0; i < n; i++) op[i] = ip[i];
                 op += n;

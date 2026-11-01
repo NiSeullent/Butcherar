@@ -1,9 +1,12 @@
 """Small block codecs: ADC, LZNT1, LZO1X (+ lzop .lzo files), LZFSE/LZVN, XPRESS plain / Huffman.
 
-References: lzop and lzfse command line tools, wimlib-imagex (XPRESS WIM chunks), and when
-installed: liblzo2 / liblzfse / libwim (differential fuzzing through tests/drivers/misc_ref.c),
-Samba's MS-XCA module (python3.12) and dissect.util. Encoders for ADC, LZNT1 and both XPRESS
-variants are written here from the specifications ([MS-XCA], libdmg's ADC).
+Encoders written here from the specifications ([MS-XCA], libdmg's ADC, Apple's LZVN opcode
+table, liblzo's LZO1X instruction set, lzop's file layout) make the module work without any
+reference tool. Each reference, when installed, adds checks: lzop and lzfse tools (or the pip
+modules lzfse / pyliblzfse, or liblzfse.so), wimlib-imagex (XPRESS WIM chunks), liblzo2 /
+liblzfse / libwim (differential fuzzing through tests/drivers/misc_ref.c), Samba's MS-XCA
+module (python3.12), dissect.util, and Wine + MinGW (ntdll's RtlDecompressBuffer for LZNT1,
+tests/drivers/misc_rtl.c).
 """
 import heapq, importlib.util, os, random, shutil, struct, subprocess, sys, tarfile, io
 
@@ -140,6 +143,11 @@ def lznt1_chunk(c):
                 i += 1
         out[fp] = flags
     return bytes(out)
+
+
+def lznt1_hdr(body, compressed=True):
+    """Chunk header for a chunk body of len(body) bytes."""
+    return ((0xb000 if compressed else 0x3000) | (len(body) - 1)).to_bytes(2, "little")
 
 
 def lznt1_compress(data, store=False):
@@ -321,6 +329,207 @@ def xhuff_compress(data, eof=True, cross=False, block=65536):
         if last:
             break
     return bytes(out)
+
+
+def lzvn_compress(data, kinds=None, nops=False, prefix=b""):
+    """LZVN with every instruction kind (Apple's lzvn_decode_base.c opcode layout).
+    prefix: bytes already decoded before this stream (earlier blocks), matches may use them.
+    kinds: set that collects the names of the opcodes emitted."""
+    kinds = set() if kinds is None else kinds
+    buf = prefix + data
+    m = Matcher(buf)
+    for k in range(len(prefix)):
+        m.insert(k)
+    out, lit = bytearray(), bytearray()
+    mlim = (10, 8, 6, 4)                    # longest sml_d/lrg_d/pre_d match for 0..3 literals
+    i, n, prev, ops = len(prefix), len(buf), 0, 0
+
+    def literals(keep):
+        while len(lit) > keep:
+            c = min(len(lit) - keep, 271)
+            kinds.add("lrg_l" if c >= 16 else "sml_l")
+            out.extend(bytes([0xe0, c - 16]) if c >= 16 else bytes([0xe0 | c]))
+            out.extend(lit[:c])
+            del lit[:c]
+
+    while i < n:
+        l, d = m.find(i, n, 65535, 600)
+        if l < 3:
+            m.insert(i)
+            lit.append(buf[i])
+            i += 1
+            continue
+        literals(3)
+        L = len(lit)
+        if d == prev and L == 0:            # previous distance, no literal: match opcodes only
+            mm = 0
+        elif d == prev:
+            mm = min(l, mlim[L])
+            kinds.add("pre_d")
+            out.append(L << 6 | (mm - 3) << 3 | 6)
+        elif d < 0x600:
+            mm = min(l, mlim[L])
+            kinds.add("sml_d")
+            out.extend(bytes([L << 6 | (mm - 3) << 3 | d >> 8, d & 0xff]))
+        elif d < 0x4000:
+            mm = min(l, 34)
+            kinds.add("med_d")
+            out.append(0xa0 | L << 3 | (mm - 3) >> 2)
+            out.extend((d << 2 | ((mm - 3) & 3)).to_bytes(2, "little"))
+        else:
+            mm = min(l, mlim[L])
+            kinds.add("lrg_d")
+            out.append(L << 6 | (mm - 3) << 3 | 7)
+            out.extend(d.to_bytes(2, "little"))
+        out.extend(lit)
+        lit.clear()
+        rest = l - mm
+        while rest:                         # the rest of the match: previous distance
+            c = min(rest, 271)
+            kinds.add("lrg_m" if c >= 16 else "sml_m")
+            out.extend(bytes([0xf0, c - 16]) if c >= 16 else bytes([0xf0 | c]))
+            rest -= c
+        prev = d
+        for k in range(i, i + l):
+            m.insert(k)
+        i += l
+        ops += 1
+        if nops and ops % 41 == 0:
+            kinds.add("nop")
+            out.append(0x0e if ops % 2 else 0x16)
+    literals(0)
+    return bytes(out + b"\x06" + bytes(7))
+
+
+def lzo1x_compress(data):
+    """LZO1X (lzo1x_9x.c instruction layout): first literal run, literal runs, M2, M3, M4 with
+    extended lengths, 1..3 literals carried in the low bits of the previous match."""
+    m = Matcher(data)
+    out, lit = bytearray(), bytearray()
+    i, n, last = 0, len(data), -1           # last: offset of the low-bits byte of the last match
+
+    def ext(v, mask):                       # length v in the instruction byte or extension bytes
+        if v <= mask:
+            return bytes([v]), b""
+        v -= mask
+        e = bytearray()
+        while v > 255:
+            e.append(0)
+            v -= 255
+        return b"\0", bytes(e + bytes([v]))
+
+    def literals():
+        t = len(lit)
+        if not t:
+            return
+        if last < 0 and not out and t <= 238:
+            out.append(17 + t)
+        elif t <= 3:
+            out[last] |= t
+        elif t <= 18:
+            out.append(t - 3)
+        else:
+            b0, e = ext(t - 3, 15)
+            out.extend(b0 + e)
+        out.extend(lit)
+        lit.clear()
+
+    while i < n:
+        l, d = m.find(i, n, 49151, 2000)
+        if l < 3 or (d > 0x4000 and l < 4):
+            m.insert(i)
+            lit.append(data[i])
+            i += 1
+            continue
+        literals()
+        if l <= 8 and d <= 0x800:
+            out.extend(bytes([(l - 1) << 5 | ((d - 1) & 7) << 2, (d - 1) >> 3]))
+            last = len(out) - 2
+        elif d <= 0x4000:
+            b0, e = ext(l - 2, 31)
+            out.extend(bytes([0x20 | b0[0]]) + e + ((d - 1) << 2).to_bytes(2, "little"))
+            last = len(out) - 2
+        else:
+            dd = d - 0x4000
+            b0, e = ext(l - 2, 7)
+            out.extend(bytes([0x10 | (dd >> 14 & 1) << 3 | b0[0]]) + e + ((dd & 0x3fff) << 2).to_bytes(2, "little"))
+            last = len(out) - 2
+        for k in range(i, i + l):
+            m.insert(k)
+        i += l
+    literals()
+    return bytes(out + b"\x11\0\0")
+
+
+def lzop_file(data, name=b"data.bin", flags=0x03000001, block=256 << 10, filt=0, mtime=0x5ee76200, level=5):
+    """An lzop file (format of lzop 1.04) whose blocks come from lzo1x_compress."""
+    import zlib
+    crc_h = flags & 0x1000
+    ck = (lambda b: zlib.crc32(b)) if crc_h else (lambda b: zlib.adler32(b))
+    h = struct.pack(">HHHBBI", 0x1040, 0x20a0, 0x0940, 1, level, flags | (0x800 if filt else 0))
+    if filt:
+        h += struct.pack(">I", filt)
+    h += struct.pack(">IIIB", 0o100644, mtime, 0, len(name)) + name
+    out = bytearray(b"\x89LZO\0\r\n\x1a\n" + h + struct.pack(">I", ck(h)))
+    for s in range(0, len(data), block):
+        raw = data[s:s + block]
+        f = bytearray(raw)
+        for k in range(len(f) - 1, filt - 1, -1) if filt else ():
+            f[k] = (f[k] - f[k - filt]) & 0xff     # lzop's delta filter, undone after decoding
+        z = lzo1x_compress(bytes(f))
+        stored = len(z) >= len(raw)
+        out += struct.pack(">II", len(raw), len(raw) if stored else len(z))
+        for bit, fn in ((1, zlib.adler32), (0x100, zlib.crc32)):
+            if flags & bit:
+                out += struct.pack(">I", fn(raw))
+        if not stored:
+            for bit, fn in ((2, zlib.adler32), (0x200, zlib.crc32)):
+                if flags & bit:
+                    out += struct.pack(">I", fn(z))
+        out += bytes(f) if stored else z
+    return bytes(out + b"\0\0\0\0")
+
+
+def lzfse_reference(t):
+    """(encode, decode) with Apple's reference LZFSE: the lzfse tool, the pip modules lzfse
+    or liblzfse (pyliblzfse), or liblzfse.so through ctypes. (None, None) when absent."""
+    if t.tool("lzfse"):
+        def enc(d):
+            fi, fo = t.path("lz.in"), t.path("lz.lzfse")
+            open(fi, "wb").write(d)
+            t.sh(["lzfse", "-encode", "-i", fi, "-o", fo])
+            return open(fo, "rb").read()
+
+        def dec(z, n):
+            fi, fo = t.path("lzd.lzfse"), t.path("lzd.out")
+            open(fi, "wb").write(z)
+            r = subprocess.run(["lzfse", "-decode", "-i", fi, "-o", fo], capture_output=True)
+            return open(fo, "rb").read() if r.returncode == 0 else None
+        return enc, dec
+    for mod in ("lzfse", "liblzfse"):
+        try:
+            lib = importlib.import_module(mod)
+            return lib.compress, lambda z, n: lib.decompress(z)
+        except Exception:
+            pass
+    try:
+        import ctypes
+        lib = ctypes.CDLL("liblzfse.so.1")
+        lib.lzfse_encode_buffer.restype = lib.lzfse_decode_buffer.restype = ctypes.c_size_t
+
+        def enc(d):
+            cap = len(d) + len(d) // 8 + 4096
+            out = ctypes.create_string_buffer(cap)
+            k = lib.lzfse_encode_buffer(out, ctypes.c_size_t(cap), d, ctypes.c_size_t(len(d)), None)
+            return out.raw[:k]
+
+        def dec(z, n):
+            out = ctypes.create_string_buffer(n + 1)
+            k = lib.lzfse_decode_buffer(out, ctypes.c_size_t(n + 1), z, ctypes.c_size_t(len(z)), None)
+            return out.raw[:k]
+        return enc, dec
+    except OSError:
+        return None, None
 
 
 # ---------------------------------------------------------------- container helpers
@@ -522,6 +731,55 @@ def run(t):
     expect_rc("lznt1", b"\xff\xbf\x00", 8192, (9,), "lznt1 chunk past input")
     over = b"\x02a" + (0x0fff).to_bytes(2, "little")         # literal, then a 4098-byte match
     expect_rc("lznt1", b"\x03\xb0" + over, 8192, (3,), "lznt1 match past chunk end")
+    expect_rc("lznt1", b"\x03\xb0" + over, 4099, (3,), "lznt1 match past chunk end, output full")
+    # literal + 4095-byte match fill the chunk; the group's next literal tokens overflow it
+    full = b"\x02a" + (4092).to_bytes(2, "little") + b"xyz"
+    expect_rc("lznt1", lznt1_hdr(full) + full, 4097, (3,), "lznt1 literals past chunk end, output full")
+    edge = [("flag byte ends chunk", lznt1_hdr(b"\0abcdefgh\x01") + b"\0abcdefgh\x01" + lznt1_hdr(b"\0XYZ") + b"\0XYZ",
+             b"abcdefgh".ljust(4096, b"\0") + b"XYZ"),
+            ("stored short chunk padding", lznt1_compress(b"abc" * 100, store=True) + lznt1_compress(b"next"),
+             (b"abc" * 100).ljust(4096, b"\0") + b"next")]
+    for label, z, d in edge:
+        check("lznt1", z, d, "lznt1 " + label, cap=65536)
+    # NTFS: a run of clusters may end one byte after the last chunk (Wine reports an error)
+    check("lznt1", lznt1_compress(b"tail" * 50) + b"\x01", b"tail" * 50, "lznt1 trailing odd byte", cap=65536)
+
+    # Windows semantics: ntdll's RtlDecompressBuffer under Wine (checked against Windows by
+    # Wine's own tests) must give the same bytes as ours, padding of short chunks included
+    wine_cc = shutil.which("i686-w64-mingw32-gcc") or shutil.which("x86_64-w64-mingw32-gcc")
+    if t.tool("wine") and wine_cc:
+        wd = t.path("wine")
+        os.makedirs(wd, exist_ok=True)
+        exe = os.path.join(wd, "misc_rtl.exe")
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        r = subprocess.run([wine_cc, "-O2", "-o", exe, os.path.join(root, "tests/drivers/misc_rtl.c")],
+                           capture_output=True)
+        d, txt = sample(60000, 13), dict(corpus)["text"][:70000]
+        big_cap = 1 << 17
+        # (label, stream, expected bytes or None = only compare with Wine, output capacity)
+        wcases = [("mixed", lznt1_compress(d), d, big_cap), ("text", lznt1_compress(txt), txt, big_cap),
+                  ("zeros", lznt1_compress(bytes(50000)), bytes(50000), big_cap),
+                  ("random", lznt1_compress(os.urandom(9000)), None, big_cap),
+                  ("short chunks", short + lznt1_compress(b"next") + short, None, big_cap),
+                  ("cut output", lznt1_compress(d), d[:5000], 5000)] + [e + (big_cap,) for e in edge]
+        jobs = []
+        for i, (label, z, dd, cap) in enumerate(wcases):
+            open(os.path.join(wd, "w%d.in" % i), "wb").write(z)
+            jobs.append("w%d.in w%d.out %d" % (i, i, cap))
+        open(os.path.join(wd, "jobs.txt"), "w").write("\n".join(jobs) + "\n")
+        try:
+            w = subprocess.run(["wine", "misc_rtl.exe", "jobs.txt"], cwd=wd, capture_output=True, timeout=180,
+                               env=dict(os.environ, WINEDEBUG="-all")) if r.returncode == 0 else None
+        except subprocess.TimeoutExpired:
+            w = None
+        st = w.stdout.decode(errors="replace").split() if w is not None and w.returncode == 0 else []
+        if len(st) == 2 * len(wcases):                  # else Wine is not usable here: skip
+            for i, (label, z, dd, cap) in enumerate(wcases):
+                ref = open(os.path.join(wd, "w%d.out" % i), "rb").read()
+                rc, ours, _ = dec("lznt1", z, cap)
+                ok = st[2 * i] == "status=00000000" and rc == 0 and ours == ref and (dd is None or ref == dd)
+                t.record(ok, "lznt1 %s = RtlDecompressBuffer (Wine)" % label,
+                         "%s ours rc=%d %d bytes, wine %d bytes" % (st[2 * i], rc, len(ours), len(ref)))
 
     # ---------------- XPRESS plain ----------------
     for name, d in corpus:
@@ -614,16 +872,50 @@ def run(t):
                      "%s sha ok %d/%d" % (r.stdout.decode().strip(), good, len(res)))
 
     # ---------------- LZFSE / LZVN ----------------
-    if t.tool("lzfse"):
-        def lzfse_enc(d):
-            fi, fo = t.path("lz.in"), t.path("lz.lzfse")
-            open(fi, "wb").write(d)
-            t.sh(["lzfse", "-encode", "-i", fi, "-o", fo])
-            return open(fo, "rb").read()
+    enc, refdec = lzfse_reference(t)
+    # hand-made streams: no reference tool needed
+    check("lzfse", b"bvx$", b"", "lzfse empty stream")
+    expect_rc("lzfse", b"bvxz\0\0\0\0", 16, (3,), "lzfse bad magic")
+    expect_rc("lzfse", b"bvxn" + struct.pack("<II", 0, 8) + b"\x06" + bytes(7) + b"bvx$", 16, (3,),
+              "lzfse empty lzvn block")
+    check("lzvn", b"\xe3abc\x00\x03\xf0\x00" + b"\x06" + bytes(7), (b"abc" * 8)[:22], "lzvn sml_d + lrg_m")
+    expect_rc("lzvn", b"\xf3\x06" + bytes(7), 64, (3,), "lzvn match without distance")
+    expect_rc("lzvn", b"\x40\x00a\x06" + bytes(7), 64, (3,), "lzvn sml_d distance 0")
+    expect_rc("lzvn", b"\x70\x00\x06" + bytes(7), 64, (3,), "lzvn undefined opcode")
+    expect_rc("lzvn", b"\xe3abc", 64, (9,), "lzvn missing end opcode")
+    expect_rc("lzvn", b"\xe3abc\x06" + bytes(6), 64, (9,), "lzvn cut end opcode")
+    check("lzvn", b"\x0e\x16\xe1z\x06" + bytes(7), b"z", "lzvn nops")
+    # LZVN from the encoder above: every opcode kind; the reference decoder must agree
+    vn_kinds = set()
+    for name, d in [("mixed", sample(120000, 31)), ("text", dict(corpus)["text"]), ("zeros", bytes(70000)),
+                    ("random", os.urandom(3000)), ("one", b"x")]:
+        vn = lzvn_compress(d, vn_kinds, nops=True)
+        check("lzvn", vn, d, "lzvn ours %s" % name, used=len(vn))
+        blk = b"bvxn" + struct.pack("<II", len(d), len(vn)) + vn + b"bvx$"
+        check("lzfse", blk, d, "lzfse bvxn ours %s" % name, used=len(blk))
+        if refdec:
+            t.record(refdec(blk, len(d)) == d, "reference lzfse decodes our lzvn %s" % name)
+        if name == "mixed":
+            fuzz_inputs["lzvn"] = (vn[:20000], len(d))
+    t.record(len(vn_kinds) == 9, "lzvn encoder used every opcode kind", " ".join(sorted(vn_kinds)))
+    # stored and LZVN blocks back to back: matches reach into earlier blocks
+    a, b2 = sample(5000, 40), sample(9000, 41)[:3000] + sample(5000, 40)[1000:4000]
+    vn = lzvn_compress(b2, prefix=a)
+    stitched = (b"bvx-" + struct.pack("<I", len(a)) + a + b"bvxn" + struct.pack("<II", len(b2), len(vn)) + vn +
+                b"bvx-" + struct.pack("<I", 3) + b"end" + b"bvx$")
+    check("lzfse", stitched, a + b2 + b"end", "lzfse stored + lzvn blocks")
+    if refdec:
+        t.record(refdec(stitched, len(a + b2) + 3) == a + b2 + b"end", "reference lzfse decodes stored + lzvn blocks")
+    expect_rc("lzfse", stitched[len(a) + 8:], len(b2) + 3, (3,), "lzfse lzvn distance before the stream start")
+
+    if enc:
+        a, b2 = sample(5000, 40), sample(100000, 41)
+        stitched = b"bvx-" + struct.pack("<I", len(a)) + a + enc(b2)[:-4] + b"bvx-" + struct.pack("<I", 3) + b"end" + b"bvx$"
+        check("lzfse", stitched, a + b2 + b"end", "lzfse stored + compressed blocks")
         lz_cases = [(n, d) for n, d in corpus if d] + [("s4095", sample(4095, 1)), ("s4096", sample(4096, 2)),
                                                          ("multi", big + sample(800000, 12)), ("rand200k", os.urandom(200000))]
         for name, d in lz_cases:
-            z = lzfse_enc(d)
+            z = enc(d)
             kinds = sorted(set(m.decode() for m, _, _ in lzfse_blocks(z)))
             check("lzfse", z, d, "lzfse %s (%s)" % (name, ",".join(kinds)), used=len(z))
             if b"bvx2" in [m for m, _, _ in lzfse_blocks(z)]:
@@ -641,26 +933,68 @@ def run(t):
                 expect_rc("lzfse", z[:-4], len(d), (9,), "lzfse missing end block")
             if name == "s4095":
                 fuzz_inputs["lzfse_vn"] = (z, len(d))
-                vn = [(p, sz) for m, p, sz in lzfse_blocks(z) if m == b"bvxn"][0]
-                fuzz_inputs["lzvn"] = (z[vn[0] + 12:vn[0] + vn[1]], len(d))
-        # stored blocks + a stream of several kinds of blocks back to back (matches cross blocks)
-        a, b2 = sample(5000, 40), sample(100000, 41)
-        raw = b"bvx-" + struct.pack("<I", len(a)) + a
-        z2 = lzfse_enc(b2)
-        stitched = raw + z2[:-4] + b"bvx-" + struct.pack("<I", 3) + b"end" + b"bvx$"
-        check("lzfse", stitched, a + b2 + b"end", "lzfse stored + compressed blocks")
-        check("lzfse", b"bvx$", b"", "lzfse empty stream")
-        expect_rc("lzfse", b"bvxz\0\0\0\0", 16, (3,), "lzfse bad magic")
-        expect_rc("lzfse", b"bvxn" + struct.pack("<II", 0, 8) + b"\x06" + bytes(7) + b"bvx$", 16, (3,),
-                  "lzfse empty lzvn block")
-        # LZVN opcodes
-        check("lzvn", b"\xe3abc\x00\x03\xf0\x00" + b"\x06" + bytes(7), (b"abc" * 8)[:22], "lzvn sml_d + lrg_m")
-        expect_rc("lzvn", b"\xf3\x06" + bytes(7), 64, (3,), "lzvn match without distance")
-        expect_rc("lzvn", b"\x70\x00\x06" + bytes(7), 64, (3,), "lzvn undefined opcode")
-        expect_rc("lzvn", b"\xe3abc", 64, (9,), "lzvn missing end opcode")
-        check("lzvn", b"\x0e\x16\xe1z\x06" + bytes(7), b"z", "lzvn nops")
-
+    else:
+        fuzz_inputs["lzfse_vn"] = (stitched, len(a + b2) + 3)
     # ---------------- LZO1X raw blocks + lzop files ----------------
+    # the encoder above (no reference tool needed); lzop -dc checks its files when present
+    for name, d in corpus + [("multi", big)]:
+        z = lzo1x_compress(d)
+        check("lzo", z, d, "lzo1x ours %s" % name, used=len(z))
+        if name == "mixed":
+            fuzz_inputs["lzo"] = (z[:12000], len(d))
+    check("lzo", b"\x11\0\0", b"", "lzo1x empty block")
+    check("lzo", b"\x12a\x11\0\0", b"a", "lzo1x first literal run of 1")
+    expect_rc("lzo", b"\x15abcd\x40\x01\x11\0\0", 64, (3,), "lzo1x M2 distance before start")
+    expect_rc("lzo", b"\x15abcd\x11\0", 64, (9,), "lzo1x cut end marker")
+    expect_rc("lzo", b"\x00" * 40, 1 << 16, (9,), "lzo1x run of zero length bytes")
+    z = lzo1x_compress(dict(corpus)["text"])
+    expect_rc("lzo", z + b"junk", len(dict(corpus)["text"]), (0,), "lzo1x input after the end marker")
+    r, out, used = dec("lzo", z + b"junk", len(dict(corpus)["text"]))
+    t.record(used == len(z), "lzo1x consumed bytes stop at the end marker", "used=%d of %d" % (used, len(z)))
+
+    text = b"".join(b"%d: lzop test line, gogi zip\n" % i for i in range(60000))
+    own = [("adler32 data", dict(), text), ("adler32 + crc32 both", dict(flags=0x03000303), text),
+           ("no checksum", dict(flags=0x03000000), text), ("crc32 header", dict(flags=0x03001101), text),
+           ("stored blocks", dict(block=64 << 10), os.urandom(200000)), ("empty", dict(), b""),
+           ("small blocks", dict(block=4096, flags=0x03000003), sample(100000, 60)),
+           ("filter 3", dict(filt=3), sample(150000, 61)), ("filter 1 stored", dict(filt=1), os.urandom(70000))]
+    for label, kw, d in own:
+        arc = t.path("own_%s.lzo" % label.replace(" ", "_"))
+        open(arc, "wb").write(lzop_file(d, **kw))
+        if t.tool("lzop"):
+            ref = subprocess.run(["lzop", "-dc", arc], capture_output=True).stdout
+            t.record(ref == d, "lzop -dc decodes our lzop file: %s" % label)
+        t.check_extract(arc, {"data.bin": d}, label="lzop ours " + label, expect_type="LZO")
+    r, typ, rows = t.listing(t.path("own_adler32_data.lzo"))
+    t.record(rows and rows[0]["usize"] == len(text) and rows[0]["method"] == "LZO1X",
+             "lzop listing size + method (ours)", str(rows[:1]))
+    zo = lzop_file(text, flags=0x03000303, block=32768)
+    for label, pos in (("data checksum", -40), ("header checksum", 20)):
+        z = bytearray(zo)
+        z[pos] ^= 0x10
+        arc = t.path("own_corrupt_%s.lzo" % label.replace(" ", "_"))
+        open(arc, "wb").write(z)
+        rr, rows, _ = t.extract(arc, env={"LSAN_OPTIONS": "suppressions=" + lsan})
+        t.record(rr.returncode in (0, 1) and (not rows or rows[0][0] != 0), "lzop corrupt %s reported" % label,
+                 str(rows))
+    rng = random.Random(6)
+    for i in range(16):
+        h = bytearray(zo[:rng.randrange(30, len(zo))])
+        for _ in range(rng.randrange(0, 4)):
+            h[rng.randrange(len(h))] ^= 1 << rng.randrange(8)
+        p = t.path("hostile_own_%d.lzo" % i)
+        open(p, "wb").write(h)
+        hostile(p)
+    hdr = len(lzop_file(b""))  - 4                                      # first block header
+    bad = bytearray(lzop_file(b"x" * 100))
+    bad[hdr:hdr + 8] = struct.pack(">II", 0x7fffffff, 0x10)           # absurd block size
+    p = t.path("hostile_bigblock.lzo")
+    open(p, "wb").write(bytes(bad))
+    hostile(p)
+    bad[hdr:hdr + 8] = struct.pack(">II", 0x3ffffff, 0x10)            # 64 MiB block, 16 bytes of data
+    p = t.path("hostile_bigblock2.lzo")
+    open(p, "wb").write(bytes(bad))
+    hostile(p)
     if t.tool("lzop"):
         def lzop(args, data, name="data.bin", stdin=False):
             fi, fo = t.path("lzsrc", name), t.path("lzop.lzo")
@@ -753,12 +1087,6 @@ def run(t):
             p = t.path("hostile_%d.lzo" % i)
             open(p, "wb").write(h)
             hostile(p)
-        bad = bytearray(zt[:80])
-        hdr = 9 + 2 + 2 + 2 + 1 + 1 + 4 + 4 + 4 + 4 + 1 + len("data.bin") + 4
-        bad[hdr:hdr + 8] = struct.pack(">II", 0x7fffffff, 0x10)       # absurd block size
-        p = t.path("hostile_bigblock.lzo")
-        open(p, "wb").write(bytes(bad))
-        hostile(p)
 
     # ---------------- differential fuzzing against reference libraries ----------------
     variants = [("-DHAVE_LZO", "-l:liblzo2.so.2"), ("-DHAVE_LZFSE", "-llzfse"), ("-DHAVE_WIM", "-l:libwim.so.15")]
@@ -846,7 +1174,7 @@ def run(t):
     if "sanitize" not in os.environ.get("HOST_CFLAGS", "") and t.verbose:
         d = sample(1 << 20, 99)
         for codec, fn in (("adc", adc_compress), ("lznt1", lznt1_compress), ("xpress", xpress_compress),
-                          ("xhuff", xhuff_compress)):
+                          ("xhuff", xhuff_compress), ("lzo", lzo1x_compress), ("lzvn", lzvn_compress)):
             p = t.path("bench.%s" % codec)
             open(p, "wb").write(fn(d))
             r = t.sh([drv, "bench", codec, p, str(len(d)), "300"], check=False)

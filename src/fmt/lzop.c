@@ -231,8 +231,8 @@ static void lzop_info(gz_src *s, gz_stream_info *inf, gz_ctx *c)
     if (h.mtime) { inf->mtime = h.mtime; inf->has_mtime = 1; }
     u64 total = 0, q = h.data;
     u32 fl = h.flags;
-    for (u32 nblk = 0; nblk < (1u << 24); nblk++) {
-        if (gz_cancelled(c)) return;
+    for (u32 nblk = 0;; nblk++) {
+        if (nblk >= (1u << 24) || gz_cancelled(c)) return;     /* size stays unknown */
         u8 bh[8];
         if (gz_src_read_exact(s, q, bh, 4)) return;
         u32 dlen = rd32be(bh);

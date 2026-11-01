@@ -261,10 +261,13 @@ static int fse_block(gz_lzfse_dec *d, const u8 *in, const u8 *p, const u8 *ie, u
     u8 *op = *pop;
     if (h.n_raw > (size_t)(oe - op)) return GZ_E_DATA;
 
-    fse_lit_table(h.freq + L_SYM + M_SYM + D_SYM, d->lit);
-    fse_val_table(L_ST, L_SYM, h.freq, l_bits, l_base, d->l);
-    fse_val_table(M_ST, M_SYM, h.freq + L_SYM, m_bits, m_base, d->m);
-    fse_val_table(D_ST, D_SYM, h.freq + L_SYM + M_SYM, d_bits, d_base, d->d);
+    /* tables only when used: a run of tiny hostile blocks stays cheap */
+    if (h.n_literals) fse_lit_table(h.freq + L_SYM + M_SYM + D_SYM, d->lit);
+    if (h.n_matches) {
+        fse_val_table(L_ST, L_SYM, h.freq, l_bits, l_base, d->l);
+        fse_val_table(M_ST, M_SYM, h.freq + L_SYM, m_bits, m_base, d->m);
+        fse_val_table(D_ST, D_SYM, h.freq + L_SYM + M_SYM, d_bits, d_base, d->d);
+    }
 
     /* literals: four interleaved FSE states, read backwards from the payload end */
     const u8 *lp = p + hs, *ls = lp + h.n_lit_payload, *buf = ls;
