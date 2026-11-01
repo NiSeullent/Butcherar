@@ -12,6 +12,8 @@
  *       using in_used (CHM style), or "wim" (each frame an independent WIM chunk).
  *   lzx_tool fuzz <in.lzxf> <wbits> <iterations> <seed> [wim]
  *       Decode corrupted copies (bit flips, truncation, random bytes); must not crash.
+ *   lzx_tool bench <in.lzxf> <wbits> <rounds> [wim]
+ *       Decode speed in memory (MB/s of output).
  *
  * .lzxf container: "LZXF" u32 nframes, then per frame u32 csize, u32 usize, data.
  */
@@ -19,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static u8 *read_file(const char *p, size_t *n)
 {
@@ -534,6 +537,34 @@ static int dec_main(int argc, char **argv)
     return r ? 1 : 0;
 }
 
+static int bench_main(int argc, char **argv)
+{
+    if (argc < 5) return 2;
+    frames f;
+    load_frames(argv[2], &f);
+    u32 wbits = (u32)atoi(argv[3]);
+    int rounds = atoi(argv[4]);
+    int wim = argc > 5 && !strcmp(argv[5], "wim");
+    gz_lzx_dec *d = gz_lzx_new(wbits, wim ? GZ_LZX_WIM : 0);
+    u64 total = 0;
+    for (u32 i = 0; i < f.n; i++) total += f.us[i];
+    struct timespec t0, t1;
+    double best = 1e9;
+    for (int k = 0; k < rounds; k++) {
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int r = decode_all(d, &f, f.buf, wim ? 2 : 0, 0, 0, 0, 0);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        if (r) { printf("BENCH error %d\n", r); return 1; }
+        double dt = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+        if (dt < best) best = dt;
+    }
+    printf("BENCH %.1f MB/s (%llu bytes, best of %d: %.3f s)\n", (double)total / best / 1e6,
+           (unsigned long long)total, rounds, best);
+    gz_lzx_free(d);
+    free(f.buf); free(f.cs); free(f.us); free(f.off);
+    return 0;
+}
+
 static int fuzz_main(int argc, char **argv)
 {
     if (argc < 6) return 2;
@@ -580,5 +611,6 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "enc")) return enc_main(argc, argv);
     if (!strcmp(argv[1], "dec")) return dec_main(argc, argv);
     if (!strcmp(argv[1], "fuzz")) return fuzz_main(argc, argv);
+    if (!strcmp(argv[1], "bench")) return bench_main(argc, argv);
     return 2;
 }

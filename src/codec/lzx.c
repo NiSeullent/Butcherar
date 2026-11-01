@@ -25,7 +25,7 @@
 #define PRE_SYMS  20
 #define MAXLEN    16
 
-#define MAIN_TB 10
+#define MAIN_TB 12
 #define LEN_TB  8
 #define ALN_TB  7
 #define PRE_TB  6
@@ -193,11 +193,16 @@ static int huff_build(huff *h, const u8 *lens, u32 n)
         u32 step = 1u << (tb - L);
         for (u32 k = 0; k < count[L]; k++, si++) {
             u16 e = (u16)((h->sorted[si] << 5) | L);
-            for (u32 j = 0; j < step; j++) t[p + j] = e;
+            if (step >= 4) {                  /* p is a multiple of step: 8-byte stores */
+                u64 v = e * 0x0001000100010001ull;
+                for (u32 j = 0; j < step; j += 4) wr64(t + p + j, v);
+            } else {
+                for (u32 j = 0; j < step; j++) t[p + j] = e;
+            }
             p += step;
         }
     }
-    for (; p < (1u << tb); p++) t[p] = 0;
+    if (p < (1u << tb)) __builtin_memset(t + p, 0, ((1u << tb) - p) * sizeof(u16));
     return 0;
 }
 
@@ -347,21 +352,32 @@ static int decode_run(gz_lzx_dec *d, bitrd *bp, u32 run_end)
     u32 R0 = d->R0, R1 = d->R1, R2 = d->R2;
     int err = GZ_OK;
 
+    const u16 *const mtab = hm->tab;
+#define MAIN_PEEK() mtab[(u32)(b.buf >> (BB_BITS - MAIN_TB))]
     while (op < end) {
         br_refill(&b);
-        u32 e = huff_peek(hm, br_peek16(&b));
-        if (GZ_UNLIKELY(!e)) { err = GZ_E_DATA; break; }
+        u32 e = MAIN_PEEK();
+        if (GZ_UNLIKELY(!(e & 31))) {
+            e = huff_slow(hm, br_peek16(&b));
+            if (!e) { err = GZ_E_DATA; break; }
+        }
         br_drop(&b, e & 31);
         u32 sym = e >> 5;
         if (sym < 256) {
             *op++ = (u8)sym;
 #if BB_BITS == 64
-            /* >= 33 bits left: one more symbol fits without a refill */
-            if (op < end) {
-                e = huff_peek(hm, br_peek16(&b));
-                if (e && (e >> 5) < 256) {
+            /* >= 33 bits left: two more primary-table literals fit without a refill
+             * (an entry e in 1..8191 is a literal) */
+            if (GZ_LIKELY(op + 2 <= end)) {
+                e = MAIN_PEEK();
+                if (e - 1 < 8191) {
                     br_drop(&b, e & 31);
                     *op++ = (u8)(e >> 5);
+                    e = MAIN_PEEK();
+                    if (e - 1 < 8191) {
+                        br_drop(&b, e & 31);
+                        *op++ = (u8)(e >> 5);
+                    }
                 }
             }
 #endif
@@ -414,6 +430,7 @@ static int decode_run(gz_lzx_dec *d, bitrd *bp, u32 run_end)
         copy_match(op, off, len);
         op += len;
     }
+#undef MAIN_PEEK
     d->brem -= (u32)(op - win) - d->pos;
     d->brem -= d->pend_len;                  /* the pending part belongs to this block too */
     d->pos = (u32)(op - win);
@@ -424,13 +441,36 @@ static int decode_run(gz_lzx_dec *d, bitrd *bp, u32 run_end)
 
 /* ---------------- E8 translation ---------------- */
 
+/* E8 bytes are searched a machine word at a time (zero-byte test on x ^ E8E8..) */
+#if BB_BITS == 64
+typedef u64 e8w;
+#  define E8_ONES 0x0101010101010101ull
+#  define E8_CTZ(z) ((u32)__builtin_ctzll(z) >> 3)
+GZ_INLINE e8w e8_load(const u8 *p) { return rd64(p); }
+#else
+typedef u32 e8w;
+#  define E8_ONES 0x01010101u
+#  define E8_CTZ(z) ((u32)__builtin_ctz(z) >> 3)
+GZ_INLINE e8w e8_load(const u8 *p) { return rd32(p); }
+#endif
+
+/* Undo the x86 CALL translation of one frame: E8 at frame position < n - 10 whose
+ * operand is in [-cur, tsize) holds an absolute target (libmspack / 7-Zip rules). */
 static void e8_translate(u8 *p, u32 n, u32 start, i32 tsize)
 {
     if (n <= 10) return;
-    const u8 *end = p + n - 10;
+    u8 *const end = p + n - 10;
     u8 *q = p;
-    while (q < end) {
-        if (*q != 0xE8) { q++; continue; }
+    for (;;) {
+        while (q + sizeof(e8w) <= end) {
+            e8w x = e8_load(q) ^ (E8_ONES * 0xE8);
+            e8w z = (x - E8_ONES) & ~x & (E8_ONES * 0x80);
+            if (z) { q += E8_CTZ(z); goto found; }
+            q += sizeof(e8w);
+        }
+        while (q < end && *q != 0xE8) q++;
+        if (q >= end) return;
+found:;
         i32 cur = (i32)(start + (u32)(q - p));
         i32 a = (i32)rd32(q + 1);
         if (a >= -cur && a < tsize) {
@@ -438,6 +478,7 @@ static void e8_translate(u8 *p, u32 n, u32 start, i32 tsize)
             wr32(q + 1, (u32)rel);
         }
         q += 5;
+        if (q >= end) return;
     }
 }
 
