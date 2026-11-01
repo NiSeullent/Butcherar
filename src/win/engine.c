@@ -50,6 +50,24 @@ void src_close(gz_src *s)
     s->h = 0;
 }
 
+static void src_free_heap(gz_src *s)
+{
+    src_close(s);
+    mem_free(s);
+}
+
+/* other files of a multi-volume set (owned by the archive) */
+static int src_open_volume(void *user, const gzch *name, gz_src **out)
+{
+    (void)user;
+    gz_src *s = (gz_src *)mem_alloc(sizeof(gz_src));
+    if (!s) return GZ_E_NOMEM;
+    if (!src_open(s, name)) { mem_free(s); return GZ_E_VOLUME; }
+    s->free = src_free_heap;
+    *out = s;
+    return GZ_OK;
+}
+
 gz_open_arc *arc_open_path(const wchar_t *path, int codepage, volatile long *cancel, int *err)
 {
     gz_open_arc *oa = (gz_open_arc *)mem_alloc(sizeof(gz_open_arc));
@@ -65,10 +83,16 @@ gz_open_arc *arc_open_path(const wchar_t *path, int codepage, volatile long *can
     if (!fl) wcopy(full, path, GZ_COUNTOF(full));
     oa->path = wdup(full);
     if (!src_open(&oa->src, full)) { *err = GZ_E_IO; arc_close(oa); return 0; }
-    gz_inflater *z = gz_inflater_new();
-    if (!z) { arc_close(oa); return 0; }
-    *err = gz_arc_open(&oa->arc, &oa->src, full, codepage, z, cancel);
-    gz_inflater_free(z);
+    gz_ctx *c = gz_ctx_new();
+    if (!c) { arc_close(oa); return 0; }
+    gz_open_opts oo;
+    __builtin_memset(&oo, 0, sizeof oo);
+    oo.codepage = codepage;
+    oo.file_name = oa->path;
+    oo.cancel = cancel;
+    oo.open_volume = src_open_volume;
+    *err = gz_arc_open(&oa->arc, &oa->src, &oo, c);
+    gz_ctx_free(c);
     if (*err) { arc_close(oa); return 0; }
     return oa;
 }
@@ -208,14 +232,14 @@ typedef struct {
     gz_out o;
     gz_job *j;
     gz_src src;
-    gz_inflater *z;
+    gz_ctx *c;
     HANDLE h;
     wchar_t path[MAX_PATH * 4];
     u32 idx;
     int opened;
     u64 pending;
-    u8 pw[1024];
-    size_t pwn;
+    wchar_t pw[256];
+    int has_pw;
     int pw_gen;
 } worker;
 
@@ -412,17 +436,19 @@ static int w_close(gz_out *o, u32 idx, int st)
     return GZ_OK;
 }
 
-/* Try one password encoding. Returns 1 when extraction should go ahead with it:
- * either it is right, or the entry fails for a reason that is not the password
- * (unsupported method, damaged header...), which extraction will then report. */
-static int try_password(worker *w, u32 idx, const u8 *p, size_t n, int gen)
+/* Try a password. Returns 1 when extraction should go ahead with it: either it is
+ * right, or the entry fails for a reason that is not the password (unsupported
+ * method, damaged header...), which extraction will then report. */
+static int try_password(worker *w, u32 idx, const wchar_t *pw, int gen)
 {
-    int rc = gz_arc_check_password(w->j->oa->arc, &w->src, idx, p, n);
+    w->c->password = pw;
+    int rc = gz_arc_check_password(w->j->oa->arc, &w->src, idx, w->c);
+    w->c->password = w->has_pw ? w->pw : 0;
     if (rc == GZ_E_PASSWORD) return 0;
-    if (n > sizeof w->pw) n = sizeof w->pw;
-    __builtin_memcpy(w->pw, p, n);
-    w->pwn = n;
+    if (pw != w->pw) wcopy(w->pw, pw, GZ_COUNTOF(w->pw));
+    w->has_pw = 1;
     w->pw_gen = gen;
+    w->c->password = w->pw;
     return 1;
 }
 
@@ -433,30 +459,25 @@ static int ensure_password(worker *w, u32 idx)
     gz_job *j = w->j;
     gz_open_arc *oa = j->oa;
     /* entries that cannot be opened with any password are not a password question */
-    if (gz_arc_check_password(oa->arc, &w->src, idx, 0, 0) != GZ_E_PASSWORD) {
-        w->pwn = 0;
+    w->c->password = 0;
+    if (gz_arc_check_password(oa->arc, &w->src, idx, w->c) != GZ_E_PASSWORD) {
+        w->c->password = w->has_pw ? w->pw : 0;
         return GZ_OK;
     }
+    w->c->password = w->has_pw ? w->pw : 0;
     int tried_gen = -1;
     for (;;) {
         if (j->cancel) return GZ_E_CANCEL;
         EnterCriticalSection(&j->ask_lock);
         int gen = j->pw_gen, have = j->pw_set;
-        u8 a[1024], u[1024];
-        size_t an = 0, un = 0;
-        if (have) {
-            an = j->pw_an < sizeof a ? j->pw_an : sizeof a;
-            un = j->pw_un < sizeof u ? j->pw_un : sizeof u;
-            if (j->pw_a) __builtin_memcpy(a, j->pw_a, an);
-            if (j->pw_u) __builtin_memcpy(u, j->pw_u, un);
-        }
+        wchar_t cand[256];
+        if (have) wcopy(cand, j->pw, GZ_COUNTOF(cand));
         LeaveCriticalSection(&j->ask_lock);
 
         if (have && gen != tried_gen) {
             tried_gen = gen;
-            if (w->pw_gen == gen && w->pwn && try_password(w, idx, w->pw, w->pwn, gen)) return GZ_OK;
-            if (try_password(w, idx, a, an, gen)) return GZ_OK;
-            if (un && try_password(w, idx, u, un, gen)) return GZ_OK;
+            if (w->pw_gen == gen && w->has_pw && try_password(w, idx, w->pw, gen)) return GZ_OK;
+            if (try_password(w, idx, cand, gen)) return GZ_OK;
         }
 
         EnterCriticalSection(&j->ask_lock);
@@ -474,10 +495,6 @@ static int ensure_password(worker *w, u32 idx)
             return GZ_E_CANCEL;
         }
         wcopy(j->pw, q.password, 256);
-        mem_free(j->pw_a);
-        mem_free(j->pw_u);
-        j->pw_a = w_to_mb(gz_plat_acp(), j->pw, &j->pw_an);
-        j->pw_u = w_to_mb(CP_UTF8, j->pw, &j->pw_un);
         j->pw_set = 1;
         j->pw_gen++;
         LeaveCriticalSection(&j->ask_lock);
@@ -499,7 +516,9 @@ static DWORD WINAPI worker_main(void *arg)
             sel = all;
         }
         if (sel) {
-            int r = gz_arc_extract_solid(a, &w->src, sel, &w->o, w->z, &j->cancel);
+            if (j->pw_set) { wcopy(w->pw, j->pw, GZ_COUNTOF(w->pw)); w->has_pw = 1; w->c->password = w->pw; }
+            else if (a->password) w->c->password = a->password;
+            int r = gz_arc_extract_solid(a, &w->src, sel, &w->o, w->c);
             if (r && r != GZ_E_CANCEL) add_error(j, path_base(j->oa->path), r);
         }
         mem_free(all);
@@ -511,22 +530,18 @@ static DWORD WINAPI worker_main(void *arg)
         if ((u32)k >= j->count || j->cancel) break;
         u32 idx = j->order[k];
         gz_entry *e = &a->e[idx];
-        const u8 *pw = 0;
-        size_t pwn = 0;
         if (e->enc && !e->is_dir) {
             if (ensure_password(w, idx)) break;
-            pw = w->pw;
-            pwn = w->pwn;
         }
         w->opened = 0;
-        int r = gz_arc_extract(a, &w->src, idx, &w->o, pw, pwn, w->z);
+        int r = gz_arc_extract(a, &w->src, idx, &w->o, w->c);
         if (r == GZ_E_PASSWORD && !w->opened && e->enc) {
             /* stale password (e.g. per-file passwords): ask again */
             EnterCriticalSection(&j->ask_lock);
             if (j->pw_gen == w->pw_gen) j->pw_set = 0, j->pw_gen++;
             LeaveCriticalSection(&j->ask_lock);
             if (!ensure_password(w, idx))
-                r = gz_arc_extract(a, &w->src, idx, &w->o, w->pw, w->pwn, w->z);
+                r = gz_arc_extract(a, &w->src, idx, &w->o, w->c);
         }
         if (r && r != GZ_E_SKIP && r != GZ_E_CANCEL && !w->opened) {
             add_error(j, e->name, r);
@@ -593,21 +608,22 @@ static DWORD WINAPI controller_main(void *arg)
         w->o.close = w_close;
         w->j = j;
         w->h = INVALID_HANDLE_VALUE;
-        w->z = gz_inflater_new();
-        if (!w->z || !src_open(&w->src, j->oa->path)) {
-            if (i == 0) add_error(j, j->oa->path, w->z ? GZ_E_IO : GZ_E_NOMEM);
-            if (w->z) gz_inflater_free(w->z);
-            w->z = 0;
+        w->c = gz_ctx_new();
+        if (w->c) w->c->cancel = &j->cancel;
+        if (!w->c || !src_open(&w->src, j->oa->path)) {
+            if (i == 0) add_error(j, j->oa->path, w->c ? GZ_E_IO : GZ_E_NOMEM);
+            gz_ctx_free(w->c);
+            w->c = 0;
             break;
         }
-        th[started] = CreateThread(NULL, 256 << 10, worker_main, w, 0, NULL);
-        if (!th[started]) { gz_inflater_free(w->z); src_close(&w->src); w->z = 0; break; }
+        th[started] = CreateThread(NULL, 512 << 10, worker_main, w, 0, NULL);
+        if (!th[started]) { gz_ctx_free(w->c); src_close(&w->src); w->c = 0; break; }
         started++;
     }
     if (started) WaitForMultipleObjects(started, th, TRUE, INFINITE);
     for (u32 i = 0; i < started; i++) CloseHandle(th[i]);
     for (u32 i = 0; ws && i < nw; i++) {
-        if (ws[i].z) { gz_inflater_free(ws[i].z); src_close(&ws[i].src); }
+        if (ws[i].c) { gz_ctx_free(ws[i].c); src_close(&ws[i].src); }
     }
     mem_free(ws);
     if (!j->test_only) fix_dir_times(j);
@@ -665,8 +681,6 @@ void job_free(gz_job *j)
     mem_free(j->order);
     mem_free(j->sel_owned);
     mem_free(j->zone);
-    mem_free(j->pw_a);
-    mem_free(j->pw_u);
     if (j->run_event) CloseHandle(j->run_event);
     if (j->thread) CloseHandle(j->thread);
     DeleteCriticalSection(&j->lock);

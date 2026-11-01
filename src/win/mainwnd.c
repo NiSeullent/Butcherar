@@ -131,7 +131,13 @@ static int row_cmp(const row *a, const row *b)
         }
         case 4: r = u64cmp(entry_filetime(x), entry_filetime(y)); break;
         case 5: r = u64cmp(x->usize ? x->csize * 1000 / x->usize : 0, y->usize ? y->csize * 1000 / y->usize : 0); break;
-        case 6: r = lstrcmpiW(gz_arc_method_name(ar, x), gz_arc_method_name(ar, y)); break;
+        case 6: {
+            wchar_t mx[96], my[96];
+            gz_arc_method(ar, x, mx, 96);
+            gz_arc_method(ar, y, my, 96);
+            r = lstrcmpiW(mx, my);
+            break;
+        }
         case 7: r = u64cmp(x->crc, y->crc); break;
         }
     } else if (M.sort_col == 4) {
@@ -1144,7 +1150,7 @@ static void list_dispinfo(NMLVDISPINFOW *di)
             }
             break;
         case 6:
-            wcopy(s_txt, gz_arc_method_name(a, e), 64);
+            gz_arc_method(a, e, s_txt, 64);
             if (e->enc == GZ_ENC_ZIPCRYPTO) wcat(s_txt, L" · ZipCrypto", 128);
             else if (e->enc == GZ_ENC_AES) {
                 wchar_t t[24];
@@ -1152,7 +1158,7 @@ static void list_dispinfo(NMLVDISPINFOW *di)
                 wcat(s_txt, t, 128);
             }
             break;
-        case 7: if (a->type == GZ_ARC_ZIP) wfmt(s_txt, L"%08X", e->crc); break;
+        case 7: if (e->has_crc && !e->is_dir) wfmt(s_txt, L"%08X", e->crc); break;
         }
     }
     it->pszText = s_txt;

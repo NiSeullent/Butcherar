@@ -94,11 +94,22 @@ wchar_t *wdup(const wchar_t *s)
 
 /* ---------------- code page hooks for the core ---------------- */
 
-int gz_plat_mb2wc(int cp, const u8 *s, int n, wchar_t *out, int cap)
+int gz_plat_mb2wc(int cp, const u8 *s, int n, gzch *out, int cap)
 {
     if (n <= 0) return 0;
     return MultiByteToWideChar((UINT)cp, 0, (LPCSTR)s, n, out, cap);
 }
+
+int gz_plat_wc2mb(int cp, const gzch *s, int n, u8 *out, int cap)
+{
+    if (n <= 0) return 0;
+    BOOL lossy = FALSE;
+    /* the default-char check is not allowed for UTF-8 (and is a Windows 2000+ flag set anyway) */
+    int r = WideCharToMultiByte((UINT)cp, 0, s, n, (LPSTR)out, cap, NULL, cp == 65001 ? NULL : &lossy);
+    return lossy ? 0 : r;
+}
+
+int gz_plat_case_fold(void) { return 1; }
 
 int gz_plat_acp(void)
 {

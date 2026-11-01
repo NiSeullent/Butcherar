@@ -2,8 +2,9 @@
  * 고깃ZIP - Deflate decode kernel template.
  *
  * Included from inflate.c with:
+ *   GZV_ATTR  target attribute for the kernel (e.g. __attribute__((target("avx2"))))
  *   GZV_FN    exported function name
- *   GZV_KIND  0 = x86 int, 1 = MMX, 2 = SSE, 3 = SSE2, 4 = AVX, 5 = AVX2+BMI2
+ *   GZV_KIND  0 = x86 int, 1 = MMX, 2 = SSE, 3 = SSE2, 4 = AVX, 5 = AVX2+BMI2, 6 = NEON
  *
  * Streaming design: input is pulled through gz_in_refill() whenever the read
  * pointer passes in_fast_end; output is pushed through gz_out_flush() whenever
@@ -19,13 +20,17 @@
 #  define GZV_W 4
 #elif GZV_KIND == 1
 #  define GZV_W 8
-#elif GZV_KIND <= 3
+#elif GZV_KIND <= 3 || GZV_KIND == 6
 #  define GZV_W 16
 #else
 #  define GZV_W 32
 #endif
 
-GZ_INLINE u8 *GZV_COPY_MATCH(u8 *out, u32 dist, u32 len)
+#ifndef GZV_ATTR
+#  define GZV_ATTR
+#endif
+
+GZV_ATTR GZ_INLINE u8 *GZV_COPY_MATCH(u8 *out, u32 dist, u32 len)
 {
     const u8 *src = out - dist;
     u8 *end = out + len;
@@ -40,6 +45,8 @@ GZ_INLINE u8 *GZV_COPY_MATCH(u8 *out, u32 dist, u32 len)
             _mm_storeu_ps((float *)out, _mm_loadu_ps((const float *)src));
 #elif GZV_KIND == 3
             _mm_storeu_si128((__m128i *)out, _mm_loadu_si128((const __m128i *)src));
+#elif GZV_KIND == 6
+            vst1q_u8(out, vld1q_u8(src));
 #else
             _mm256_storeu_si256((__m256i *)out, _mm256_loadu_si256((const __m256i *)src));
 #endif
@@ -55,6 +62,9 @@ GZ_INLINE u8 *GZV_COPY_MATCH(u8 *out, u32 dist, u32 len)
 #elif GZV_KIND == 3
         __m128i v = _mm_set1_epi8((char)b);
         do { _mm_storeu_si128((__m128i *)out, v); out += 16; } while (out < end);
+#elif GZV_KIND == 6
+        uint8x16_t v = vdupq_n_u8(b);
+        do { vst1q_u8(out, v); out += 16; } while (out < end);
 #else
         __m256i v = _mm256_set1_epi8((char)b);
         do { _mm256_storeu_si256((__m256i *)out, v); out += 32; } while (out < end);
@@ -80,7 +90,7 @@ GZ_INLINE u8 *GZV_COPY_MATCH(u8 *out, u32 dist, u32 len)
     return end;
 }
 
-int GZV_FN(gz_inflater *z, const gz_stream_io *io)
+GZV_ATTR int GZV_FN(gz_inflater *z, const gz_stream_io *io)
 {
     size_t bitbuf = 0;
     u32 bitcnt = 0;
@@ -98,7 +108,7 @@ int GZV_FN(gz_inflater *z, const gz_stream_io *io)
     u32 final;
     int err = GZ_OK;
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 #  define REFILL_FAST() do {                                   \
         bitbuf |= (size_t)rd64(in) << bitcnt;                   \
         in += (63 - bitcnt) >> 3;                               \
@@ -350,3 +360,4 @@ fail:
 #undef GZV_KIND
 #undef GZV_W
 #undef GZV_COPY_MATCH
+#undef GZV_ATTR

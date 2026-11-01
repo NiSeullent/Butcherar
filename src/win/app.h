@@ -28,12 +28,12 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
-#include "../core/base.h"
-#include "../core/arc.h"
-#include "../core/cpu.h"
-#include "../core/crc32.h"
-#include "../core/inflate.h"
-#include "../core/crypto.h"
+#include "base.h"
+#include "arc.h"
+#include "cpu.h"
+#include "crc32.h"
+#include "inflate.h"
+#include "crypto.h"
 #include "strings.h"
 #include "asset_ids.h"
 
@@ -228,8 +228,6 @@ struct gz_job {
     /* password */
     wchar_t pw[256];
     int pw_set, pw_gen;
-    u8 *pw_a; size_t pw_an;   /* ANSI encoding */
-    u8 *pw_u; size_t pw_un;   /* UTF-8 encoding */
     /* shared progress */
     CRITICAL_SECTION lock, ask_lock;
     volatile LONG cancel;

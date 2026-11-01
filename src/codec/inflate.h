@@ -4,15 +4,7 @@
 #ifndef GZ_INFLATE_H
 #define GZ_INFLATE_H
 #include "base.h"
-
-/* Pull/push stream callbacks.
- * read : fill up to cap bytes, *got = 0 means end of input. Return GZ_OK or error.
- * write: consume n bytes of output. Return GZ_OK or error (e.g. GZ_E_CANCEL). */
-typedef struct {
-    int (*read)(void *ctx, u8 *buf, u32 cap, u32 *got);
-    int (*write)(void *ctx, const u8 *buf, size_t n);
-    void *ctx;
-} gz_stream_io;
+#include "stream.h"
 
 #define GZ_WSIZE       65536u              /* window (Deflate64 needs 64K)  */
 #define GZ_OCHUNK      (1u << 20)          /* output flush granularity      */
@@ -68,6 +60,7 @@ int gz_inflate_sse(gz_inflater *z, const gz_stream_io *io);
 int gz_inflate_sse2(gz_inflater *z, const gz_stream_io *io);
 int gz_inflate_avx(gz_inflater *z, const gz_stream_io *io);
 int gz_inflate_avx2(gz_inflater *z, const gz_stream_io *io);
+int gz_inflate_neon(gz_inflater *z, const gz_stream_io *io);    /* AArch64 only */
 
 /* shared helpers used by the kernels */
 int gz_build_table(u32 *table, u32 tbits, u32 tsize, const u8 *lens, u32 nsym,

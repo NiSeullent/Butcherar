@@ -28,10 +28,18 @@ enum {
     CPUF_VAES    = 1u << 17,
     CPUF_SHA     = 1u << 18,
     CPUF_AVX512  = 1u << 19,   /* F+BW+VL and OS saves ZMM */
-    CPUF_AVX_HW  = 1u << 20    /* CPU has AVX but OS may not enable it */
+    CPUF_AVX_HW  = 1u << 20,   /* CPU has AVX but OS may not enable it */
+    /* AArch64 */
+    CPUF_NEON      = 1u << 21, /* Advanced SIMD (always on AArch64)     */
+    CPUF_ARM_CRC32 = 1u << 22, /* CRC32 instructions                    */
+    CPUF_ARM_PMULL = 1u << 23, /* 64-bit polynomial multiply            */
+    CPUF_ARM_AES   = 1u << 24, /* AESE/AESD                             */
+    CPUF_ARM_SHA1  = 1u << 25,
+    CPUF_ARM_SHA2  = 1u << 26
 };
 
-/* Dispatch tiers, lowest to highest. */
+/* Dispatch tiers, lowest to highest (x86). On AArch64 the tier is always 0 ("NEON")
+ * and the individual CPUF_ARM_* features select the kernels. */
 enum {
     GZ_TIER_X86 = 0,     /* i586 integer code                  */
     GZ_TIER_MMX,         /* Pentium MMX / Pentium II           */

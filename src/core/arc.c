@@ -1,40 +1,11 @@
 /*
- * 고깃ZIP - archive model: name decoding, folder tree, format detection
+ * 고깃ZIP - archive model: format detection, name decoding, folder tree,
+ * nested (layered) archives, per-thread contexts
  */
 #include "arc.h"
 #include "crc32.h"
 
-int gz_zip_probe(gz_src *s, const u8 *head, u32 headn);
-int gz_zip_open(gz_archive *a, gz_src *s);
-int gz_zip_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, const u8 *pw, size_t pwn, gz_inflater *z);
-int gz_zip_check_password(gz_archive *a, gz_src *s, u32 idx, const u8 *pw, size_t pwn);
-int gz_tar_probe(const u8 *head, u32 headn);
-int gz_tar_open(gz_archive *a, gz_src *s);
-int gz_tar_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, gz_inflater *z);
-int gz_gzip_open(gz_archive *a, gz_src *s, const wchar_t *file_name, gz_inflater *z, volatile long *cancel);
-int gz_gzip_extract(gz_archive *a, gz_src *s, gz_out *out, gz_inflater *z);
-int gz_tgz_extract(gz_archive *a, gz_src *s, const u8 *sel, gz_out *out, gz_inflater *z, volatile long *cancel);
-
-/* ---------------- small helpers ---------------- */
-
-size_t gz_wcslen(const wchar_t *s) { const wchar_t *p = s; while (*p) p++; return (size_t)(p - s); }
-int gz_wcscmp(const wchar_t *a, const wchar_t *b)
-{
-    while (*a && *a == *b) { a++; b++; }
-    return (int)(u16)*a - (int)(u16)*b;
-}
-static wchar_t lower_ascii(wchar_t c) { return (c >= 'A' && c <= 'Z') ? (wchar_t)(c + 32) : c; }
-int gz_wcsicmp_ascii(const wchar_t *a, const wchar_t *b)
-{
-    while (*a && lower_ascii(*a) == lower_ascii(*b)) { a++; b++; }
-    return (int)(u16)lower_ascii(*a) - (int)(u16)lower_ascii(*b);
-}
-const wchar_t *gz_wcsrchr(const wchar_t *s, wchar_t c)
-{
-    const wchar_t *r = 0;
-    for (; *s; s++) if (*s == c) r = s;
-    return r;
-}
+/* ---------------- arena / entries ---------------- */
 
 struct gz_arena_blk { gz_arena_blk *next; size_t used, cap; };
 
@@ -66,6 +37,7 @@ void gz_arena_free(gz_arena *a)
 int gz_arc_add_entry(gz_archive *a, gz_entry **pe)
 {
     if (a->n == a->cap) {
+        if (a->cap >= (1u << 28)) return GZ_E_LIMIT;
         u32 nc = a->cap ? a->cap * 2 : 256;
         gz_entry *ne = (gz_entry *)gz_realloc(a->e, (size_t)nc * sizeof(gz_entry));
         if (!ne) return GZ_E_NOMEM;
@@ -82,7 +54,7 @@ int gz_arc_add_entry(gz_archive *a, gz_entry **pe)
 
 int gz_arc_raw_append(gz_archive *a, const void *p, size_t n, u32 *off)
 {
-    if (a->raw_len + n > 0xffffffffu) return GZ_E_NOMEM;
+    if (a->raw_len + n > 0xffffffffu) return GZ_E_LIMIT;
     if (a->raw_len + n > a->raw_cap) {
         size_t nc = a->raw_cap ? a->raw_cap : 65536;
         while (nc < a->raw_len + n) nc *= 2;
@@ -92,94 +64,87 @@ int gz_arc_raw_append(gz_archive *a, const void *p, size_t n, u32 *off)
         a->raw_cap = nc;
     }
     *off = (u32)a->raw_len;
-    __builtin_memcpy(a->raw + a->raw_len, p, n);
+    if (n) __builtin_memcpy(a->raw + a->raw_len, p, n);
     a->raw_len += n;
     return GZ_OK;
 }
 
-u64 gz_unix_to_filetime(i64 t)
+int gz_arc_add_named(gz_archive *a, const void *name, u32 len, int ne, gz_entry **pe)
 {
-    return (u64)(t * 10000000LL + 116444736000000000LL);
+    u32 off;
+    int r = gz_arc_raw_append(a, name, len, &off);   /* before the entry: a->e may move */
+    if (r) return r;
+    r = gz_arc_add_entry(a, pe);
+    if (r) return r;
+    (*pe)->raw_off = off;
+    (*pe)->raw_len = len;
+    (*pe)->name_enc = (u8)ne;
+    return GZ_OK;
 }
 
-/* ---------------- UTF-8 / Hangul ---------------- */
-
-int gz_utf8_valid(const u8 *s, size_t n)
+void gz_arc_set_type(gz_archive *a, const char *name)
 {
-    size_t i = 0;
-    while (i < n) {
-        u8 c = s[i];
-        if (c < 0x80) { i++; continue; }
-        u32 need, cp;
-        if (c >= 0xC2 && c <= 0xDF) { need = 1; cp = c & 0x1f; }
-        else if (c >= 0xE0 && c <= 0xEF) { need = 2; cp = c & 0x0f; }
-        else if (c >= 0xF0 && c <= 0xF4) { need = 3; cp = c & 0x07; }
-        else return 0;
-        if (n - i <= need) return 0;               /* truncated sequence */
-        for (u32 k = 1; k <= need; k++) {
-            if ((s[i + k] & 0xC0) != 0x80) return 0;
-            cp = (cp << 6) | (s[i + k] & 0x3f);
-        }
-        if ((need == 2 && cp < 0x800) || (need == 3 && (cp < 0x10000 || cp > 0x10FFFF))) return 0;
-        if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
-        i += need + 1;
-    }
-    return 1;
+    u32 i = 0;
+    for (; name[i] && i + 1 < sizeof a->type_name; i++) a->type_name[i] = name[i];
+    a->type_name[i] = 0;
 }
 
-int gz_utf8_to_wide(const u8 *s, size_t n, wchar_t *out)
+/* ---------------- per-thread context ---------------- */
+
+gz_ctx *gz_ctx_new(void)
 {
-    int o = 0;
-    size_t i = 0;
-    while (i < n) {
-        u32 c = s[i], cp, need, k;
-        if (c < 0x80) { out[o++] = (wchar_t)c; i++; continue; }
-        if (c >= 0xC0 && c <= 0xDF) { cp = c & 0x1f; need = 1; }
-        else if (c >= 0xE0 && c <= 0xEF) { cp = c & 0x0f; need = 2; }
-        else if (c >= 0xF0 && c <= 0xF7) { cp = c & 0x07; need = 3; }
-        else { out[o++] = 0xFFFD; i++; continue; }
-        if (n - i <= need) { out[o++] = 0xFFFD; i++; continue; }
-        for (k = 1; k <= need; k++) {
-            if ((s[i + k] & 0xC0) != 0x80) break;
-            cp = (cp << 6) | (s[i + k] & 0x3f);
-        }
-        if (k <= need) { out[o++] = 0xFFFD; i++; continue; }
-        i += need + 1;
-        if (cp >= 0x110000) cp = 0xFFFD;
-        if (cp >= 0x10000) {
-            cp -= 0x10000;
-            out[o++] = (wchar_t)(0xD800 + (cp >> 10));
-            out[o++] = (wchar_t)(0xDC00 + (cp & 0x3ff));
-        } else {
-            out[o++] = (wchar_t)cp;
-        }
-    }
-    return o;
+    return (gz_ctx *)gz_alloc(sizeof(gz_ctx));
 }
 
-/* Compose conjoining Hangul jamo (as produced by macOS NFD) into syllables. */
-int gz_hangul_compose(wchar_t *s, int n)
+static void ctx_drop_views(gz_ctx *c)
 {
-    int o = 0;
-    for (int i = 0; i < n; i++) {
-        u32 c = (u16)s[i];
-        if (o > 0) {
-            u32 prev = (u16)s[o - 1];
-            /* L + V -> LV */
-            if (prev >= 0x1100 && prev <= 0x1112 && c >= 0x1161 && c <= 0x1175) {
-                s[o - 1] = (wchar_t)(0xAC00 + ((prev - 0x1100) * 21 + (c - 0x1161)) * 28);
-                continue;
-            }
-            /* LV + T -> LVT */
-            if (prev >= 0xAC00 && prev <= 0xD7A3 && ((prev - 0xAC00) % 28) == 0 &&
-                c >= 0x11A8 && c <= 0x11C2) {
-                s[o - 1] = (wchar_t)(prev + (c - 0x11A7));
-                continue;
-            }
-        }
-        s[o++] = (wchar_t)c;
+    while (c->view_n) gz_src_free(c->view_chain[--c->view_n]);
+    c->view_arc = 0;
+    c->view_raw = 0;
+}
+
+void gz_ctx_free(gz_ctx *c)
+{
+    if (!c) return;
+    ctx_drop_views(c);
+    for (int i = 0; i < GZ_SLOT_COUNT; i++)
+        if (c->slot[i] && c->slot_free[i]) c->slot_free[i](c->slot[i]);
+    if (c->z) gz_inflater_free(c->z);
+    if (c->buf) gz_free_big(c->buf, c->buf_cap);
+    gz_free(c);
+}
+
+gz_inflater *gz_ctx_inflater(gz_ctx *c)
+{
+    if (!c->z) c->z = gz_inflater_new();
+    return c->z;
+}
+
+u8 *gz_ctx_buffer(gz_ctx *c, u32 size)
+{
+    if (c->buf_cap < size) {
+        u32 cap = size < (256u << 10) ? (256u << 10) : size;
+        u8 *b = (u8 *)gz_alloc_big(cap);
+        if (!b) return 0;
+        if (c->buf) gz_free_big(c->buf, c->buf_cap);
+        c->buf = b;
+        c->buf_cap = cap;
     }
-    return o;
+    return c->buf;
+}
+
+void *gz_ctx_slot(gz_ctx *c, int slot, void *(*create)(void), void (*destroy)(void *))
+{
+    if (slot < 0 || slot >= GZ_SLOT_COUNT) return 0;
+    if (c->slot[slot] && c->slot_free[slot] != destroy) {
+        if (c->slot_free[slot]) c->slot_free[slot](c->slot[slot]);
+        c->slot[slot] = 0;
+    }
+    if (!c->slot[slot]) {
+        c->slot[slot] = create();
+        c->slot_free[slot] = destroy;
+    }
+    return c->slot[slot];
 }
 
 /* ---------------- name decoding & tree ---------------- */
@@ -242,11 +207,11 @@ static int vote_ambiguous(const u8 *s, size_t n, int acp)
     }
     if (!euc) {
         /* Shift-JIS does not line up with UTF-8 pairs: judge by what it decodes to */
-        wchar_t w[512];
+        gzch w[512];
         int m = n < 255 ? gz_plat_mb2wc(acp, s, (int)n, w, 512) : 0;
         l = 0;
         for (int k = 0; k < m; k++) {
-            u32 c = (u16)w[k];
+            u32 c = w[k];
             if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3040 && c <= 0x30FF)) l += 2;
         }
     }
@@ -257,13 +222,13 @@ static int choose_codepage(gz_archive *a)
 {
     if (a->codepage != GZ_CP_AUTO) return a->codepage;
     int acp = gz_plat_acp();
-    /* DBCS names that happen to be valid UTF-8 come from ZIPs made on CJK Windows.
-     * TAR/GZ names are raw bytes from Linux/macOS: UTF-8 whenever they are valid. */
-    int dbcs = a->type == GZ_ARC_ZIP && (acp == 932 || acp == 936 || acp == 949 || acp == 950);
+    /* DBCS names that happen to be valid UTF-8 come from archives made on CJK Windows.
+     * Names from Unix tools (TAR, CPIO, ...) are UTF-8 whenever they are valid. */
+    int dbcs = a->win_names && (acp == 932 || acp == 936 || acp == 949 || acp == 950);
     int legacy = 0, all_utf8 = 1, sure = 0, vu = 0, vl = 0;
     for (u32 i = 0; i < a->n; i++) {
         gz_entry *e = &a->e[i];
-        if (e->uni_len || e->utf8) continue;
+        if (e->uni_len || e->name_enc != GZ_NE_LEGACY) continue;
         const u8 *r = a->raw + e->raw_off;
         if (name_is_ascii(r, e->raw_len)) continue;
         legacy = 1;
@@ -278,22 +243,39 @@ static int choose_codepage(gz_archive *a)
     return acp;
 }
 
-/* Decode + normalise one name into out (capacity >= raw_len*2+4). Returns length. */
-static int decode_name(gz_archive *a, const u8 *r, size_t rn, int utf8, int cp, wchar_t *out)
+/* worst-case UTF-16 units needed for rn raw bytes (+ terminator and slack) */
+static size_t name_cap(size_t rn) { return rn * 2 + 4; }
+
+static int decode_raw(const u8 *r, size_t rn, int ne, int cp, gzch *out)
 {
-    int n;
-    if (utf8 || cp == GZ_CP_UTF8) {
-        n = gz_utf8_to_wide(r, rn, out);
+    int n = 0;
+    if (ne == GZ_NE_UTF16LE || ne == GZ_NE_UTF16BE) {
+        for (size_t i = 0; i + 1 < rn; i += 2) {
+            gzch c = ne == GZ_NE_UTF16LE ? rd16(r + i) : rd16be(r + i);
+            if (!c) break;
+            out[n++] = c;
+        }
+        return n;
+    }
+    if (ne == GZ_NE_UTF8 || (ne == GZ_NE_LEGACY && cp == GZ_CP_UTF8)) {
+        n = gz_utf8_to_utf16(r, rn, out);
     } else if (name_is_ascii(r, rn)) {
         for (n = 0; n < (int)rn; n++) out[n] = r[n];
     } else {
-        n = gz_plat_mb2wc(cp, r, (int)rn, out, (int)rn * 2 + 2);
+        if (ne == GZ_NE_OEM && cp == GZ_CP_UTF8) cp = gz_plat_oemcp();
+        n = gz_plat_mb2wc(cp, r, (int)rn, out, (int)name_cap(rn) - 2);
         if (n <= 0) {
-            n = gz_plat_mb2wc(437, r, (int)rn, out, (int)rn * 2 + 2);
+            n = gz_plat_mb2wc(437, r, (int)rn, out, (int)name_cap(rn) - 2);
             if (n <= 0) for (n = 0; n < (int)rn; n++) out[n] = r[n];   /* Latin-1 */
         }
     }
-    (void)a;
+    return n;
+}
+
+/* Decode + normalise one name into out (capacity >= name_cap(rn)). Returns length. */
+static int decode_name(const u8 *r, size_t rn, int ne, int cp, gzch *out)
+{
+    int n = decode_raw(r, rn, ne, cp, out);
     n = gz_hangul_compose(out, n);
 
     /* normalise separators and drop dangerous components */
@@ -309,7 +291,7 @@ static int decode_name(gz_archive *a, const u8 *r, size_t rn, int utf8, int cp, 
         if (o == 0 && len == 2 && out[st + 1] == ':') continue;     /* "C:" */
         if (o) out[o++] = '/';
         for (int k = 0; k < len; k++) {
-            wchar_t c = out[st + k];
+            gzch c = out[st + k];
             if (c < 0x20) c = '_';
             out[o++] = c;
         }
@@ -318,26 +300,28 @@ static int decode_name(gz_archive *a, const u8 *r, size_t rn, int utf8, int cp, 
     return o;
 }
 
-static u32 path_hash(const wchar_t *s, u32 n)
+static u32 path_hash(const gz_archive *a, const gzch *s, u32 n)
 {
     u32 h = 2166136261u;
     for (u32 i = 0; i < n; i++) {
-        wchar_t c = s[i];
-        if (c >= 'A' && c <= 'Z') c += 32;    /* case-insensitive like Windows */
-        h = (h ^ (u16)c) * 16777619u;
+        gzch c = s[i];
+        if (a->case_fold && c >= 'A' && c <= 'Z') c += 32;
+        h = (h ^ c) * 16777619u;
     }
     return h;
 }
 
-static int path_eq(const wchar_t *a, const wchar_t *b, u32 n)
+static int path_eq(const gz_archive *a, const gzch *x, const gzch *y, u32 n)
 {
     for (u32 i = 0; i < n; i++) {
-        wchar_t x = a[i], y = b[i];
-        if (x >= 'A' && x <= 'Z') x += 32;
-        if (y >= 'A' && y <= 'Z') y += 32;
-        if (x != y || !b[i]) return 0;
+        gzch p = x[i], q = y[i];
+        if (a->case_fold) {
+            if (p >= 'A' && p <= 'Z') p += 32;
+            if (q >= 'A' && q <= 'Z') q += 32;
+        }
+        if (p != q || !y[i]) return 0;
     }
-    return b[n] == 0;
+    return y[n] == 0;
 }
 
 static int fhash_insert(gz_archive *a, i32 idx);
@@ -357,26 +341,26 @@ static int fhash_grow(gz_archive *a)
 
 static int fhash_insert(gz_archive *a, i32 idx)
 {
-    const wchar_t *nm = a->f[idx].name;
-    u32 h = path_hash(nm, (u32)gz_wcslen(nm)) & (a->fhash_cap - 1);
+    const gzch *nm = a->f[idx].name;
+    u32 h = path_hash(a, nm, (u32)gz_wcslen(nm)) & (a->fhash_cap - 1);
     while (a->fhash[h] >= 0) h = (h + 1) & (a->fhash_cap - 1);
     a->fhash[h] = idx;
     return GZ_OK;
 }
 
-static i32 folder_find(gz_archive *a, const wchar_t *p, u32 n)
+static i32 folder_find(gz_archive *a, const gzch *p, u32 n)
 {
     if (!n) return 0;
-    u32 h = path_hash(p, n) & (a->fhash_cap - 1);
+    u32 h = path_hash(a, p, n) & (a->fhash_cap - 1);
     while (a->fhash[h] >= 0) {
         i32 i = a->fhash[h];
-        if (path_eq(p, a->f[i].name, n)) return i;
+        if (path_eq(a, p, a->f[i].name, n)) return i;
         h = (h + 1) & (a->fhash_cap - 1);
     }
     return -1;
 }
 
-static i32 folder_new(gz_archive *a, const wchar_t *p, u32 n, i32 parent)
+static i32 folder_new(gz_archive *a, const gzch *p, u32 n, i32 parent)
 {
     if (a->nf == a->capf) {
         u32 nc = a->capf ? a->capf * 2 : 64;
@@ -389,12 +373,12 @@ static i32 folder_new(gz_archive *a, const wchar_t *p, u32 n, i32 parent)
     i32 idx = (i32)a->nf++;
     gz_folder *f = &a->f[idx];
     __builtin_memset(f, 0, sizeof(*f));
-    wchar_t *nm = (wchar_t *)gz_arena_alloc(&a->names, (n + 1) * sizeof(wchar_t));
+    gzch *nm = (gzch *)gz_arena_alloc(&a->names, (n + 1) * sizeof(gzch));
     if (!nm) return -1;
-    __builtin_memcpy(nm, p, n * sizeof(wchar_t));
+    if (n) __builtin_memcpy(nm, p, n * sizeof(gzch));
     nm[n] = 0;
     f->name = nm;
-    const wchar_t *sl = gz_wcsrchr(nm, '/');
+    const gzch *sl = gz_wcsrchr(nm, '/');
     f->base = sl ? sl + 1 : nm;
     f->parent = parent;
     f->first_sub = f->first_file = f->entry = -1;
@@ -409,12 +393,11 @@ static i32 folder_new(gz_archive *a, const wchar_t *p, u32 n, i32 parent)
 }
 
 /* Find or create the folder chain for path p[0..n) */
-static i32 folder_get(gz_archive *a, const wchar_t *p, u32 n)
+static i32 folder_get(gz_archive *a, const gzch *p, u32 n)
 {
     if (!n) return 0;
     i32 f = folder_find(a, p, n);
     if (f >= 0) return f;
-    /* walk components from the start */
     i32 parent = 0;
     u32 i = 0;
     while (i <= n) {
@@ -431,6 +414,29 @@ static i32 folder_get(gz_archive *a, const wchar_t *p, u32 n)
     return parent;
 }
 
+static void decode_comment(gz_archive *a)
+{
+    a->comment = 0;
+    if (!a->comment_raw || !a->comment_len) return;
+    u32 cl = a->comment_len;
+    gzch *c = (gzch *)gz_arena_alloc(&a->names, ((size_t)cl * 2 + 4) * sizeof(gzch));
+    if (!c) return;
+    int n;
+    const u8 *r = a->comment_raw;
+    if (a->comment_enc != GZ_NE_LEGACY) {
+        n = decode_raw(r, cl, a->comment_enc, a->used_cp, c);
+    } else if (gz_utf8_valid(r, cl) && !name_is_ascii(r, cl)) {
+        n = gz_utf8_to_utf16(r, cl, c);
+    } else if (name_is_ascii(r, cl)) {
+        for (n = 0; n < (int)cl; n++) c[n] = r[n];
+    } else {
+        n = gz_plat_mb2wc(a->used_cp == GZ_CP_UTF8 ? gz_plat_acp() : a->used_cp, r, (int)cl, c, (int)cl * 2 + 2);
+        if (n < 0) n = 0;
+    }
+    c[n] = 0;
+    a->comment = c;
+}
+
 int gz_arc_build_tree(gz_archive *a)
 {
     gz_arena_free(&a->names);
@@ -443,38 +449,37 @@ int gz_arc_build_tree(gz_archive *a)
     a->has_enc = 0;
     a->any_utf8 = a->any_legacy = 0;
     if (fhash_grow(a)) return GZ_E_NOMEM;
-    if (folder_new(a, L"", 0, -1) != 0) return GZ_E_NOMEM;
+    if (folder_new(a, u"", 0, -1) != 0) return GZ_E_NOMEM;
 
     a->used_cp = choose_codepage(a);
     if (!gz_plat_cp_valid(a->used_cp) && a->used_cp != GZ_CP_UTF8) a->used_cp = gz_plat_oemcp();
 
     size_t tmpcap = 1024;
-    wchar_t *tmp = (wchar_t *)gz_alloc(tmpcap * sizeof(wchar_t));
+    gzch *tmp = (gzch *)gz_alloc(tmpcap * sizeof(gzch));
     if (!tmp) return GZ_E_NOMEM;
     i32 last_folder = 0;
     u32 last_len = 0;
-    const wchar_t *last_name = 0;
+    const gzch *last_name = 0;
 
     for (u32 i = 0; i < a->n; i++) {
         gz_entry *e = &a->e[i];
         const u8 *r;
         size_t rn;
-        int utf8;
-        if (e->uni_len) { r = a->raw + e->uni_off; rn = e->uni_len; utf8 = 1; }
-        else { r = a->raw + e->raw_off; rn = e->raw_len; utf8 = e->utf8; }
-        if (utf8 || !name_is_ascii(r, rn)) {
-            if (utf8) a->any_utf8 = 1; else a->any_legacy = 1;
-        }
-        if (rn * 2 + 4 > tmpcap) {
+        int ne;
+        if (e->uni_len) { r = a->raw + e->uni_off; rn = e->uni_len; ne = GZ_NE_UTF8; }
+        else { r = a->raw + e->raw_off; rn = e->raw_len; ne = e->name_enc; }
+        if (ne == GZ_NE_LEGACY && !name_is_ascii(r, rn)) a->any_legacy = 1;
+        else if (ne == GZ_NE_UTF8 && !name_is_ascii(r, rn)) a->any_utf8 = 1;
+        if (name_cap(rn) > tmpcap) {
             gz_free(tmp);
-            tmpcap = rn * 2 + 64;
-            tmp = (wchar_t *)gz_alloc(tmpcap * sizeof(wchar_t));
+            tmpcap = name_cap(rn) + 64;
+            tmp = (gzch *)gz_alloc(tmpcap * sizeof(gzch));
             if (!tmp) return GZ_E_NOMEM;
         }
-        int n = decode_name(a, r, rn, utf8, a->used_cp, tmp);
-        wchar_t *nm = (wchar_t *)gz_arena_alloc(&a->names, ((size_t)n + 1) * sizeof(wchar_t));
+        int n = decode_name(r, rn, ne, a->used_cp, tmp);
+        gzch *nm = (gzch *)gz_arena_alloc(&a->names, ((size_t)n + 1) * sizeof(gzch));
         if (!nm) { gz_free(tmp); return GZ_E_NOMEM; }
-        __builtin_memcpy(nm, tmp, ((size_t)n + 1) * sizeof(wchar_t));
+        __builtin_memcpy(nm, tmp, ((size_t)n + 1) * sizeof(gzch));
         e->name = nm;
         e->folder = -1;
         e->next = -1;
@@ -491,7 +496,7 @@ int gz_arc_build_tree(gz_archive *a)
             e->base = a->f[f].base;
             continue;
         }
-        const wchar_t *sl = gz_wcsrchr(nm, '/');
+        const gzch *sl = gz_wcsrchr(nm, '/');
         u32 plen = sl ? (u32)(sl - nm) : 0;
         e->base = sl ? sl + 1 : nm;
         i32 f;
@@ -512,76 +517,222 @@ int gz_arc_build_tree(gz_archive *a)
         a->f[f].first_file = (i32)i;
         a->f[f].nfiles++;
         a->nfiles++;
-        a->total_usize += e->usize;
-        a->total_csize += e->csize;
+        if (e->usize != GZ_SIZE_UNKNOWN) a->total_usize += e->usize;
+        if (e->csize != GZ_SIZE_UNKNOWN) a->total_csize += e->csize;
     }
     a->ndirs = a->nf - 1;
     gz_free(tmp);
-
-    if (a->comment_raw && a->comment_len) {
-        wchar_t *c = (wchar_t *)gz_arena_alloc(&a->names, ((size_t)a->comment_len * 2 + 4) * sizeof(wchar_t));
-        if (c) {
-            int n;
-            if (gz_utf8_valid(a->comment_raw, a->comment_len) && !name_is_ascii(a->comment_raw, a->comment_len))
-                n = gz_utf8_to_wide(a->comment_raw, a->comment_len, c);
-            else if (name_is_ascii(a->comment_raw, a->comment_len)) {
-                for (n = 0; n < (int)a->comment_len; n++) c[n] = a->comment_raw[n];
-            } else {
-                n = gz_plat_mb2wc(a->used_cp == GZ_CP_UTF8 ? gz_plat_acp() : a->used_cp,
-                                  a->comment_raw, (int)a->comment_len, c, (int)a->comment_len * 2 + 2);
-                if (n < 0) n = 0;
-            }
-            c[n] = 0;
-            a->comment = c;
-        }
-    }
+    decode_comment(a);
     return GZ_OK;
 }
 
-/* ---------------- public API ---------------- */
+/* ---------------- layered views ---------------- */
 
-int gz_arc_open(gz_archive **out, gz_src *src, const wchar_t *file_name, int codepage,
-                gz_inflater *z, volatile long *cancel)
+/* Source to read archive a's entries from, given the caller's outer file. */
+gz_src *gz_arc_layer_src(gz_archive *a, gz_src *outer, gz_ctx *c)
 {
-    u8 head[512];
-    u32 got = 0;
-    *out = 0;
-    __builtin_memset(head, 0, sizeof head);
-    int r = src->read_at(src, 0, head, sizeof head, &got);
-    if (r) return r;
-
-    gz_archive *a = (gz_archive *)gz_alloc(sizeof(gz_archive));
-    if (!a) return GZ_E_NOMEM;
-    a->codepage = codepage;
-    a->src_size = src->size;
-
-    if (got >= 2 && head[0] == 0x1f && head[1] == 0x8b) {
-        r = gz_gzip_open(a, src, file_name, z, cancel);
-    } else if (got >= 4 && head[0] == 'P' && head[1] == 'K' &&
-               (head[2] == 3 || head[2] == 5 || head[2] == 7)) {
-        r = gz_zip_open(a, src);
-    } else if (gz_tar_probe(head, got)) {
-        r = gz_tar_open(a, src);
-    } else {
-        r = gz_zip_open(a, src);        /* SFX or zip with prefix data */
-        if (r) r = GZ_E_FORMAT;
+    if (!a->parent) return outer;
+    if (c->view_arc == a && c->view_raw == outer && c->view_n) return c->view_chain[c->view_n - 1];
+    ctx_drop_views(c);
+    /* collect the chain from the outermost archive inwards */
+    gz_archive *chain[8];
+    u32 depth = 0;
+    for (gz_archive *x = a; x->parent && depth < 8; x = x->parent) chain[depth++] = x;
+    gz_src *s = outer;
+    for (u32 i = depth; i-- > 0;) {
+        gz_archive *child = chain[i], *par = child->parent;
+        gz_src *v = par->fmt->view ? par->fmt->view(par, s, child->parent_idx) : 0;
+        if (!v) { ctx_drop_views(c); return 0; }
+        c->view_chain[c->view_n++] = v;
+        s = v;
     }
-    if (!r) r = gz_arc_build_tree(a);
-    if (r) { gz_arc_close(a); return r; }
-    *out = a;
-    return GZ_OK;
+    c->view_arc = a;
+    c->view_raw = outer;
+    return s;
 }
 
-void gz_arc_close(gz_archive *a)
+/* ---------------- open ---------------- */
+
+#define HEAD_SIZE 65536u
+#define MAX_DEPTH 4
+
+static int open_level(gz_archive **out, gz_src *src, const gz_open_opts *o, gz_ctx *c, int depth,
+                      gz_archive *parent, u32 parent_idx);
+
+static void probe_all(gz_src *src, const u8 *head, u32 got, int *score, int nf)
+{
+    for (int i = 0; i < nf; i++) {
+        const gz_format *f = gz_formats[i];
+        score[i] = (f->probe && f->open) ? f->probe(src, head, got) : 0;
+        if (score[i] < 0) score[i] = 0;
+        if (score[i] > 100) score[i] = 100;
+    }
+}
+
+static void arc_free(gz_archive *a)
 {
     if (!a) return;
+    if (a->fmt && a->fmt->close) a->fmt->close(a);
     gz_free(a->e);
     gz_free(a->f);
     gz_free(a->raw);
     gz_free(a->fhash);
     gz_free(a->comment_raw);
+    gz_free(a->password);
+    for (u32 i = 0; i < a->nvols; i++) gz_src_free(a->vols[i]);
+    gz_free(a->vols);
     gz_arena_free(&a->names);
     gz_free(a);
+}
+
+/* Pick the entry of a container that should be opened automatically. */
+static int descend_candidate(gz_archive *a)
+{
+    i32 pick = -1;
+    for (u32 i = 0; i < a->n; i++) {
+        const gz_entry *e = &a->e[i];
+        if (e->is_dir || e->is_aux) continue;
+        if (pick >= 0) return -1;          /* more than one: let the user choose */
+        pick = (i32)i;
+    }
+    return pick;
+}
+
+static int try_format(gz_archive **out, const gz_format *f, gz_src *src, const gz_open_opts *o,
+                      gz_ctx *c, int depth, gz_archive *parent, u32 parent_idx)
+{
+    gz_archive *a = (gz_archive *)gz_alloc(sizeof(gz_archive));
+    if (!a) return GZ_E_NOMEM;
+    a->fmt = f;
+    a->codepage = o->codepage;
+    a->src_size = src->size;
+    a->case_fold = gz_plat_case_fold();
+    a->parent = parent;
+    a->parent_idx = parent_idx;
+    gz_arc_set_type(a, f->name);
+    int r = f->open(a, src, o, c);
+    if (!r) r = gz_arc_build_tree(a);
+    if (r) {
+        a->parent = 0;
+        arc_free(a);
+        return r;
+    }
+    /* disk images / partition maps: open the file system inside */
+    if ((f->flags & GZ_FMT_CONTAINER) && !(o->flags & GZ_OPEN_NO_DESCEND) && depth < MAX_DEPTH && f->view) {
+        int pick = descend_candidate(a);
+        if (pick >= 0) {
+            gz_src *v = f->view(a, src, (u32)pick);
+            if (v) {
+                gz_archive *child = 0;
+                int cr = open_level(&child, v, o, c, depth + 1, a, (u32)pick);
+                gz_src_free(v);
+                if (!cr) {
+                    child->owns_parent = 1;
+                    char tn[40];
+                    u32 k = 0;
+                    for (const char *p = child->type_name; *p && k < 22; p++) tn[k++] = *p;
+                    tn[k++] = ' '; tn[k++] = '(';
+                    for (const char *p = a->type_name; *p && k < 37; p++) tn[k++] = *p;
+                    tn[k++] = ')'; tn[k] = 0;
+                    gz_arc_set_type(child, tn);
+                    *out = child;
+                    return GZ_OK;
+                }
+                if (cr == GZ_E_CANCEL) { a->parent = 0; arc_free(a); return cr; }
+            }
+        }
+    }
+    *out = a;
+    return GZ_OK;
+}
+
+static int open_level(gz_archive **out, gz_src *src, const gz_open_opts *o, gz_ctx *c, int depth,
+                      gz_archive *parent, u32 parent_idx)
+{
+    *out = 0;
+    if (!src->size) return GZ_E_FORMAT;
+    u32 want = src->size < HEAD_SIZE ? (u32)src->size : HEAD_SIZE;
+    u8 *head = (u8 *)gz_alloc(HEAD_SIZE + 16);
+    if (!head) return GZ_E_NOMEM;
+    int r = gz_src_read_exact(src, 0, head, want);
+    if (r) { gz_free(head); return r; }
+
+    int nf = 0;
+    while (gz_formats[nf]) nf++;
+    int *score = (int *)gz_alloc((size_t)(nf + 1) * sizeof(int));
+    if (!score) { gz_free(head); return GZ_E_NOMEM; }
+    probe_all(src, head, want, score, nf);
+    gz_free(head);
+
+    /* try formats from the highest score down; weak formats only when nothing else opens */
+    r = GZ_E_FORMAT;
+    int first_err = 0;
+    for (int pass = 0; pass < 2 && r; pass++) {
+        for (;;) {
+            int best = -1;
+            for (int i = 0; i < nf; i++) {
+                if (!score[i]) continue;
+                int weak = (gz_formats[i]->flags & GZ_FMT_WEAK) != 0;
+                if (weak != pass) continue;
+                if (best < 0 || score[i] > score[best]) best = i;
+            }
+            if (best < 0) break;
+            score[best] = 0;
+            r = try_format(out, gz_formats[best], src, o, c, depth, parent, parent_idx);
+            if (!r) break;
+            if (r == GZ_E_CANCEL || r == GZ_E_NOMEM) { gz_free(score); return r; }
+            /* keep the most specific error from a format that recognised the data */
+            if (!first_err || (first_err == GZ_E_FORMAT && r != GZ_E_FORMAT)) first_err = r;
+        }
+    }
+    gz_free(score);
+    if (r && first_err) r = first_err;
+    return r;
+}
+
+int gz_arc_open(gz_archive **out, gz_src *src, const gz_open_opts *o, gz_ctx *c)
+{
+    gz_open_opts def;
+    if (!o) { __builtin_memset(&def, 0, sizeof def); o = &def; }
+    gz_ctx *own = 0;
+    if (!c) { own = c = gz_ctx_new(); if (!c) return GZ_E_NOMEM; }
+    volatile long *old_cancel = c->cancel;
+    if (o->cancel) c->cancel = o->cancel;
+    void (*old_prog)(void *, u64, u64) = c->progress;
+    void *old_pu = c->progress_user;
+    if (o->progress) { c->progress = o->progress; c->progress_user = o->user; }
+    int r = open_level(out, src, o, c, 0, 0, 0);
+    c->cancel = old_cancel;
+    c->progress = old_prog;
+    c->progress_user = old_pu;
+    if (own) gz_ctx_free(own);
+    return r;
+}
+
+int gz_arc_open_child(gz_archive **out, gz_archive *parent, gz_src *parent_src, u32 idx,
+                      const gz_open_opts *o, gz_ctx *c)
+{
+    *out = 0;
+    if (idx >= parent->n || !parent->fmt->view) return GZ_E_METHOD;
+    gz_open_opts def;
+    if (!o) { __builtin_memset(&def, 0, sizeof def); o = &def; }
+    gz_src *s = gz_arc_layer_src(parent, parent_src, c);
+    if (!s) return GZ_E_METHOD;
+    gz_src *v = parent->fmt->view(parent, s, idx);
+    if (!v) return GZ_E_METHOD;
+    int r = open_level(out, v, o, c, 1, parent, idx);
+    gz_src_free(v);
+    ctx_drop_views(c);
+    return r;
+}
+
+void gz_arc_close(gz_archive *a)
+{
+    while (a) {
+        gz_archive *p = a->owns_parent ? a->parent : 0;
+        arc_free(a);
+        a = p;
+    }
 }
 
 int gz_arc_set_codepage(gz_archive *a, int codepage)
@@ -592,61 +743,93 @@ int gz_arc_set_codepage(gz_archive *a, int codepage)
 
 const char *gz_arc_type_name(const gz_archive *a)
 {
-    switch (a->type) {
-    case GZ_ARC_ZIP: return "ZIP";
-    case GZ_ARC_GZIP: return "GZIP";
-    case GZ_ARC_TAR: return "TAR";
-    case GZ_ARC_TGZ: return "TAR.GZ";
-    }
-    return "?";
+    return a->type_name[0] ? a->type_name : (a->fmt ? a->fmt->name : "?");
 }
 
-const wchar_t *gz_arc_method_name(const gz_archive *a, const gz_entry *e)
+void gz_arc_method(const gz_archive *a, const gz_entry *e, gzch *buf, u32 cap)
 {
-    if (e->is_dir) return L"";
-    if (a->type == GZ_ARC_TAR) return L"Store";
-    if (a->type == GZ_ARC_GZIP || a->type == GZ_ARC_TGZ) return L"Deflate";
-    u16 m = e->method == 99 ? e->aes_method : e->method;
-    switch (m) {
-    case 0: return L"Store";
-    case 1: return L"Shrink";
-    case 6: return L"Implode";
-    case 8: return L"Deflate";
-    case 9: return L"Deflate64";
-    case 12: return L"BZip2";
-    case 14: return L"LZMA";
-    case 93: return L"Zstd";
-    case 95: return L"XZ";
-    case 98: return L"PPMd";
-    }
-    return L"?";
+    char tmp[96];
+    tmp[0] = 0;
+    if (cap) buf[0] = 0;
+    if (!cap || e->is_dir || !a->fmt->method) return;
+    a->fmt->method(a, e, tmp, sizeof tmp);
+    u32 i = 0;
+    for (; tmp[i] && i + 1 < cap && i + 1 < sizeof tmp; i++) buf[i] = (u8)tmp[i];
+    buf[i] = 0;
 }
 
-int gz_arc_extract(gz_archive *a, gz_src *src, u32 idx, gz_out *out,
-                   const u8 *pw, size_t pwn, gz_inflater *z)
+/* ---------------- extraction ---------------- */
+
+int gz_arc_extract(gz_archive *a, gz_src *src, u32 idx, gz_out *out, gz_ctx *c)
 {
-    switch (a->type) {
-    case GZ_ARC_ZIP: return gz_zip_extract(a, src, idx, out, pw, pwn, z);
-    case GZ_ARC_TAR: return gz_tar_extract(a, src, idx, out, z);
-    case GZ_ARC_GZIP: return gz_gzip_extract(a, src, out, z);
-    }
-    return GZ_E_METHOD;
+    if (idx >= a->n || !a->fmt->extract) return GZ_E_METHOD;
+    gz_src *s = gz_arc_layer_src(a, src, c);
+    if (!s) return GZ_E_IO;
+    return a->fmt->extract(a, s, idx, out, c);
 }
 
-int gz_arc_extract_solid(gz_archive *a, gz_src *src, const u8 *sel, gz_out *out,
-                         gz_inflater *z, volatile long *cancel)
+int gz_arc_extract_solid(gz_archive *a, gz_src *src, const u8 *sel, gz_out *out, gz_ctx *c)
 {
-    if (a->type == GZ_ARC_TGZ) return gz_tgz_extract(a, src, sel, out, z, cancel);
+    gz_src *s = gz_arc_layer_src(a, src, c);
+    if (!s) return GZ_E_IO;
+    if (a->fmt->extract_solid) return a->fmt->extract_solid(a, s, sel, out, c);
     for (u32 i = 0; i < a->n; i++) {
-        if (cancel && *cancel) return GZ_E_CANCEL;
+        if (gz_cancelled(c)) return GZ_E_CANCEL;
         if (!sel[i]) continue;
-        gz_arc_extract(a, src, i, out, 0, 0, z);
+        int r = a->fmt->extract(a, s, i, out, c);
+        if (r == GZ_E_CANCEL) return r;
     }
     return GZ_OK;
 }
 
-int gz_arc_check_password(gz_archive *a, gz_src *src, u32 idx, const u8 *pw, size_t pwn)
+int gz_arc_check_password(gz_archive *a, gz_src *src, u32 idx, gz_ctx *c)
 {
-    if (a->type != GZ_ARC_ZIP) return GZ_OK;
-    return gz_zip_check_password(a, src, idx, pw, pwn);
+    if (!a->fmt->check_password || idx >= a->n) return GZ_OK;
+    gz_src *s = gz_arc_layer_src(a, src, c);
+    if (!s) return GZ_E_IO;
+    return a->fmt->check_password(a, s, idx, c);
+}
+
+gz_src *gz_arc_view(gz_archive *a, gz_src *src, u32 idx, gz_ctx *c)
+{
+    if (!a->fmt->view || idx >= a->n) return 0;
+    gz_src *s = gz_arc_layer_src(a, src, c);
+    if (!s) return 0;
+    return a->fmt->view(a, s, idx);
+}
+
+/* ---------------- helpers for simple formats ---------------- */
+
+int gz_copy_range(gz_src *s, u64 off, u64 len, gz_out *out, gz_ctx *c, u32 *crc)
+{
+    u8 *buf = gz_ctx_buffer(c, 256u << 10);
+    if (!buf) return GZ_E_NOMEM;
+    u32 cr = 0;
+    while (len) {
+        if (gz_cancelled(c)) return GZ_E_CANCEL;
+        u32 n = len < (256u << 10) ? (u32)len : (256u << 10);
+        int r = gz_src_read_exact(s, off, buf, n);
+        if (r) return r;
+        if (crc) cr = gz_crc32(cr, buf, n);
+        r = out->write(out, buf, n);
+        if (r) return r;
+        off += n;
+        len -= n;
+    }
+    if (crc) *crc = cr;
+    return GZ_OK;
+}
+
+int gz_extract_stored(gz_archive *a, gz_src *s, u32 idx, u64 off, gz_out *out, gz_ctx *c)
+{
+    gz_entry *e = &a->e[idx];
+    int r = out->open(out, idx);
+    if (r) return r;
+    if (e->is_dir || (e->is_link && e->link_len) || !e->usize || e->usize == GZ_SIZE_UNKNOWN)
+        return out->close(out, idx, GZ_OK);
+    u32 crc = 0;
+    int st = gz_copy_range(s, off, e->usize, out, c, e->has_crc ? &crc : 0);
+    if (!st && e->has_crc && crc != e->crc) st = GZ_E_CRC;
+    int cr = out->close(out, idx, st);
+    return st ? st : cr;
 }

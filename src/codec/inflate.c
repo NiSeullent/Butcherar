@@ -16,10 +16,14 @@
 
 #if defined(__i386__) || defined(__x86_64__)
 #include <immintrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
 #if defined(__x86_64__)
 gz_inflate_fn gz_inflate_kernel = gz_inflate_sse2;
+#elif defined(__aarch64__)
+gz_inflate_fn gz_inflate_kernel = gz_inflate_neon;
 #else
 gz_inflate_fn gz_inflate_kernel = gz_inflate_x86;
 #endif
@@ -253,42 +257,58 @@ int gz_store_run(gz_inflater *z, const gz_stream_io *io)
 #  define GZV_KIND 0
 #  include "inflate_impl.h"
 
-#  pragma GCC push_options
-#  pragma GCC target("mmx")
+#  define GZV_ATTR __attribute__((target("mmx")))
 #  define GZV_FN   gz_inflate_mmx
 #  define GZV_KIND 1
 #  include "inflate_impl.h"
-#  pragma GCC pop_options
 
-#  pragma GCC push_options
-#  pragma GCC target("sse")
+#  define GZV_ATTR __attribute__((target("sse")))
 #  define GZV_FN   gz_inflate_sse
 #  define GZV_KIND 2
 #  include "inflate_impl.h"
-#  pragma GCC pop_options
-#else
+#elif defined(__x86_64__)
 int gz_inflate_x86(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_sse2(z, io); }
 int gz_inflate_mmx(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_sse2(z, io); }
 int gz_inflate_sse(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_sse2(z, io); }
 #endif
 
-#pragma GCC push_options
-#pragma GCC target("sse2")
+#if defined(__i386__) || defined(__x86_64__)
+/* per-function target attributes (GCC and clang); the binary itself needs only i586 / x86-64 */
+#define GZV_ATTR __attribute__((target("sse2")))
 #define GZV_FN   gz_inflate_sse2
 #define GZV_KIND 3
 #include "inflate_impl.h"
-#pragma GCC pop_options
 
-#pragma GCC push_options
-#pragma GCC target("avx")
+#define GZV_ATTR __attribute__((target("avx")))
 #define GZV_FN   gz_inflate_avx
 #define GZV_KIND 4
 #include "inflate_impl.h"
-#pragma GCC pop_options
 
-#pragma GCC push_options
-#pragma GCC target("avx2,bmi,bmi2")
+#define GZV_ATTR __attribute__((target("avx2,bmi,bmi2")))
 #define GZV_FN   gz_inflate_avx2
 #define GZV_KIND 5
 #include "inflate_impl.h"
-#pragma GCC pop_options
+
+#elif defined(__aarch64__)
+/* AArch64: Advanced SIMD (NEON) is part of the base architecture */
+#define GZV_FN   gz_inflate_neon
+#define GZV_KIND 6
+#include "inflate_impl.h"
+int gz_inflate_x86(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_neon(z, io); }
+int gz_inflate_mmx(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_neon(z, io); }
+int gz_inflate_sse(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_neon(z, io); }
+int gz_inflate_sse2(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_neon(z, io); }
+int gz_inflate_avx(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_neon(z, io); }
+int gz_inflate_avx2(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_neon(z, io); }
+
+#else
+/* other targets: portable C kernel */
+#define GZV_FN   gz_inflate_x86
+#define GZV_KIND 0
+#include "inflate_impl.h"
+int gz_inflate_mmx(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_x86(z, io); }
+int gz_inflate_sse(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_x86(z, io); }
+int gz_inflate_sse2(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_x86(z, io); }
+int gz_inflate_avx(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_x86(z, io); }
+int gz_inflate_avx2(gz_inflater *z, const gz_stream_io *io) { return gz_inflate_x86(z, io); }
+#endif

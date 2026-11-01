@@ -15,10 +15,7 @@
 
 static int read_exact(gz_src *s, u64 off, void *buf, u32 n)
 {
-    u32 got = 0;
-    int r = s->read_at(s, off, buf, n, &got);
-    if (r) return r;
-    return got == n ? GZ_OK : GZ_E_TRUNC;
+    return gz_src_read_exact(s, off, buf, n);
 }
 
 static void parse_extra(gz_entry *e, const u8 *x, u32 xn, u32 *z64_need, const u8 **uni, u32 *unin,
@@ -63,8 +60,9 @@ static void parse_extra(gz_entry *e, const u8 *x, u32 xn, u32 *z64_need, const u
     }
 }
 
-int gz_zip_open(gz_archive *a, gz_src *s)
+static int zip_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
 {
+    (void)o; (void)c;
     u64 size = s->size;
     if (size < 22) return GZ_E_FORMAT;
     u32 tail = size < 65557 + 20 ? (u32)size : 65557 + 20;
@@ -134,7 +132,7 @@ int gz_zip_open(gz_archive *a, gz_src *s)
     r = cd_size ? read_exact(s, cd_off + shift, cd, (u32)cd_size) : GZ_OK;
     if (r) { gz_free(cd); return r; }
 
-    a->type = GZ_ARC_ZIP;
+    a->win_names = 1;
     if (count < (1u << 24) && count > 0) {
         a->e = (gz_entry *)gz_alloc((size_t)count * sizeof(gz_entry));
         if (a->e) a->cap = (u32)count;
@@ -159,7 +157,8 @@ int gz_zip_open(gz_archive *a, gz_src *s)
         e->usize = rd32(c + 24);
         u32 ext = rd32(c + 38);
         e->off = rd32(c + 42);
-        e->utf8 = (e->flags & 0x800) ? 1 : 0;
+        e->name_enc = (e->flags & 0x800) ? GZ_NE_UTF8 : GZ_NE_LEGACY;
+        e->has_crc = 1;
         const u8 *name = c + 46;
         e->raw_len = (u16)nlen;
         e->raw_off = (u32)(name - cd);       /* temporarily relative to cd */
@@ -183,12 +182,14 @@ int gz_zip_open(gz_archive *a, gz_src *s)
             if (e->flags & 0x40) e->enc = GZ_ENC_AES;     /* strong encryption: unsupported */
         }
         if (e->method == 99 && !e->aes_strength) e->aes_strength = 3;
+        if (e->enc == GZ_ENC_AES && e->aes_ver == 2 && e->crc == 0) e->has_crc = 0;
 
         /* attributes / directory */
         if (made == 3 || made == 19) {               /* Unix / OS X */
             u32 mode = ext >> 16;
             if ((mode & 0xF000) == 0x4000) e->is_dir = 1;
             if ((mode & 0xF000) == 0xA000) e->is_link = 1;
+            e->unix_mode = mode;
             if (mode && !(mode & 0200)) e->attr |= 1;
             if (ext & 0x10) e->is_dir = 1;
         } else {
@@ -307,30 +308,54 @@ static int prepare(gz_archive *a, gz_src *s, gz_entry *e, const u8 *pw, size_t p
     return GZ_OK;
 }
 
-int gz_zip_check_password(gz_archive *a, gz_src *s, u32 idx, const u8 *pw, size_t pwn)
+/* Password byte encodings to try: the system code page (what WinZip/PKZIP/Explorer
+ * use for ZipCrypto) and UTF-8 (7-Zip/Bandizip for AES and Unicode passwords). */
+typedef struct { u8 b[2][1024]; size_t n[2]; int count; } pw_set;
+
+static void pw_candidates(gz_ctx *c, pw_set *ps)
+{
+    ps->count = 0;
+    if (!c->password) return;
+    size_t wn = gz_wcslen(c->password);
+    if (wn > 300) wn = 300;
+    int an = gz_plat_wc2mb(gz_plat_acp(), c->password, (int)wn, ps->b[0], sizeof ps->b[0]);
+    if (an > 0 || wn == 0) { ps->n[ps->count] = (size_t)(an > 0 ? an : 0); ps->count++; }
+    int un = gz_utf16_to_utf8(c->password, wn, ps->b[ps->count]);
+    if (ps->count == 0 || (size_t)un != ps->n[0] || __builtin_memcmp(ps->b[0], ps->b[ps->count], (size_t)un)) {
+        ps->n[ps->count] = (size_t)un;
+        ps->count++;
+    }
+}
+
+static int zip_check_password(gz_archive *a, gz_src *s, u32 idx, gz_ctx *c)
 {
     gz_entry *e = &a->e[idx];
     if (!e->enc || e->is_dir) return GZ_OK;
-    ent_reader rd;
+    pw_set *ps = (pw_set *)gz_alloc(sizeof(pw_set));
     aes_ctx *ac = (aes_ctx *)gz_alloc(sizeof(aes_ctx));
-    if (!ac) return GZ_E_NOMEM;
-    __builtin_memset(&rd, 0, sizeof rd);
-    int r = prepare(a, s, e, pw, pwn, &rd, ac);
+    if (!ps || !ac) { gz_free(ps); gz_free(ac); return GZ_E_NOMEM; }
+    pw_candidates(c, ps);
+    int r = GZ_E_PASSWORD;
+    if (!ps->count) r = prepare(a, s, e, 0, 0, &(ent_reader){0}, ac);
+    for (int k = 0; k < ps->count; k++) {
+        ent_reader rd;
+        __builtin_memset(&rd, 0, sizeof rd);
+        r = prepare(a, s, e, ps->b[k], ps->n[k], &rd, ac);
+        if (r != GZ_E_PASSWORD) break;
+    }
+    gz_free(ps);
     gz_free(ac);
     return r;
 }
 
-int gz_zip_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, const u8 *pw, size_t pwn,
-                   gz_inflater *z)
+static int extract_once(gz_archive *a, gz_src *s, u32 idx, gz_out *out, const u8 *pw, size_t pwn,
+                        gz_ctx *c, int *opened)
 {
     gz_entry *e = &a->e[idx];
-    if (e->is_dir) {
-        int r = out->open(out, idx);
-        if (r) return r;
-        return out->close(out, idx, GZ_OK);
-    }
     u16 m = e->method == 99 ? e->aes_method : e->method;
     if (m != 0 && m != 8 && m != 9) return GZ_E_METHOD;
+    gz_inflater *z = gz_ctx_inflater(c);
+    if (!z) return GZ_E_NOMEM;
 
     ent_reader rd;
     __builtin_memset(&rd, 0, sizeof rd);
@@ -344,6 +369,7 @@ int gz_zip_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, const u8 *pw,
 
     r = out->open(out, idx);
     if (r) { gz_free(ac); return r; }
+    *opened = 1;
     rd.out = out;
     rd.limit = e->usize;
     gz_stream_io io = { er_read, er_write, &rd };
@@ -352,8 +378,7 @@ int gz_zip_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, const u8 *pw,
     else st = gz_inflate_run(z, &io, m == 9);
 
     if (!st && z->total_out != e->usize) st = GZ_E_DATA;
-    int check_crc = !(e->enc == GZ_ENC_AES && e->aes_ver == 2 && e->crc == 0);
-    if (!st && check_crc && z->crc != e->crc)
+    if (!st && e->has_crc && z->crc != e->crc)
         st = (e->enc == GZ_ENC_ZIPCRYPTO) ? GZ_E_PASSWORD : GZ_E_CRC;
     if (!st && e->enc == GZ_ENC_AES) {
         u8 code[10], mac[20];
@@ -373,6 +398,122 @@ int gz_zip_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, const u8 *pw,
         }
     }
     gz_free(ac);
+    return st;
+}
+
+static int null_open(gz_out *o, u32 idx) { (void)o; (void)idx; return GZ_OK; }
+static int null_write(gz_out *o, const u8 *p, size_t n) { (void)o; (void)p; (void)n; return GZ_OK; }
+static int null_close(gz_out *o, u32 idx, int st) { (void)o; (void)idx; (void)st; return GZ_OK; }
+
+static int zip_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, gz_ctx *c)
+{
+    gz_entry *e = &a->e[idx];
+    if (e->is_dir) {
+        int r = out->open(out, idx);
+        if (r) return r;
+        return out->close(out, idx, GZ_OK);
+    }
+    const u8 *pw = 0;
+    size_t pwn = 0;
+    pw_set *ps = 0;
+    if (e->enc) {
+        ps = (pw_set *)gz_alloc(sizeof(pw_set));
+        aes_ctx *ac = (aes_ctx *)gz_alloc(sizeof(aes_ctx));
+        if (!ps || !ac) { gz_free(ps); gz_free(ac); return GZ_E_NOMEM; }
+        pw_candidates(c, ps);
+        /* encodings that pass the header check */
+        int pass[2], np = 0, err = GZ_E_PASSWORD;
+        for (int k = 0; k < ps->count; k++) {
+            ent_reader rd;
+            __builtin_memset(&rd, 0, sizeof rd);
+            int r = prepare(a, s, e, ps->b[k], ps->n[k], &rd, ac);
+            if (!r) pass[np++] = k;
+            else if (r != GZ_E_PASSWORD) err = r;
+        }
+        gz_free(ac);
+        if (!np) { gz_free(ps); return err; }
+        int pick = pass[0];
+        if (np > 1) {
+            /* both pass the 1-byte ZipCrypto check: find the one with the right CRC */
+            gz_out nul = { null_open, null_write, null_close, 0 };
+            for (int k = 0; k < np; k++) {
+                int op = 0;
+                if (!extract_once(a, s, idx, &nul, ps->b[pass[k]], ps->n[pass[k]], c, &op)) { pick = pass[k]; break; }
+            }
+        }
+        pw = ps->b[pick];
+        pwn = ps->n[pick];
+    }
+    int opened = 0;
+    int st = extract_once(a, s, idx, out, pw, pwn, c, &opened);
+    gz_free(ps);
+    if (!opened) return st;
     int cr = out->close(out, idx, st);
     return st ? st : cr;
 }
+
+static void zip_method(const gz_archive *a, const gz_entry *e, char *buf, u32 cap)
+{
+    (void)a;
+    u16 m = e->method == 99 ? e->aes_method : e->method;
+    const char *n = "?";
+    switch (m) {
+    case 0: n = "Store"; break;
+    case 1: n = "Shrink"; break;
+    case 2: case 3: case 4: case 5: n = "Reduce"; break;
+    case 6: n = "Implode"; break;
+    case 8: n = "Deflate"; break;
+    case 9: n = "Deflate64"; break;
+    case 12: n = "BZip2"; break;
+    case 14: n = "LZMA"; break;
+    case 93: n = "Zstd"; break;
+    case 95: n = "XZ"; break;
+    case 96: n = "JPEG"; break;
+    case 97: n = "WavPack"; break;
+    case 98: n = "PPMd"; break;
+    }
+    const char *enc = e->enc == GZ_ENC_AES ? (e->aes_strength == 1 ? " AES-128" : e->aes_strength == 2 ? " AES-192" : " AES-256")
+                    : e->enc == GZ_ENC_ZIPCRYPTO ? " ZipCrypto" : "";
+    u32 i = 0;
+    for (; *n && i + 1 < cap; n++) buf[i++] = *n;
+    for (; *enc && i + 1 < cap; enc++) buf[i++] = *enc;
+    if (cap) buf[i] = 0;
+}
+
+/* stored, unencrypted entries can be read in place */
+static gz_src *zip_view(gz_archive *a, gz_src *s, u32 idx)
+{
+    gz_entry *e = &a->e[idx];
+    if (e->is_dir || e->enc || e->method != 0) return 0;
+    u8 lh[30];
+    if (read_exact(s, e->off, lh, 30) || rd32(lh) != SIG_LOCAL) return 0;
+    u64 data = e->off + 30 + rd16(lh + 26) + rd16(lh + 28);
+    if (data + e->usize > s->size) return 0;
+    return gz_src_sub(s, data, e->usize);
+}
+
+static int zip_probe(gz_src *s, const u8 *h, u32 n)
+{
+    if (n >= 4 && h[0] == 'P' && h[1] == 'K' && (h[2] == 3 || h[2] == 5 || h[2] == 7) && h[3] == h[2] + 1)
+        return 95;
+    if (n >= 8 && rd32(h) == 0x30304b50u && rd32(h + 4) == SIG_LOCAL) return 95;   /* "PK00" spanned marker */
+    /* SFX or data before the archive: look for the end record */
+    if (s->size < 22) return 0;
+    u32 tail = s->size < 65557 ? (u32)s->size : 65557;
+    u8 *buf = (u8 *)gz_alloc(tail);
+    if (!buf) return 0;
+    int score = 0;
+    if (!read_exact(s, s->size - tail, buf, tail)) {
+        for (i64 p = (i64)tail - 22; p >= 0; p--) {
+            if (rd32(buf + p) == SIG_EOCD && (u64)p + 22 + rd16(buf + p + 20) <= tail) { score = 40; break; }
+        }
+    }
+    gz_free(buf);
+    return score;
+}
+
+GZ_FORMAT(gz_fmt_zip)
+const gz_format gz_fmt_zip = {
+    "ZIP", "zip zipx jar war ear apk xpi odt ods odp docx xlsx pptx epub ipa appx nupkg whl",
+    0, zip_probe, zip_open, 0, zip_extract, 0, zip_check_password, zip_method, zip_view, 0
+};

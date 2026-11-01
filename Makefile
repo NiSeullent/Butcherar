@@ -1,9 +1,14 @@
 # 고깃ZIP (GogitZIP) build
 #
-#   make            -> build/GogitZip.exe (x86, Windows 2000+) and build/GogitZip64.exe (x64)
-#   make test       -> native core tests (Linux/macOS/MSYS2 with zlib)
+#   make            -> Windows: build/GogitZip.exe (x86, Windows 2000+) and build/GogitZip64.exe (x64)
+#   make test       -> native core tests (Linux / macOS / MSYS2)
+#   make cli        -> build/gogitzip (portable command line tool, this machine)
+#   make linux      -> build/linux/gogitzip-gtk (GTK 3 GUI) + build/gogitzip
+#   make mac        -> build/mac/GogitZIP.app (on macOS, universal x86_64 + arm64)
 #
-# Works with MinGW-w64 cross compilers on Linux or natively in MSYS2.
+# Sources: src/core (model, crypto, CPU dispatch), src/codec (compression codecs),
+# src/fmt (archive formats and writers), src/win (Windows UI), src/posix (Linux/macOS
+# platform layer), src/app (portable engine + CLI), src/gtk, src/mac.
 
 CC32  ?= i686-w64-mingw32-gcc
 CC64  ?= x86_64-w64-mingw32-gcc
@@ -12,17 +17,19 @@ WR64  ?= x86_64-w64-mingw32-windres
 HOSTCC ?= cc
 B     := build
 
-CORE := src/core/cpu.c src/core/crc32.c src/core/inflate.c src/core/crypto.c \
-        src/core/arc.c src/core/zip.c src/core/tar.c
-WIN  := src/win/rt.c src/win/util.c src/win/strings.c src/win/gfx.c src/win/dlgt.c \
-        src/win/engine.c src/win/dialogs.c src/win/mainwnd.c src/win/main.c src/win/shell.c
-HDRS := $(wildcard src/core/*.h src/win/*.h)
+CORE := $(sort $(wildcard src/core/*.c src/codec/*.c src/fmt/*.c))
+WIN  := $(sort $(wildcard src/win/*.c))
+APP  := $(sort $(wildcard src/app/*.c))
+POSIX := $(sort $(wildcard src/posix/*.c))
+HDRS := $(wildcard src/core/*.h src/codec/*.h src/fmt/*.h src/win/*.h src/app/*.h src/posix/*.h)
+INC  := -Isrc/core -Isrc/codec -Isrc/fmt -Isrc/app -Isrc/posix
+REG  := $(B)/gen/registry.c
 
-# No C runtime: we provide memcpy & co. ourselves (src/win/rt.c).
-CFLAGS := -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
-          -Wno-cast-function-type -fno-stack-protector -fno-asynchronous-unwind-tables \
+# No C runtime on Windows: we provide memcpy & co. ourselves (src/win/rt.c).
+WARN := -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type
+CFLAGS := -std=gnu11 $(WARN) -fno-stack-protector -fno-asynchronous-unwind-tables \
           -fno-unwind-tables -fno-ident -fno-math-errno -fno-exceptions \
-          -ffunction-sections -finput-charset=UTF-8 -DUNICODE -D_UNICODE
+          -ffunction-sections -finput-charset=UTF-8 -DUNICODE -D_UNICODE $(INC)
 OPT_CORE := -O2
 OPT_UI   := -Os
 RTFLAGS  := -fno-builtin -fno-tree-loop-distribute-patterns
@@ -40,10 +47,16 @@ LD64 := -nostdlib -s -Wl,--gc-sections -Wl,-e,gz_start -Wl,--subsystem,windows:5
         -Wl,--major-os-version,5 -Wl,--minor-os-version,2 \
         -Wl,--dynamicbase -Wl,--nxcompat -Wl,--high-entropy-va -Wl,--no-insert-timestamp
 
-OBJ32 := $(patsubst src/%.c,$(B)/x86/%.o,$(CORE) $(WIN)) $(B)/x86/res.o
-OBJ64 := $(patsubst src/%.c,$(B)/x64/%.o,$(CORE) $(WIN)) $(B)/x64/res.o
+OBJ32 := $(patsubst src/%.c,$(B)/x86/%.o,$(CORE) $(WIN)) $(B)/x86/gen/registry.o $(B)/x86/res.o
+OBJ64 := $(patsubst src/%.c,$(B)/x64/%.o,$(CORE) $(WIN)) $(B)/x64/gen/registry.o $(B)/x64/res.o
 
-all: $(B)/GogitZip.exe $(B)/GogitZip64.exe
+all: win
+win: $(B)/GogitZip.exe $(B)/GogitZip64.exe
+
+# format / writer tables from the GZ_FORMAT(...) / GZ_WRITER(...) marker lines
+$(REG): $(CORE) tools/gen_registry.sh
+	@mkdir -p $(dir $@)
+	sh tools/gen_registry.sh $@ $(CORE)
 
 $(B)/GogitZip.exe: $(OBJ32)
 	$(CC32) $(LD32) -o $@ $^ $(LIBS)
@@ -51,12 +64,23 @@ $(B)/GogitZip.exe: $(OBJ32)
 $(B)/GogitZip64.exe: $(OBJ64)
 	$(CC64) $(LD64) -o $@ $^ $(LIBS)
 
-$(B)/x86/core/%.o: src/core/%.c $(HDRS)
+$(B)/x86/gen/registry.o: $(REG) $(HDRS)
 	@mkdir -p $(dir $@)
 	$(CC32) $(CFLAGS) $(OPT_CORE) $(ARCH32) -c $< -o $@
-$(B)/x64/core/%.o: src/core/%.c $(HDRS)
+$(B)/x64/gen/registry.o: $(REG) $(HDRS)
 	@mkdir -p $(dir $@)
 	$(CC64) $(CFLAGS) $(OPT_CORE) $(ARCH64) -c $< -o $@
+
+define core_rules
+$(B)/x86/$(1)/%.o: src/$(1)/%.c $$(HDRS)
+	@mkdir -p $$(dir $$@)
+	$$(CC32) $$(CFLAGS) $$(OPT_CORE) $$(ARCH32) -c $$< -o $$@
+$(B)/x64/$(1)/%.o: src/$(1)/%.c $$(HDRS)
+	@mkdir -p $$(dir $$@)
+	$$(CC64) $$(CFLAGS) $$(OPT_CORE) $$(ARCH64) -c $$< -o $$@
+endef
+$(foreach d,core codec fmt,$(eval $(call core_rules,$(d))))
+
 $(B)/x86/win/rt.o: src/win/rt.c $(HDRS)
 	@mkdir -p $(dir $@)
 	$(CC32) $(CFLAGS) $(OPT_CORE) $(RTFLAGS) $(ARCH32) -c $< -o $@
@@ -77,19 +101,33 @@ $(B)/x64/res.o: res/app.rc res/app.ico res/doc.ico res/assets.bin res/app.manife
 	@mkdir -p $(dir $@)
 	$(WR64) -c 65001 -I res -O coff $< $@
 
-# ---- native tests of the portable core ----
-ICORE := src/core/cpu.c src/core/crc32.c src/core/inflate.c src/core/crypto.c
-test: $(B)/test_inflate $(B)/test_arc
-	$(B)/test_inflate
-	python3 tests/run_arc_tests.py $(B)/test_arc $(B)/arcwork
+# ---- native build of the portable core (tests, CLI, Linux/macOS front ends) ----
+HOST_CFLAGS ?= -O2 -g
+HOSTFLAGS := -std=gnu11 $(WARN) -finput-charset=UTF-8 -pthread $(INC) $(HOST_CFLAGS)
+HOST_LIBS := -pthread
+ifeq ($(shell uname -s),Darwin)
+HOST_LIBS += -liconv
+endif
+HOSTOBJ := $(patsubst src/%.c,$(B)/host/%.o,$(CORE) $(POSIX)) $(B)/host/gen/registry.o
 
+$(B)/host/gen/registry.o: $(REG) $(HDRS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) $(HOSTFLAGS) -c $< -o $@
+$(B)/host/%.o: src/%.c $(HDRS)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) $(HOSTFLAGS) -c $< -o $@
+
+$(B)/gzt: tests/gzt.c $(HOSTOBJ)
+	$(HOSTCC) $(HOSTFLAGS) -o $@ tests/gzt.c $(HOSTOBJ) $(HOST_LIBS)
+
+ICORE := src/core/cpu.c src/core/crc32.c src/codec/inflate.c src/core/crypto.c src/core/stream.c
 $(B)/test_inflate: tests/test_inflate.c $(ICORE) $(HDRS)
 	@mkdir -p $(B)
-	$(HOSTCC) -O2 -g -Isrc/core -o $@ tests/test_inflate.c $(ICORE) -lz
+	$(HOSTCC) -O2 -g $(INC) -o $@ tests/test_inflate.c $(ICORE) -lz
 
-$(B)/test_arc: tests/test_arc.c $(CORE) $(HDRS)
-	@mkdir -p $(B)
-	$(HOSTCC) -O2 -g -fshort-wchar -Wno-pointer-sign -Isrc/core -o $@ tests/test_arc.c $(CORE)
+test: $(B)/test_inflate $(B)/gzt
+	$(B)/test_inflate
+	python3 tests/run_tests.py --gzt $(B)/gzt --work $(B)/testwork
 
 assets:
 	python3 tools/gen_assets.py
@@ -97,4 +135,4 @@ assets:
 clean:
 	rm -rf $(B)
 
-.PHONY: all test assets clean
+.PHONY: all win test assets clean

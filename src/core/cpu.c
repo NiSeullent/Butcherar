@@ -17,10 +17,13 @@
 #if defined(__i386__) || defined(__x86_64__)
 #include <cpuid.h>
 #endif
+#if defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
+#endif
 
 gz_cpu_info g_cpu;
 
-static int cpuid(u32 leaf, u32 sub, u32 r[4])
+__attribute__((unused)) static int cpuid(u32 leaf, u32 sub, u32 r[4])
 {
 #if defined(__i386__) || defined(__x86_64__)
     return __get_cpuid_count(leaf, sub, &r[0], &r[1], &r[2], &r[3]);
@@ -29,7 +32,7 @@ static int cpuid(u32 leaf, u32 sub, u32 r[4])
 #endif
 }
 
-static u64 xgetbv0(void)
+__attribute__((unused)) static u64 xgetbv0(void)
 {
 #if defined(__i386__) || defined(__x86_64__)
     u32 lo, hi;
@@ -40,7 +43,7 @@ static u64 xgetbv0(void)
 #endif
 }
 
-static void trim_brand(char *s)
+__attribute__((unused)) static void trim_brand(char *s)
 {
     char *p = s, *d = s;
     while (*p == ' ') p++;
@@ -51,6 +54,31 @@ static void trim_brand(char *s)
     *d = 0;
 }
 
+#if defined(__aarch64__)
+void gz_cpu_detect(void)
+{
+    __builtin_memset(&g_cpu, 0, sizeof(g_cpu));
+    u32 f = CPUF_NEON;
+#if defined(__APPLE__)
+    /* every Apple Silicon core has the ARMv8 crypto and CRC extensions */
+    f |= CPUF_ARM_CRC32 | CPUF_ARM_PMULL | CPUF_ARM_AES | CPUF_ARM_SHA1 | CPUF_ARM_SHA2;
+    __builtin_memcpy(g_cpu.brand, "Apple Silicon", 14);
+#elif defined(__linux__)
+    unsigned long hw = getauxval(AT_HWCAP);
+    if (hw & (1ul << 7)) f |= CPUF_ARM_CRC32;   /* HWCAP_CRC32 */
+    if (hw & (1ul << 4)) f |= CPUF_ARM_PMULL;   /* HWCAP_PMULL */
+    if (hw & (1ul << 3)) f |= CPUF_ARM_AES;     /* HWCAP_AES   */
+    if (hw & (1ul << 5)) f |= CPUF_ARM_SHA1;    /* HWCAP_SHA1  */
+    if (hw & (1ul << 6)) f |= CPUF_ARM_SHA2;    /* HWCAP_SHA2  */
+    __builtin_memcpy(g_cpu.brand, "ARM64", 6);
+#else
+    __builtin_memcpy(g_cpu.brand, "ARM64", 6);
+#endif
+    __builtin_memcpy(g_cpu.vendor, "ARM", 4);
+    g_cpu.features = f;
+    g_cpu.tier = g_cpu.active = 0;
+}
+#else
 void gz_cpu_detect(void)
 {
     u32 r[4], maxleaf, maxext, f = 0;
@@ -141,6 +169,7 @@ void gz_cpu_detect(void)
 #endif
     g_cpu.tier = g_cpu.active = t;
 }
+#endif
 
 int gz_cpu_tier_supported(int tier)
 {
@@ -156,6 +185,9 @@ const char *gz_tier_name(int tier)
         "x86", "MMX", "SSE", "SSE2", "SSE4.1", "AVX", "AVX2"
     };
     if (tier < 0 || tier >= GZ_TIER_COUNT) return "?";
+#if defined(__aarch64__)
+    return tier == 0 ? "NEON" : "?";
+#endif
     return names[tier];
 }
 
@@ -174,6 +206,13 @@ int gz_dispatch_init(int force)
 #endif
     g_cpu.active = t;
     u32 f = g_cpu.features;
+#if defined(__aarch64__)
+    (void)f;
+    gz_inflate_kernel = gz_inflate_neon; s_inf_name = "NEON";
+    gz_crc32_kernel = gz_crc32_slice8; s_crc_name = "Slice-by-8";
+    gz_aes_ctr_kernel = gz_aes_ctr_soft; s_aes_name = "AES (T-table)";
+    return 0;
+#endif
 
     /* Inflate kernel */
     switch (t) {

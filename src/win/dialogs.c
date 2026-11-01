@@ -1023,7 +1023,7 @@ void dlg_info(HWND owner, gz_open_arc *oa)
     wchar_t v[10][300], x1[40], x2[40], x3[40];
     int lab[10], n = 0;
     path_dir(v[n], oa->path, 300); lab[n++] = S_I_PATH;
-    wfmt(v[n], L"%S%s", gz_arc_type_name(a), a->n && a->e[0].method == 99 ? L" (WinZip AES)" : L""); lab[n++] = S_I_FORMAT;
+    wfmt(v[n], L"%S%s", gz_arc_type_name(a), a->has_enc ? (strings_korean() ? L" (암호)" : L" (encrypted)") : L""); lab[n++] = S_I_FORMAT;
     fmt_size(x1, oa->src.size); fmt_thousands(x2, oa->src.size);
     wfmt(v[n], L"%s (%s B)", x1, x2); lab[n++] = S_I_FILESIZE;
     fmt_thousands(x1, a->nfiles); fmt_thousands(x2, a->ndirs);
