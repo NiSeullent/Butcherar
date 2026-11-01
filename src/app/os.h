@@ -49,7 +49,8 @@ enum {
     GZ_OSC_WIN_NAMES  = 4,    /* Windows naming rules (CON, <>:"|?*, trailing .) */
     GZ_OSC_NFD_NAMES  = 8,    /* the system may return decomposed names (macOS)  */
     GZ_OSC_CASE_FOLD  = 16,   /* usual file systems ignore case                  */
-    GZ_OSC_MARK       = 32    /* downloaded-file mark (quarantine / Zone.Identifier) */
+    GZ_OSC_MARK       = 32,   /* downloaded-file mark (quarantine / Zone.Identifier) */
+    GZ_OSC_ATTRS      = 64    /* DOS attributes (read-only, hidden, system) are kept */
 };
 u32 gz_os_caps(void);
 u32 gz_os_umask(void);        /* process umask (0 where meaningless), read once     */
@@ -90,6 +91,13 @@ int  gz_os_close(gz_fd fd);
 int  gz_os_fstat(gz_fd fd, gz_os_info *st);
 int  gz_os_fset_times(gz_fd fd, u64 mtime, u64 atime);           /* 0 = leave as is */
 int  gz_os_fset_mode(gz_fd fd, u32 mode);
+/* read-only / hidden / system attribute bits of a file just written at path (open as fd);
+ * only on GZ_OSC_ATTRS systems (no-op elsewhere) */
+#ifdef _WIN32
+int  gz_os_fset_attr(gz_fd fd, const gzch *path, u32 attr);
+#else
+static inline int gz_os_fset_attr(gz_fd fd, const gzch *path, u32 attr) { (void)fd; (void)path; (void)attr; return 0; }
+#endif
 /* random-access source over a file (reads are thread-safe), freed with gz_src_free */
 int  gz_os_open_src(const gzch *path, gz_src **out);
 

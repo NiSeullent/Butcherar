@@ -161,22 +161,6 @@ void path_dir(wchar_t *dir, const wchar_t *path, size_t cap)
     if (wlen(dir) == 2 && dir[1] == ':') wcat(dir, L"\\", cap);
 }
 
-void path_strip_ext(wchar_t *name)
-{
-    static const wchar_t *dbl[] = { L".tar.gz", L".tar.z", L".tar.bz2", L".tar.xz" };
-    size_t n = wlen(name);
-    for (size_t i = 0; i < sizeof dbl / sizeof *dbl; i++) {
-        size_t k = wlen(dbl[i]);
-        if (n > k && !gz_wcsicmp_ascii(name + n - k, dbl[i])) { name[n - k] = 0; return; }
-    }
-    wchar_t *dot = (wchar_t *)gz_wcsrchr(name, '.');
-    if (dot && dot != name) *dot = 0;
-    /* trailing dots/spaces are not allowed for folder names */
-    n = wlen(name);
-    while (n && (name[n - 1] == '.' || name[n - 1] == ' ')) name[--n] = 0;
-    if (!n) wcopy(name, L"archive", 16);
-}
-
 void path_join(wchar_t *o, const wchar_t *a, const wchar_t *b, size_t cap)
 {
     if (o != a) wcopy(o, a, cap);
@@ -192,71 +176,6 @@ int path_is_dir(const wchar_t *p)
 }
 
 int path_exists(const wchar_t *p) { return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES; }
-
-/* Prefix with \\?\ for paths that would exceed MAX_PATH (NT supports it since 4.0). */
-void path_long(wchar_t *o, const wchar_t *p, size_t cap)
-{
-    size_t n = wlen(p);
-    if (n < MAX_PATH - 12 || (p[0] == '\\' && p[1] == '\\' && p[2] == '?')) { wcopy(o, p, cap); return; }
-    if (p[0] == '\\' && p[1] == '\\') {
-        wcopy(o, L"\\\\?\\UNC\\", cap);
-        wcat(o, p + 2, cap);
-    } else {
-        wcopy(o, L"\\\\?\\", cap);
-        wcat(o, p, cap);
-    }
-}
-
-static int wprefix(const wchar_t *s, const wchar_t *p)
-{
-    while (*p) if (*s++ != *p++) return 0;
-    return 1;
-}
-
-int mkdirs(const wchar_t *path)
-{
-    wchar_t buf[MAX_PATH * 4];
-    path_long(buf, path, GZ_COUNTOF(buf));
-    if (path_is_dir(buf)) return 1;
-    size_t n = wlen(buf), start = 0, i, seps;
-    if (wprefix(buf, L"\\\\?\\UNC\\")) {                 /* \\?\UNC\server\share\ */
-        for (i = 8, seps = 0; i < n && seps < 2; i++) if (buf[i] == '\\') seps++;
-        start = i;
-    } else if (wprefix(buf, L"\\\\?\\")) {                /* \\?\C:\ */
-        start = 7;
-    } else if (buf[0] == '\\' && buf[1] == '\\') {        /* \\server\share\ */
-        for (i = 2, seps = 0; i < n && seps < 2; i++) if (buf[i] == '\\') seps++;
-        start = i;
-    } else if (n >= 3 && buf[1] == ':') {
-        start = 3;
-    }
-    for (size_t i = start; i <= n; i++) {
-        if (i == n || buf[i] == '\\') {
-            wchar_t c = buf[i];
-            buf[i] = 0;
-            if (i > start && !path_is_dir(buf)) {
-                if (!CreateDirectoryW(buf, NULL) && GetLastError() != ERROR_ALREADY_EXISTS &&
-                    !path_is_dir(buf)) {
-                    buf[i] = c;
-                    return 0;
-                }
-            }
-            buf[i] = c;
-        }
-    }
-    return 1;
-}
-
-u8 *w_to_mb(int cp, const wchar_t *w, size_t *outn)
-{
-    int n = WideCharToMultiByte((UINT)cp, 0, w, -1, NULL, 0, NULL, NULL);
-    if (n <= 0) { *outn = 0; return 0; }
-    u8 *b = (u8 *)mem_alloc((size_t)n + 1);
-    if (!b) { *outn = 0; return 0; }
-    WideCharToMultiByte((UINT)cp, 0, w, -1, (LPSTR)b, n, NULL, NULL);
-    *outn = (size_t)n - 1;
-    return b;
-}
 
 int scale(int px) { return MulDiv(px, g_dpi, 96); }
 
@@ -292,7 +211,11 @@ void settings_load(void)
 {
     HKEY k = 0;
     g_set.codepage = 0;
-    g_set.overwrite = OW_ASK;
+    g_set.overwrite = GZ_OW_ASK;
+    g_set.c_format = GZ_WF_ZIP;
+    g_set.c_level = 5;
+    g_set.c_enc = GZ_WE_AES256;
+    g_set.c_solid = 1;
     g_set.open_folder = 1;
     g_set.smart_folder = 1;
     g_set.threads = 0;
@@ -303,7 +226,17 @@ void settings_load(void)
     g_set.split = 0;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, GZ_REGKEY, 0, KEY_READ, &k) != ERROR_SUCCESS) return;
     g_set.codepage = reg_int(k, L"CodePage", 0);
-    g_set.overwrite = reg_int(k, L"Overwrite", OW_ASK);
+    g_set.overwrite = reg_int(k, L"Overwrite", GZ_OW_ASK);
+    if (g_set.overwrite < 0 || g_set.overwrite > GZ_OW_NEWER) g_set.overwrite = GZ_OW_ASK;
+    g_set.c_format = reg_int(k, L"CFormat", GZ_WF_ZIP);
+    g_set.c_level = reg_int(k, L"CLevel", 5);
+    g_set.c_method = reg_int(k, L"CMethod", 0);
+    g_set.c_enc = reg_int(k, L"CEncryption", GZ_WE_AES256);
+    g_set.c_solid = reg_int(k, L"CSolid", 1);
+    g_set.c_encnames = reg_int(k, L"CEncryptNames", 0);
+    if (g_set.c_level < 0 || g_set.c_level > 9) g_set.c_level = 5;
+    if (g_set.c_method < 0 || g_set.c_method >= GZ_WM_COUNT) g_set.c_method = 0;
+    reg_str(k, L"Associations", g_set.assoc, GZ_COUNTOF(g_set.assoc));
     g_set.open_folder = reg_int(k, L"OpenFolder", 1);
     g_set.smart_folder = reg_int(k, L"SmartFolder", 1);
     g_set.threads = reg_int(k, L"Threads", 0);
@@ -352,6 +285,13 @@ void settings_save(void)
     reg_set_int(k, L"Split", g_set.split);
     reg_set_int(k, L"DestMode", g_set.dest_mode);
     reg_set_str(k, L"Dest", g_set.dest);
+    reg_set_int(k, L"CFormat", g_set.c_format);
+    reg_set_int(k, L"CLevel", g_set.c_level);
+    reg_set_int(k, L"CMethod", g_set.c_method);
+    reg_set_int(k, L"CEncryption", g_set.c_enc);
+    reg_set_int(k, L"CSolid", g_set.c_solid);
+    reg_set_int(k, L"CEncryptNames", g_set.c_encnames);
+    reg_set_str(k, L"Associations", g_set.assoc);
     for (int i = 0; i < 6; i++) {
         wchar_t n[16];
         wfmt(n, L"Recent%d", i);

@@ -3,36 +3,45 @@
  *
  *  ┌──────────────────────────────────────────────────────────┐
  *  │ menu                                                      │
- *  │ [열기] [압축 풀기] [바로 풀기] │ [테스트] [파일 보기] [정보] │ ... │  toolbar
- *  │ [↑]  archive.zip › 문서 › 사진                            │  path bar
+ *  │ [새로 압축] [열기] [압축 풀기] [바로 풀기] │ [테스트] ... │ ... │  toolbar
+ *  │ [↑]  archive.zip › 문서 › inner.tar › 사진                │  path bar
  *  │ folder tree │ file list (virtual list view)               │
  *  │ 파일 12개, 폴더 3개 · 원본 …            AVX2 엔진 · 8스레드 │  status bar
  *  └──────────────────────────────────────────────────────────┘
+ *
+ * Nested archives: double-clicking an archive inside the archive opens it as a
+ * new level (gz_handle_open_child: a view when the data is stored contiguously,
+ * else a temporary copy). The levels form a stack shown in the breadcrumb;
+ * "up" at the root of a level goes back to the folder of the outer archive.
  */
 #include "app.h"
 
 enum {
     CMD_OPEN = 1000, CMD_CLOSE, CMD_INFO, CMD_EXIT, CMD_EXTRACT, CMD_HERE, CMD_SMART, CMD_EXTRACT_SEL,
     CMD_TEST, CMD_VIEW, CMD_UP, CMD_TREE, CMD_SELALL, CMD_SETTINGS, CMD_BENCH, CMD_HOME, CMD_ABOUT,
-    CMD_CODEPAGE, CMD_WELCOME_EXTRACT,
+    CMD_CODEPAGE, CMD_WELCOME_EXTRACT, CMD_NEW, CMD_OPENINSIDE,
     CMD_RECENT0 = 1100, CMD_CP0 = 1200
 };
 
 #define ID_TREE 10
 #define ID_LIST 11
+#define MAXNEST 16
 
 typedef struct { u8 kind; u8 st; i32 idx; } row;   /* kind 0 = "..", 1 = folder, 2 = file; st = sort scratch */
+typedef struct { gz_handle *h; i32 cur; wchar_t *label; } level;
 
 static struct {
     HWND hwnd, tb, path, tree, list, status, welcome;
-    gz_open_arc *oa;
+    gz_handle *h;            /* archive shown (top of lv[]) or NULL */
+    level lv[MAXNEST];
+    int depth;
     i32 cur;
     row *rows;
     u32 nrows, caprows;
     int sort_col, sort_desc;
     int split, dragging;
     HIMAGELIST sysimg;
-    int ico_folder, ico_folder_open, ico_root;
+    int ico_folder, ico_folder_open, ico_root, ico_unknown, ico_archive;
     HTREEITEM *titem;
     u8 *tpop;
     int syncing;
@@ -42,6 +51,9 @@ static struct {
 } M;
 
 static wchar_t s_txt[1024];
+
+static const wchar_t *root_path(void) { return M.depth ? M.lv[0].h->path : L""; }
+static const wchar_t *cur_label(void) { return M.depth ? M.lv[M.depth - 1].label : L""; }
 
 /* ======================================================================
  * shell icons / type names, cached per extension
@@ -76,6 +88,15 @@ static const ext_info *ext_lookup(const wchar_t *base)
                    SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_TYPENAME);
     x->icon = fi.iIcon;
     wcopy(x->type, fi.szTypeName[0] ? fi.szTypeName : S(S_FILE), 64);
+    /* archive types the system does not know: our document icon and "압축 파일 (7Z)" */
+    if (n > 1 && (fi.iIcon == M.ico_unknown || !fi.szTypeName[0]) && is_archive_name(probe, 0)) {
+        if (M.ico_archive >= 0) x->icon = M.ico_archive;
+        wchar_t up[16];
+        int k = 0;
+        for (const wchar_t *p = e + 1; *p && k < 15; p++) up[k++] = (*p >= 'a' && *p <= 'z') ? (wchar_t)(*p - 32) : *p;
+        up[k] = 0;
+        wfmt(x->type, L"%s (%s)", S(S_FILTER_ARC), up);
+    }
     return x;
 }
 
@@ -89,6 +110,17 @@ static void init_sysicons(void)
     SHGetFileInfoW(L"folder", FILE_ATTRIBUTE_DIRECTORY, &fi, sizeof fi,
                    SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_OPENICON);
     M.ico_folder_open = fi.iIcon;
+    SHGetFileInfoW(L"file.gz-no-such-type", FILE_ATTRIBUTE_NORMAL, &fi, sizeof fi,
+                   SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+    M.ico_unknown = fi.iIcon;
+    /* our archive document icon, appended to this process's copy of the system list */
+    M.ico_archive = -1;
+    int cx = GetSystemMetrics(SM_CXSMICON);
+    HICON ic = (HICON)LoadImageW(g_inst, MAKEINTRESOURCEW(2), IMAGE_ICON, cx, cx, 0);
+    if (ic && M.sysimg) {
+        M.ico_archive = ImageList_ReplaceIcon(M.sysimg, -1, ic);
+        DestroyIcon(ic);
+    }
 }
 
 /* ======================================================================
@@ -101,8 +133,8 @@ static StrCmpLogicalW_t s_logical;
 static const wchar_t *row_name(const row *r)
 {
     if (r->kind == 0) return L"..";
-    if (r->kind == 1) return M.oa->arc->f[r->idx].base;
-    return M.oa->arc->e[r->idx].base;
+    if (r->kind == 1) return M.h->arc->f[r->idx].base;
+    return M.h->arc->e[r->idx].base;
 }
 
 static int name_cmp(const wchar_t *a, const wchar_t *b)
@@ -116,7 +148,7 @@ static int row_cmp(const row *a, const row *b)
 {
     if (a->kind != b->kind) return (int)a->kind - (int)b->kind;
     if (a->kind == 0) return 0;
-    gz_archive *ar = M.oa->arc;
+    gz_archive *ar = M.h->arc;
     int r = 0;
     if (a->kind == 2) {
         const gz_entry *x = &ar->e[a->idx], *y = &ar->e[b->idx];
@@ -152,9 +184,9 @@ static void sort_rows(void)
     u32 n = M.nrows;
     row *tmp = (row *)mem_alloc((size_t)n * sizeof(row) + 8);
     if (!tmp) return;
-    for (u32 w = 1; w < n; w *= 2) {
+    for (u32 w = 1; w < n; w = w > n / 2 ? n : w * 2) {
         for (u32 i = 0; i < n; i += 2 * w) {
-            u32 mid = i + w < n ? i + w : n, hi = i + 2 * w < n ? i + 2 * w : n, a = i, b = mid, k = i;
+            u32 mid = n - i > w ? i + w : n, hi = n - mid > w ? mid + w : n, a = i, b = mid, k = i;
             while (a < mid && b < hi) tmp[k++] = row_cmp(&M.rows[b], &M.rows[a]) < 0 ? M.rows[b++] : M.rows[a++];
             while (a < mid) tmp[k++] = M.rows[a++];
             while (b < hi) tmp[k++] = M.rows[b++];
@@ -196,26 +228,29 @@ static void update_header_arrows(void)
     }
 }
 
-static void navigate(i32 f, i32 focus_folder)
+/* focus_folder >= 0: select that folder; focus_entry >= 0: select that file */
+static void navigate_to(i32 f, i32 focus_folder, i32 focus_entry)
 {
-    if (!M.oa) return;
-    gz_archive *a = M.oa->arc;
+    if (!M.h) return;
+    gz_archive *a = M.h->arc;
     if (f < 0 || f >= (i32)a->nf) f = 0;
     M.cur = f;
     M.nrows = 0;
-    if (f != 0) push_row(0, a->f[f].parent);
+    if (f != 0 || M.depth > 1) push_row(0, f ? a->f[f].parent : 0);
     for (i32 s = a->f[f].first_sub; s >= 0; s = a->f[s].next_sib) push_row(1, s);
     for (i32 e = a->f[f].first_file; e >= 0; e = a->e[e].next) push_row(2, e);
     sort_rows();
     SendMessageW(M.list, LVM_SETITEMCOUNT, M.nrows, 0);
     ListView_SetItemState(M.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
-    int sel = 0;
-    if (focus_folder >= 0)
-        for (u32 i = 0; i < M.nrows; i++)
-            if (M.rows[i].kind == 1 && M.rows[i].idx == focus_folder) { sel = (int)i; break; }
+    int sel = 0, found = 0;
+    for (u32 i = 0; i < M.nrows && (focus_folder >= 0 || focus_entry >= 0); i++)
+        if ((M.rows[i].kind == 1 && M.rows[i].idx == focus_folder) || (M.rows[i].kind == 2 && M.rows[i].idx == focus_entry)) {
+            sel = (int)i;
+            found = 1;
+            break;
+        }
     if (M.nrows) {
-        ListView_SetItemState(M.list, sel, LVIS_FOCUSED | (focus_folder >= 0 ? LVIS_SELECTED : 0),
-                              LVIS_FOCUSED | LVIS_SELECTED);
+        ListView_SetItemState(M.list, sel, LVIS_FOCUSED | (found ? LVIS_SELECTED : 0), LVIS_FOCUSED | LVIS_SELECTED);
         ListView_EnsureVisible(M.list, sel, FALSE);
     }
     InvalidateRect(M.list, NULL, TRUE);
@@ -224,13 +259,15 @@ static void navigate(i32 f, i32 focus_folder)
     update_status();
 }
 
+static void navigate(i32 f, i32 focus_folder) { navigate_to(f, focus_folder, -1); }
+
 /* ======================================================================
  * tree (lazy population)
  * ====================================================================== */
 
 static HTREEITEM tree_add(HTREEITEM parent, i32 f, const wchar_t *text, int icon, int sel_icon)
 {
-    gz_archive *a = M.oa->arc;
+    gz_archive *a = M.h->arc;
     TVINSERTSTRUCTW ins;
     __builtin_memset(&ins, 0, sizeof ins);
     ins.hParent = parent;
@@ -248,7 +285,7 @@ static HTREEITEM tree_add(HTREEITEM parent, i32 f, const wchar_t *text, int icon
 
 static void tree_populate(i32 f)
 {
-    gz_archive *a = M.oa->arc;
+    gz_archive *a = M.h->arc;
     if (M.tpop[f]) return;
     M.tpop[f] = 1;
     for (i32 s = a->f[f].first_sub; s >= 0; s = a->f[s].next_sib)
@@ -257,19 +294,25 @@ static void tree_populate(i32 f)
 
 static void tree_build(void)
 {
-    gz_archive *a = M.oa->arc;
+    gz_archive *a = M.h->arc;
     SendMessageW(M.tree, WM_SETREDRAW, FALSE, 0);
+    M.syncing = 1;
     SendMessageW(M.tree, TVM_DELETEITEM, 0, (LPARAM)TVI_ROOT);
+    M.syncing = 0;
     mem_free(M.titem);
     mem_free(M.tpop);
     M.titem = (HTREEITEM *)mem_alloc((size_t)a->nf * sizeof(HTREEITEM) + 8);
     M.tpop = (u8 *)mem_alloc(a->nf + 8);
-    if (!M.titem || !M.tpop) return;
-    SHFILEINFOW fi;
-    __builtin_memset(&fi, 0, sizeof fi);
-    SHGetFileInfoW(M.oa->path, 0, &fi, sizeof fi, SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
-    M.ico_root = fi.iIcon;
-    tree_add(TVI_ROOT, 0, path_base(M.oa->path), M.ico_root, M.ico_root);
+    if (!M.titem || !M.tpop) { SendMessageW(M.tree, WM_SETREDRAW, TRUE, 0); return; }
+    if (M.depth == 1) {
+        SHFILEINFOW fi;
+        __builtin_memset(&fi, 0, sizeof fi);
+        SHGetFileInfoW(M.h->path, 0, &fi, sizeof fi, SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+        M.ico_root = fi.iIcon;
+    } else {
+        M.ico_root = ext_lookup(cur_label())->icon;
+    }
+    tree_add(TVI_ROOT, 0, cur_label(), M.ico_root, M.ico_root);
     tree_populate(0);
     SendMessageW(M.tree, TVM_EXPAND, TVE_EXPAND, (LPARAM)M.titem[0]);
     SendMessageW(M.tree, WM_SETREDRAW, TRUE, 0);
@@ -278,7 +321,7 @@ static void tree_build(void)
 static void tree_select(i32 f)
 {
     if (!M.titem || M.syncing) return;
-    gz_archive *a = M.oa->arc;
+    gz_archive *a = M.h->arc;
     i32 chain[256];
     int n = 0;
     for (i32 x = f; x > 0 && n < 256; x = a->f[x].parent) chain[n++] = x;
@@ -307,7 +350,10 @@ static u32 selected_rows(u64 *bytes)
         if ((u32)i >= M.nrows) break;
         if (M.rows[i].kind == 0) continue;
         n++;
-        if (M.rows[i].kind == 2) *bytes += M.oa->arc->e[M.rows[i].idx].usize;
+        if (M.rows[i].kind == 2) {
+            u64 s = M.h->arc->e[M.rows[i].idx].usize;
+            if (s != GZ_SIZE_UNKNOWN) *bytes += s;
+        }
     }
     return n;
 }
@@ -319,8 +365,8 @@ static void update_status(void)
 
 static void status_text(wchar_t *o)
 {
-    if (!M.oa) { wcopy(o, S(S_ST_READY), 256); return; }
-    gz_archive *a = M.oa->arc;
+    if (!M.h) { wcopy(o, S(S_ST_READY), 256); return; }
+    gz_archive *a = M.h->arc;
     u64 sb;
     u32 ns = selected_rows(&sb);
     wchar_t x1[32], x2[32], x3[32], x4[32], x5[16];
@@ -345,8 +391,9 @@ static void status_text(wchar_t *o)
 
 typedef struct { int cmd, icon, sid, sep, needs; } tbbtn;
 static const tbbtn k_tb[] = {
+    { CMD_NEW, IC_COMPRESS, S_TB_NEW, 0, 0 },
     { CMD_OPEN, IC_OPEN, S_TB_OPEN, 0, 0 },
-    { CMD_EXTRACT, IC_EXTRACT, S_TB_EXTRACT, 0, 1 },
+    { CMD_EXTRACT, IC_EXTRACT, S_TB_EXTRACT, 1, 1 },
     { CMD_SMART, IC_EXTRACT_HERE, S_TB_HERE, 0, 1 },
     { CMD_TEST, IC_TEST, S_TB_TEST, 1, 1 },
     { CMD_VIEW, IC_VIEW, S_TB_VIEW, 0, 1 },
@@ -395,7 +442,7 @@ static LRESULT CALLBACK tb_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         int isz = scale(32);
         for (int i = 0; i < NTB; i++) {
             RECT r = s_tbr[i];
-            int enabled = !k_tb[i].needs || M.oa;
+            int enabled = !k_tb[i].needs || M.h;
             if (k_tb[i].sep) {
                 RECT s = { r.left - scale(7), r.top + scale(10), r.left - scale(6), r.bottom - scale(10) };
                 gfx_fill(dc, &s, C_BORDER);
@@ -433,7 +480,7 @@ static LRESULT CALLBACK tb_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         return 0;
     case WM_LBUTTONDOWN: {
         int i = tb_hit((short)LOWORD(lp), (short)HIWORD(lp));
-        if (i >= 0 && (!k_tb[i].needs || M.oa)) {
+        if (i >= 0 && (!k_tb[i].needs || M.h)) {
             s_tb_down = i;
             SetCapture(h);
             InvalidateRect(h, NULL, FALSE);
@@ -462,14 +509,41 @@ static LRESULT CALLBACK tb_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 }
 
 /* ======================================================================
- * path bar (up button + breadcrumb)
+ * path bar (up button + breadcrumb over the nesting levels)
  * ====================================================================== */
 
 #define MAXSEG 48
+typedef struct { int level; i32 f; const wchar_t *text; } seg;
+static seg s_segs[MAXSEG];
 static RECT s_seg_r[MAXSEG];
-static i32 s_seg_f[MAXSEG];
 static int s_nseg, s_path_hot = -2;
 static RECT s_up_r;
+
+static void pop_to(int level);
+
+/* outer levels (one segment each), then the folders of the current level */
+static int build_segments(seg *o)
+{
+    int n = 0;
+    for (int k = 0; k + 1 < M.depth && n < MAXSEG - 8; k++) {
+        o[n].level = k;
+        o[n].f = -1;
+        o[n].text = M.lv[k].label;
+        n++;
+    }
+    gz_archive *a = M.h->arc;
+    i32 chain[MAXSEG];
+    int c = 0;
+    for (i32 f = M.cur; f >= 0 && c < MAXSEG; f = f ? a->f[f].parent : -1) chain[c++] = f;
+    if (n + c > MAXSEG) c = MAXSEG - n;
+    for (int k = c - 1; k >= 0; k--) {
+        o[n].level = M.depth - 1;
+        o[n].f = chain[k];
+        o[n].text = chain[k] == 0 ? cur_label() : a->f[chain[k]].base;
+        n++;
+    }
+    return n;
+}
 
 static LRESULT CALLBACK path_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
@@ -486,11 +560,10 @@ static LRESULT CALLBACK path_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         RECT bl = { 0, cr.bottom - 1, cr.right, cr.bottom };
         gfx_fill(dc, &bl, C_BORDER);
         s_nseg = 0;
-        if (M.oa) {
-            gz_archive *a = M.oa->arc;
+        if (M.h) {
             int pad = scale(6), bh = cr.bottom - scale(10);
             SetRect(&s_up_r, pad, scale(5), pad + bh + scale(4), scale(5) + bh);
-            int up_ok = M.cur != 0;
+            int up_ok = M.cur != 0 || M.depth > 1;
             if (up_ok && s_path_hot == -1) gfx_round_rect(dc, &s_up_r, scale(5), C_TINT, 0, 0);
             int is = scale(16);
             gfx_draw_icon(dc, IC_UP, s_up_r.left + (s_up_r.right - s_up_r.left - is) / 2,
@@ -498,29 +571,29 @@ static LRESULT CALLBACK path_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
             /* box around breadcrumb */
             RECT box = { s_up_r.right + scale(6), scale(5), cr.right - pad, scale(5) + bh };
             gfx_round_rect(dc, &box, scale(5), RGB(250, 250, 251), C_BORDER, 1);
-            i32 chain[MAXSEG];
-            int n = 0;
-            for (i32 f = M.cur; f >= 0 && n < MAXSEG; f = a->f[f].parent) chain[n++] = f;
+            int n = build_segments(s_segs);
             int x = box.left + scale(6);
             int iy = box.top + (bh - is) / 2;
-            ImageList_Draw(M.sysimg, M.ico_root, dc, x, iy, ILD_TRANSPARENT);
+            ImageList_Draw(M.sysimg, M.depth > 1 ? ext_lookup(M.lv[0].label)->icon : M.ico_root, dc, x, iy,
+                           ILD_TRANSPARENT);
             x += is + scale(6);
-            for (int k = n - 1; k >= 0 && s_nseg < MAXSEG; k--) {
-                i32 f = chain[k];
-                const wchar_t *t = f == 0 ? path_base(M.oa->path) : a->f[f].base;
-                int w = gfx_text_w(dc, t, k == 0 ? g_font.ui_bold : g_font.ui) + scale(10);
+            for (int k = 0; k < n && s_nseg < MAXSEG; k++) {
+                int last = k == n - 1, outer = s_segs[k].level < M.depth - 1;
+                const wchar_t *t = s_segs[k].text;
+                HFONT f = last || outer || (s_segs[k].f == 0 && M.depth > 1) ? g_font.ui_bold : g_font.ui;
+                int w = gfx_text_w(dc, t, f) + scale(10);
                 if (x + w > box.right - scale(4)) w = box.right - scale(4) - x;
                 if (w <= 0) break;
                 RECT r = { x, box.top + scale(2), x + w, box.bottom - scale(2) };
-                if (s_path_hot == s_nseg && k != 0) gfx_round_rect(dc, &r, scale(4), C_TINT, 0, 0);
-                gfx_text(dc, t, &r, k == 0 ? g_font.ui_bold : g_font.ui, k == 0 ? C_TEXT : C_TEXT2,
+                if (s_path_hot == s_nseg && !last) gfx_round_rect(dc, &r, scale(4), C_TINT, 0, 0);
+                gfx_text(dc, t, &r, f, last ? C_TEXT : outer ? C_ACCENT_DK : C_TEXT2,
                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                s_seg_r[s_nseg] = r;
-                s_seg_f[s_nseg++] = f;
+                s_seg_r[s_nseg++] = r;
                 x += w;
-                if (k) {
+                if (!last) {
                     RECT ar = { x, box.top, x + scale(14), box.bottom };
-                    gfx_text(dc, L"›", &ar, g_font.ui, RGB(170, 172, 180), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    gfx_text(dc, outer ? L"»" : L"›", &ar, g_font.ui, RGB(170, 172, 180),
+                             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                     x += scale(14);
                 }
             }
@@ -553,10 +626,14 @@ static LRESULT CALLBACK path_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         return 0;
     case WM_LBUTTONUP: {
         POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
-        if (!M.oa) return 0;
+        if (!M.h) return 0;
         if (PtInRect(&s_up_r, pt)) { PostMessageW(GetParent(h), WM_COMMAND, CMD_UP, 0); return 0; }
-        for (int i = 0; i < s_nseg; i++)
-            if (PtInRect(&s_seg_r[i], pt) && s_seg_f[i] != M.cur) { navigate(s_seg_f[i], -1); break; }
+        for (int i = 0; i < s_nseg; i++) {
+            if (!PtInRect(&s_seg_r[i], pt)) continue;
+            if (s_segs[i].level < M.depth - 1) pop_to(s_segs[i].level);
+            else if (s_segs[i].f != M.cur) navigate(s_segs[i].f, -1);
+            break;
+        }
         return 0;
     }
     }
@@ -599,8 +676,38 @@ static LRESULT CALLBACK status_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
  * welcome screen
  * ====================================================================== */
 
-static RECT s_w_open, s_w_extract, s_w_recent[6];
+static RECT s_w_btn[3], s_w_recent[6];
 static int s_w_hot = -1;
+static wchar_t s_formats[400];
+
+static int fmt_rank(const char *n)
+{
+    static const char *const top[] = { "ZIP", "7z", "RAR", "RAR5", "ALZ", "EGG", "TAR", "GZIP", "BZIP2", "XZ", "ZSTD",
+                                       "ISO", "UDF", "CAB", "LZ4" };
+    for (u32 i = 0; i < GZ_COUNTOF(top); i++) {
+        const char *a = top[i], *b = n;
+        while (*a && (*a | 32) == (*b | 32)) a++, b++;
+        if (!*a && !*b) return (int)i;
+    }
+    return (int)GZ_COUNTOF(top);
+}
+
+/* "ZIP · 7z · RAR · TAR · ..." from the registered formats, the common ones first */
+static const wchar_t *formats_line(void)
+{
+    if (s_formats[0]) return s_formats;
+    size_t k = 0;
+    for (int rank = 0; rank <= 15; rank++) {
+        for (int i = 0; gz_formats[i] && k + 24 < GZ_COUNTOF(s_formats); i++) {
+            const gz_format *f = gz_formats[i];
+            if (!f->name || (f->flags & GZ_FMT_WEAK) || fmt_rank(f->name) != rank) continue;
+            if (k) { s_formats[k++] = L' '; s_formats[k++] = 0x00B7; s_formats[k++] = L' '; }
+            for (const char *p = f->name; *p && k + 4 < GZ_COUNTOF(s_formats); p++) s_formats[k++] = (wchar_t)(u8)*p;
+        }
+    }
+    s_formats[k] = 0;
+    return s_formats;
+}
 
 static LRESULT CALLBACK welcome_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
@@ -617,7 +724,7 @@ static LRESULT CALLBACK welcome_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 
         int nrec = 0;
         for (int i = 0; i < 6; i++) if (g_set.recent[i][0]) nrec++;
-        int cw = scale(520);
+        int cw = scale(560);
         if (cw > cr.right - scale(40)) cw = cr.right - scale(40);
         int logo = scale(88);
         int total = logo + scale(14) + scale(34) + scale(22) + scale(24) + scale(150) + scale(20) +
@@ -638,17 +745,23 @@ static LRESULT CALLBACK welcome_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         gfx_round_rect(dc, &dz, scale(14), C_BG, RGB(232, 205, 207), 1);
         RECT d1 = { dz.left, dz.top + scale(18), dz.right, dz.top + scale(42) };
         gfx_text(dc, S(S_W_DROP), &d1, g_font.title, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        RECT d2 = { dz.left + scale(8), d1.bottom + scale(2), dz.right - scale(8), d1.bottom + scale(22) };
-        gfx_text(dc, S(S_W_FORMATS), &d2, g_font.small, C_TEXT2, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT d2 = { dz.left + scale(16), d1.bottom + scale(2), dz.right - scale(16), d1.bottom + scale(22) };
+        gfx_text(dc, formats_line(), &d2, g_font.small, C_TEXT2, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         int bw = scale(150), bh = scale(38), gap = scale(12);
-        int bx = cx - bw - gap / 2, by = dz.bottom - bh - scale(24);
-        SetRect(&s_w_open, bx, by, bx + bw, by + bh);
-        SetRect(&s_w_extract, cx + gap / 2, by, cx + gap / 2 + bw, by + bh);
-        gfx_round_rect(dc, &s_w_open, scale(8), s_w_hot == 0 ? C_ACCENT_HOT : C_ACCENT, 0, 0);
-        gfx_text(dc, S(S_W_OPEN), &s_w_open, g_font.ui_bold, RGB(255, 255, 255), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        gfx_round_rect(dc, &s_w_extract, scale(8), s_w_hot == 1 ? RGB(246, 246, 248) : C_BG,
-                       s_w_hot == 1 ? RGB(196, 198, 206) : RGB(214, 216, 222), 1);
-        gfx_text(dc, S(S_W_EXTRACT), &s_w_extract, g_font.ui_bold, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        int bx = cx - (3 * bw + 2 * gap) / 2, by = dz.bottom - bh - scale(24);
+        static const int sid[3] = { S_W_OPEN, S_W_EXTRACT, S_W_NEW };
+        for (int i = 0; i < 3; i++) {
+            SetRect(&s_w_btn[i], bx + i * (bw + gap), by, bx + i * (bw + gap) + bw, by + bh);
+            if (i == 0) {
+                gfx_round_rect(dc, &s_w_btn[i], scale(8), s_w_hot == 0 ? C_ACCENT_HOT : C_ACCENT, 0, 0);
+                gfx_text(dc, S(sid[i]), &s_w_btn[i], g_font.ui_bold, RGB(255, 255, 255),
+                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            } else {
+                gfx_round_rect(dc, &s_w_btn[i], scale(8), s_w_hot == i ? RGB(246, 246, 248) : C_BG,
+                               s_w_hot == i ? RGB(196, 198, 206) : RGB(214, 216, 222), 1);
+                gfx_text(dc, S(sid[i]), &s_w_btn[i], g_font.ui_bold, C_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
         y = dz.bottom + scale(20);
 
         for (int i = 0; i < 6; i++) SetRectEmpty(&s_w_recent[i]);
@@ -656,12 +769,10 @@ static LRESULT CALLBACK welcome_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
             RECT rh = { cx - cw / 2, y, cx + cw / 2, y + scale(22) };
             gfx_text(dc, S(S_W_RECENT), &rh, g_font.ui_bold, C_TEXT2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             y += scale(26);
-            for (int i = 0, k = 0; i < 6; i++) {
+            for (int i = 0; i < 6; i++) {
                 if (!g_set.recent[i][0]) continue;
                 RECT r = { cx - cw / 2, y, cx + cw / 2, y + scale(22) };
                 if (s_w_hot == 10 + i) gfx_round_rect(dc, &r, scale(4), C_TINT, 0, 0);
-                SHFILEINFOW fi;
-                __builtin_memset(&fi, 0, sizeof fi);
                 const ext_info *ei = ext_lookup(path_base(g_set.recent[i]));
                 ImageList_Draw(M.sysimg, ei->icon, dc, r.left + scale(6), r.top + (scale(22) - scale(16)) / 2, ILD_TRANSPARENT);
                 RECT tr = { r.left + scale(30), r.top, r.right - scale(6), r.bottom };
@@ -675,7 +786,6 @@ static LRESULT CALLBACK welcome_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
                 gfx_text(dc, dir, &dr, g_font.small, RGB(160, 162, 170), DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
                 s_w_recent[i] = r;
                 y += scale(24);
-                k++;
             }
         }
         /* engine line */
@@ -700,8 +810,7 @@ static LRESULT CALLBACK welcome_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     case WM_MOUSEMOVE: {
         POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
         int hot = -1;
-        if (PtInRect(&s_w_open, pt)) hot = 0;
-        else if (PtInRect(&s_w_extract, pt)) hot = 1;
+        for (int i = 0; i < 3; i++) if (PtInRect(&s_w_btn[i], pt)) hot = i;
         for (int i = 0; i < 6; i++) if (PtInRect(&s_w_recent[i], pt)) hot = 10 + i;
         if (hot != s_w_hot) {
             s_w_hot = hot;
@@ -722,6 +831,7 @@ static LRESULT CALLBACK welcome_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     case WM_LBUTTONUP:
         if (s_w_hot == 0) PostMessageW(GetParent(h), WM_COMMAND, CMD_OPEN, 0);
         else if (s_w_hot == 1) PostMessageW(GetParent(h), WM_COMMAND, CMD_WELCOME_EXTRACT, 0);
+        else if (s_w_hot == 2) PostMessageW(GetParent(h), WM_COMMAND, CMD_NEW, 0);
         else if (s_w_hot >= 10) PostMessageW(GetParent(h), WM_COMMAND, (WPARAM)(CMD_RECENT0 + s_w_hot - 10), 0);
         return 0;
     }
@@ -742,7 +852,7 @@ static void layout(void)
     y += M.tb_h;
     int bottom = h - M.st_h;
     MoveWindow(M.status, 0, bottom, w, M.st_h, TRUE);
-    if (!M.oa) {
+    if (!M.h) {
         ShowWindow(M.path, SW_HIDE);
         ShowWindow(M.tree, SW_HIDE);
         ShowWindow(M.list, SW_HIDE);
@@ -784,16 +894,14 @@ static void rebuild_recent_menu(void)
     if (!any) AppendMenuW(M.recent_menu, MF_STRING | MF_GRAYED, 0, S(S_M_NORECENT));
 }
 
-static HMENU build_cp_menu(void)
+static void fill_cp_menu(HMENU m)
 {
-    HMENU m = CreatePopupMenu();
-    int cur = M.oa ? M.oa->arc->codepage : g_set.codepage;
+    int cur = M.h ? M.h->arc->codepage : g_set.codepage;
     for (int i = 0; i < g_cp_count; i++) {
         AppendMenuW(m, MF_STRING | (g_cp_list[i].cp == cur ? MF_CHECKED : 0), (UINT_PTR)(CMD_CP0 + i),
                     S(g_cp_list[i].sid));
         if (i == 0) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     }
-    return m;
 }
 
 static void build_menu(void)
@@ -801,6 +909,8 @@ static void build_menu(void)
     HMENU bar = CreateMenu(), f = CreatePopupMenu(), a = CreatePopupMenu(), v = CreatePopupMenu(),
           o = CreatePopupMenu(), hp = CreatePopupMenu();
     M.recent_menu = CreatePopupMenu();
+    AppendMenuW(f, MF_STRING, CMD_NEW, S(S_M_NEW));
+    AppendMenuW(f, MF_SEPARATOR, 0, NULL);
     AppendMenuW(f, MF_STRING, CMD_OPEN, S(S_M_OPEN));
     AppendMenuW(f, MF_POPUP, (UINT_PTR)M.recent_menu, S(S_M_RECENT));
     AppendMenuW(f, MF_STRING, CMD_CLOSE, S(S_M_CLOSE));
@@ -815,11 +925,13 @@ static void build_menu(void)
     AppendMenuW(a, MF_SEPARATOR, 0, NULL);
     AppendMenuW(a, MF_STRING, CMD_TEST, S(S_M_TEST));
     AppendMenuW(v, MF_STRING, CMD_VIEW, S(S_M_OPENITEM));
+    AppendMenuW(v, MF_STRING, CMD_OPENINSIDE, S(S_M_OPENINSIDE));
     AppendMenuW(v, MF_STRING, CMD_UP, S(S_M_UP));
     AppendMenuW(v, MF_STRING, CMD_SELALL, S(S_M_SELECTALL));
     AppendMenuW(v, MF_SEPARATOR, 0, NULL);
     AppendMenuW(v, MF_STRING | (g_set.show_tree ? MF_CHECKED : 0), CMD_TREE, S(S_M_TREE));
-    M.cp_menu = build_cp_menu();
+    M.cp_menu = CreatePopupMenu();
+    fill_cp_menu(M.cp_menu);
     AppendMenuW(v, MF_POPUP, (UINT_PTR)M.cp_menu, S(S_M_CODEPAGE));
     AppendMenuW(o, MF_STRING, CMD_SETTINGS, S(S_M_SETTINGS));
     AppendMenuW(o, MF_STRING, CMD_BENCH, S(S_M_BENCH));
@@ -838,33 +950,53 @@ static void build_menu(void)
 static void refresh_cp_menu(void)
 {
     while (GetMenuItemCount(M.cp_menu) > 0) DeleteMenu(M.cp_menu, 0, MF_BYPOSITION);
-    int cur = M.oa ? M.oa->arc->codepage : g_set.codepage;
-    for (int i = 0; i < g_cp_count; i++) {
-        AppendMenuW(M.cp_menu, MF_STRING | (g_cp_list[i].cp == cur ? MF_CHECKED : 0), (UINT_PTR)(CMD_CP0 + i),
-                    S(g_cp_list[i].sid));
-        if (i == 0) AppendMenuW(M.cp_menu, MF_SEPARATOR, 0, NULL);
-    }
+    fill_cp_menu(M.cp_menu);
 }
 
 static void update_title(void)
 {
-    wchar_t t[MAX_PATH + 32];
-    if (M.oa) wfmt(t, L"%s - %s", path_base(M.oa->path), S(S_APP));
-    else wcopy(t, S(S_APP), 64);
+    wchar_t t[MAX_PATH * 2 + 64];
+    if (M.h) {
+        wcopy(t, M.lv[0].label, MAX_PATH);
+        for (int k = 1; k < M.depth; k++) { wcat(t, L" » ", GZ_COUNTOF(t)); wcat(t, M.lv[k].label, GZ_COUNTOF(t)); }
+        wcat(t, L" - ", GZ_COUNTOF(t));
+        wcat(t, S(S_APP), GZ_COUNTOF(t));
+    } else {
+        wcopy(t, S(S_APP), 64);
+    }
     SetWindowTextW(M.hwnd, t);
 }
 
 /* ======================================================================
- * archive open / close / actions
+ * archive open / close / nesting / actions
  * ====================================================================== */
+
+static void after_level_change(i32 folder, i32 focus_folder, i32 focus_entry)
+{
+    refresh_cp_menu();
+    update_title();
+    layout();
+    tree_build();
+    navigate_to(folder, focus_folder, focus_entry);
+    InvalidateRect(M.tb, NULL, FALSE);
+    InvalidateRect(M.path, NULL, FALSE);
+}
 
 static void close_archive(void)
 {
-    if (!M.oa) return;
+    if (!M.depth) return;
     SendMessageW(M.list, LVM_SETITEMCOUNT, 0, 0);
+    M.syncing = 1;
     SendMessageW(M.tree, TVM_DELETEITEM, 0, (LPARAM)TVI_ROOT);
-    arc_close(M.oa);
-    M.oa = 0;
+    M.syncing = 0;
+    while (M.depth) {                       /* inner levels first: they may read through outer ones */
+        level *l = &M.lv[--M.depth];
+        gz_handle_close(l->h);
+        mem_free(l->label);
+        __builtin_memset(l, 0, sizeof *l);
+    }
+    M.h = 0;
+    M.cur = 0;
     M.nrows = 0;
     mem_free(M.titem); M.titem = 0;
     mem_free(M.tpop); M.tpop = 0;
@@ -874,45 +1006,101 @@ static void close_archive(void)
     update_status();
 }
 
-static int open_archive(const wchar_t *path)
+/* 1: opened, cancelled or the error was shown; 0: not an archive (quiet_format only) */
+static int open_archive_ex(const wchar_t *path, int quiet_format)
 {
     int err;
-    gz_open_arc *oa = open_archive_ui(M.hwnd, path, g_set.codepage, &err);
-    if (!oa) {
-        if (err == GZ_E_CANCEL) return 0;
-        wchar_t t[MAX_PATH * 2 + 256];
-        wfmt(t, L"%s\n\n%s\n%s", S(S_OPEN_FAIL), path, err == GZ_E_METHOD ? S(S_E_SPLIT) : err_text(err));
-        msg_box(M.hwnd, t, MB_ICONWARNING);
-        return 0;
+    gz_handle *h = open_archive_ui(M.hwnd, path, 0, 0, g_set.codepage, &err);
+    if (!h) {
+        if (quiet_format && err == GZ_E_FORMAT) return 0;
+        if (err != GZ_E_CANCEL) open_error_box(M.hwnd, path, err);
+        return 1;
     }
     close_archive();
-    M.oa = oa;
-    settings_add_recent(oa->path);
+    M.lv[0].h = h;
+    M.lv[0].label = wdup(path_base(h->path));
+    if (!M.lv[0].label) { gz_handle_close(h); M.lv[0].h = 0; return 1; }
+    M.depth = 1;
+    M.h = h;
+    settings_add_recent(h->path);
     settings_save();
     rebuild_recent_menu();
-    refresh_cp_menu();
-    update_title();
-    layout();
-    tree_build();
-    navigate(0, -1);
-    InvalidateRect(M.tb, NULL, FALSE);
+    after_level_change(0, -1, -1);
     SetFocus(M.list);
     return 1;
+}
+
+static void open_archive(const wchar_t *path) { open_archive_ex(path, 0); }
+
+/* entry idx of the current archive as a new level. 0 when it is not an archive. */
+static int open_nested(u32 idx, int quiet_format)
+{
+    if (!M.h || M.depth >= MAXNEST || idx >= M.h->arc->n) return 0;
+    int err;
+    gz_handle *c = open_archive_ui(M.hwnd, 0, M.h, idx, g_set.codepage, &err);
+    if (!c) {
+        if (err == GZ_E_CANCEL) return 1;
+        if (quiet_format && (err == GZ_E_FORMAT || err == GZ_E_TRUNC)) return 0;
+        open_error_box(M.hwnd, M.h->arc->e[idx].name, err);
+        return 1;
+    }
+    wchar_t *label = wdup(M.h->arc->e[idx].base);
+    if (!label) { gz_handle_close(c); return 1; }
+    M.lv[M.depth - 1].cur = M.cur;
+    M.lv[M.depth].h = c;
+    M.lv[M.depth].label = label;
+    M.lv[M.depth].cur = 0;
+    M.depth++;
+    M.h = c;
+    after_level_change(0, -1, -1);
+    SetFocus(M.list);
+    return 1;
+}
+
+/* back to level k (closing the levels inside it), at the folder it was left in */
+static void pop_to(int k)
+{
+    if (k < 0 || k >= M.depth - 1) return;
+    /* the entry we came from, to select it again */
+    const wchar_t *came = M.lv[k + 1].label;
+    i32 back = M.lv[k].cur, focus = -1;
+    gz_archive *pa = M.lv[k].h->arc;
+    if (back >= 0 && back < (i32)pa->nf)
+        for (i32 e = pa->f[back].first_file; e >= 0; e = pa->e[e].next)
+            if (!wcmp(pa->e[e].base, came)) { focus = e; break; }
+    while (M.depth > k + 1) {
+        level *l = &M.lv[--M.depth];
+        gz_handle_close(l->h);
+        mem_free(l->label);
+        __builtin_memset(l, 0, sizeof *l);
+    }
+    M.h = M.lv[k].h;
+    after_level_change(back, -1, focus);
+}
+
+static void go_up(void)
+{
+    if (!M.h) return;
+    if (M.cur) navigate(M.h->arc->f[M.cur].parent, M.cur);
+    else if (M.depth > 1) pop_to(M.depth - 2);
 }
 
 static void cmd_open(void)
 {
     wchar_t file[MAX_PATH * 2];
-    wchar_t filter[256];
     file[0] = 0;
-    int n = 0;
-    const wchar_t *parts[] = { S(S_FILTER_ARC), L" (*.zip, *.tar, *.gz, *.tgz)", 0,
-                               L"*.zip;*.zipx;*.jar;*.tar;*.gz;*.tgz;*.taz;*.exe", 0, S(S_FILTER_ALL), 0, L"*.*", 0 };
-    for (u32 i = 0; i < GZ_COUNTOF(parts); i++) {
-        if (!parts[i]) { filter[n++] = 0; continue; }
-        for (const wchar_t *p = parts[i]; *p && n < 250; p++) filter[n++] = *p;
+    wchar_t *pat = archive_patterns();
+    size_t pl = wlen(pat);
+    wchar_t *filter = (wchar_t *)mem_alloc((pl + 128) * sizeof(wchar_t));
+    if (filter) {
+        int n = 0;
+        const wchar_t *parts[] = { S(S_FILTER_ARC), 0, pat ? pat : L"*.zip", 0, S(S_FILTER_ALL), 0, L"*.*", 0 };
+        for (u32 i = 0; i < GZ_COUNTOF(parts); i++) {
+            if (!parts[i]) { filter[n++] = 0; continue; }
+            for (const wchar_t *p = parts[i]; *p && (size_t)n < pl + 100; p++) filter[n++] = *p;
+        }
+        filter[n] = 0;
     }
-    filter[n] = 0;
     OPENFILENAMEW of;
     __builtin_memset(&of, 0, sizeof of);
     of.lStructSize = sizeof of;
@@ -921,13 +1109,57 @@ static void cmd_open(void)
     of.lpstrFile = file;
     of.nMaxFile = MAX_PATH * 2;
     of.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_EXPLORER;
-    if (GetOpenFileNameW(&of)) open_archive(file);
+    int ok = GetOpenFileNameW(&of);
+    mem_free(filter);
+    mem_free(pat);
+    if (ok) open_archive(file);
+}
+
+/* files to compress: a multi-select open dialog */
+static void cmd_new(void)
+{
+    size_t cap = 32768;
+    wchar_t *buf = (wchar_t *)mem_alloc(cap * sizeof(wchar_t));
+    if (!buf) return;
+    wchar_t filter[64];
+    int n = 0;
+    for (const wchar_t *p = S(S_FILTER_ALL); *p && n < 50; p++) filter[n++] = *p;
+    filter[n++] = 0;
+    filter[n++] = '*'; filter[n++] = '.'; filter[n++] = '*'; filter[n++] = 0;
+    filter[n] = 0;
+    OPENFILENAMEW of;
+    __builtin_memset(&of, 0, sizeof of);
+    of.lStructSize = sizeof of;
+    of.hwndOwner = M.hwnd;
+    of.lpstrFilter = filter;
+    of.lpstrFile = buf;
+    of.nMaxFile = (DWORD)cap;
+    of.lpstrTitle = S(S_C_TITLE);
+    of.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_EXPLORER | OFN_ALLOWMULTISELECT;
+    if (GetOpenFileNameW(&of)) {
+        /* "dir\0a\0b\0\0" or "dir\file\0\0" */
+        const wchar_t *dir = buf, *p = buf + wlen(buf) + 1;
+        u32 cnt = 0;
+        wchar_t **v = (wchar_t **)mem_alloc(4096 * sizeof(wchar_t *));
+        if (v) {
+            if (!*p && (v[cnt] = wdup(dir))) cnt++;
+            for (; *p && cnt < 4096; p += wlen(p) + 1) {
+                wchar_t full[MAX_PATH * 2];
+                path_join(full, dir, p, GZ_COUNTOF(full));
+                if ((v[cnt] = wdup(full))) cnt++;
+            }
+            if (cnt) dlg_compress(M.hwnd, (const wchar_t *const *)v, cnt);
+            for (u32 i = 0; i < cnt; i++) mem_free(v[i]);
+            mem_free(v);
+        }
+    }
+    mem_free(buf);
 }
 
 /* selection -> entry mask */
 static int collect_selection(u8 **mask, int *count)
 {
-    gz_archive *a = M.oa->arc;
+    gz_archive *a = M.h->arc;
     *count = 0;
     *mask = 0;
     u8 *m = (u8 *)mem_alloc(a->n + 8);
@@ -954,14 +1186,14 @@ static int collect_selection(u8 **mask, int *count)
 
 static void cmd_extract(int mode, int selected_only)
 {
-    if (!M.oa) return;
+    if (!M.h) return;
     u8 *mask = 0;
     int nsel = 0;
     collect_selection(&mask, &nsel);
-    const wchar_t *strip = M.cur ? M.oa->arc->f[M.cur].name : 0;
+    const wchar_t *strip = M.cur ? M.h->arc->f[M.cur].name : 0;
     if (mode != X_DIALOG && !selected_only) { mem_free(mask); mask = 0; nsel = 0; }
-    if (selected_only && !mask) { do_extract(M.hwnd, M.oa, mode, 0, 0, 0, 0); return; }
-    do_extract(M.hwnd, M.oa, mode, 0, mask, strip, nsel);
+    if (selected_only && !mask) { do_extract(M.hwnd, M.h, root_path(), mode, 0, 0, 0, 0); return; }
+    do_extract(M.hwnd, M.h, root_path(), mode, 0, mask, strip, nsel);
     mem_free(mask);
     SetFocus(M.list);
 }
@@ -977,35 +1209,69 @@ static int temp_root(wchar_t *o)
     return 1;
 }
 
+/* the one file a single-entry extraction left in dir */
+static int find_single_file(const wchar_t *dir, wchar_t *out, size_t cap)
+{
+    wchar_t pat[MAX_PATH * 2];
+    path_join(pat, dir, L"*", GZ_COUNTOF(pat));
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    int ok = 0;
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        path_join(out, dir, fd.cFileName, cap);
+        ok = 1;
+        break;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
 static void view_entry(u32 idx)
 {
-    gz_archive *a = M.oa->arc;
+    gz_archive *a = M.h->arc;
     gz_entry *e = &a->e[idx];
     wchar_t dir[MAX_PATH * 2], t[24];
     if (!temp_root(dir)) return;
     wfmt(t, L"\\%08x", GetTickCount() ^ (idx * 2654435761u));
     wcat(dir, t, MAX_PATH * 2);
-    gz_job *j = job_new(M.oa);
-    if (!j) return;
     u8 *m = (u8 *)mem_alloc(a->n + 8);
-    if (!m) { job_free(j); return; }
+    ui_job *u = (ui_job *)mem_alloc(sizeof(ui_job));
+    if (!m || !u) { mem_free(m); mem_free(u); return; }
     m[idx] = 1;
-    j->sel = m;
-    j->strip = e->folder > 0 ? a->f[e->folder].name : 0;
-    wcopy(j->dest, dir, GZ_COUNTOF(j->dest));
-    j->overwrite = OW_ALL;
-    j->threads = 1;
-    int r = run_job_with_progress(M.hwnd, j);
-    if (r == GZ_OK && !j->nerr) {
-        wchar_t p[MAX_PATH * 4];
-        if (job_out_path(j, e, p, GZ_COUNTOF(p)) <= 0) path_join(p, dir, e->base, GZ_COUNTOF(p));
+    ui_job_init(u, OP_EXTRACT);
+    u->h = M.h;
+    wcopy(u->dest, dir, GZ_COUNTOF(u->dest));
+    wcopy(u->out, e->name, GZ_COUNTOF(u->out));
+    u->title = u->out;
+    u->xo.dest = u->dest;
+    u->xo.path_mode = GZ_PATH_NONE;          /* just the file, under its own name */
+    u->xo.overwrite = GZ_OW_ALL;
+    u->xo.sel = m;
+    u->xo.threads = 1;
+    int r = run_job_with_progress(M.hwnd, u);
+    wchar_t p[MAX_PATH * 4];
+    if (r == GZ_OK && !ui_job_problems(u) && find_single_file(dir, p, GZ_COUNTOF(p))) {
         if ((INT_PTR)ShellExecuteW(M.hwnd, NULL, p, NULL, dir, SW_SHOWNORMAL) <= 32)
             ShellExecuteW(M.hwnd, L"openas", p, NULL, dir, SW_SHOWNORMAL);
     } else if (r != GZ_E_CANCEL) {
-        dlg_errors(M.hwnd, j);
+        dlg_errors(M.hwnd, u);
     }
+    ui_job_free(u);
+    mem_free(u);
     mem_free(m);
-    job_free(j);
+}
+
+/* archives inside open as a new level; everything else in its own program */
+static void open_entry(u32 idx, int force_inside)
+{
+    gz_archive *a = M.h->arc;
+    if (idx >= a->n || a->e[idx].is_dir) return;
+    int inside = force_inside || is_archive_name(a->e[idx].base, 1) ||
+                 (a->fmt && (a->fmt->flags & GZ_FMT_CONTAINER));
+    if (inside && open_nested(idx, !force_inside)) return;
+    if (!force_inside) view_entry(idx);
 }
 
 static void delete_tree(const wchar_t *dir)
@@ -1064,19 +1330,19 @@ static void sweep_stale_temp(void)
     FindClose(h);
 }
 
-static void activate_row(int i)
+static void activate_row(int i, int force_inside)
 {
     if (i < 0 || (u32)i >= M.nrows) return;
     row *r = &M.rows[i];
-    if (r->kind == 0) navigate(M.oa->arc->f[M.cur].parent, M.cur);
+    if (r->kind == 0) go_up();
     else if (r->kind == 1) navigate(r->idx, -1);
-    else view_entry((u32)r->idx);
+    else open_entry((u32)r->idx, force_inside);
 }
 
 static void set_codepage(int cp)
 {
-    if (!M.oa) { g_set.codepage = cp; refresh_cp_menu(); return; }
-    gz_arc_set_codepage(M.oa->arc, cp);
+    if (!M.h) { g_set.codepage = cp; refresh_cp_menu(); return; }
+    gz_handle_set_codepage(M.h, cp);
     tree_build();
     navigate(0, -1);
     refresh_cp_menu();
@@ -1086,6 +1352,7 @@ static void context_menu(int x, int y)
 {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, CMD_VIEW, S(S_M_OPENITEM));
+    AppendMenuW(m, MF_STRING, CMD_OPENINSIDE, S(S_M_OPENINSIDE));
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, CMD_EXTRACT_SEL, S(S_M_EXTRACT_SEL));
     AppendMenuW(m, MF_STRING, CMD_EXTRACT, S(S_M_EXTRACT));
@@ -1105,6 +1372,7 @@ static void context_menu(int x, int y)
 static void fmt_kb(wchar_t *o, u64 v)
 {
     wchar_t t[32];
+    if (v == GZ_SIZE_UNKNOWN) { wcopy(o, L"?", 4); return; }
     fmt_thousands(t, (v + 1023) / 1024);
     wfmt(o, L"%s KB", t);
 }
@@ -1112,9 +1380,9 @@ static void fmt_kb(wchar_t *o, u64 v)
 static void list_dispinfo(NMLVDISPINFOW *di)
 {
     LVITEMW *it = &di->item;
-    if (!M.oa || it->iItem < 0 || (u32)it->iItem >= M.nrows) return;
+    if (!M.h || it->iItem < 0 || (u32)it->iItem >= M.nrows) return;
     row *r = &M.rows[it->iItem];
-    gz_archive *a = M.oa->arc;
+    gz_archive *a = M.h->arc;
     if (it->mask & LVIF_IMAGE) {
         if (r->kind == 2) it->iImage = ext_lookup(a->e[r->idx].base)->icon;
         else it->iImage = M.ico_folder;
@@ -1143,7 +1411,7 @@ static void list_dispinfo(NMLVDISPINFOW *di)
         case 3: wcopy(s_txt, ext_lookup(e->base)->type, 64); break;
         case 4: fmt_filetime(s_txt, entry_filetime(e)); break;
         case 5:
-            if (e->usize) {
+            if (e->usize && e->usize != GZ_SIZE_UNKNOWN && e->csize != GZ_SIZE_UNKNOWN) {
                 u64 p = e->csize * 100 / e->usize;
                 if (p > 999) p = 999;
                 wfmt(s_txt, L"%d%%", (int)p);
@@ -1156,12 +1424,44 @@ static void list_dispinfo(NMLVDISPINFOW *di)
                 wchar_t t[24];
                 wfmt(t, L" · AES-%d", 64 + 64 * e->aes_strength);
                 wcat(s_txt, t, 128);
+            } else if (e->enc) {
+                wcat(s_txt, strings_korean() ? L" · 암호" : L" · encrypted", 128);
             }
             break;
         case 7: if (e->has_crc && !e->is_dir) wfmt(s_txt, L"%08X", e->crc); break;
         }
     }
     it->pszText = s_txt;
+}
+
+/* ======================================================================
+ * drag & drop: an archive opens, anything else (or with Ctrl/Shift) is compressed
+ * ====================================================================== */
+
+static void on_drop(HDROP d)
+{
+    UINT n = DragQueryFileW(d, 0xFFFFFFFF, NULL, 0);
+    int modifier = (GetKeyState(VK_CONTROL) | GetKeyState(VK_SHIFT)) < 0;
+    wchar_t **v = n ? (wchar_t **)mem_alloc((size_t)n * sizeof(wchar_t *)) : 0;
+    u32 cnt = 0;
+    for (UINT i = 0; v && i < n && i < 100000; i++) {
+        UINT len = DragQueryFileW(d, i, NULL, 0);
+        wchar_t *p = (wchar_t *)mem_alloc(((size_t)len + 2) * sizeof(wchar_t));
+        if (!p) break;
+        DragQueryFileW(d, i, p, len + 1);
+        v[cnt++] = p;
+    }
+    DragFinish(d);
+    SetForegroundWindow(M.hwnd);
+    int done = 0;
+    if (cnt == 1 && !modifier && !path_is_dir(v[0])) {
+        /* one archive: open it; an unknown single file is tried too when nothing is open */
+        if (is_archive_name(v[0], 0)) done = open_archive_ex(v[0], 0);
+        else if (!M.h) done = open_archive_ex(v[0], 1);
+    }
+    if (!done && cnt) dlg_compress(M.hwnd, (const wchar_t *const *)v, cnt);
+    for (u32 i = 0; i < cnt; i++) mem_free(v[i]);
+    mem_free(v);
 }
 
 /* ======================================================================
@@ -1233,11 +1533,11 @@ static LRESULT on_notify(NMHDR *nh)
             list_dispinfo((NMLVDISPINFOW *)nh);
             return 0;
         case LVN_ITEMACTIVATE:
-            activate_row(((NMITEMACTIVATE *)nh)->iItem);
+            activate_row(((NMITEMACTIVATE *)nh)->iItem, 0);
             return 0;
         case LVN_KEYDOWN: {
             NMLVKEYDOWN *k = (NMLVKEYDOWN *)nh;
-            if (k->wVKey == VK_BACK && M.oa && M.cur) navigate(M.oa->arc->f[M.cur].parent, M.cur);
+            if (k->wVKey == VK_BACK) go_up();
             return 0;
         }
         case LVN_COLUMNCLICK: {
@@ -1245,7 +1545,7 @@ static LRESULT on_notify(NMHDR *nh)
             if (c == M.sort_col) M.sort_desc = !M.sort_desc;
             else { M.sort_col = c; M.sort_desc = 0; }
             update_header_arrows();
-            if (M.oa) {
+            if (M.h) {
                 int i = -1;
                 for (u32 k = 0; k < M.nrows; k++) M.rows[k].st = 0;
                 while ((i = (int)SendMessageW(M.list, LVM_GETNEXTITEM, (WPARAM)i, LVNI_SELECTED)) >= 0 &&
@@ -1273,7 +1573,7 @@ static LRESULT on_notify(NMHDR *nh)
             /* typing in the list jumps to the next name starting with the typed text */
             NMLVFINDITEMW *fi = (NMLVFINDITEMW *)nh;
             const wchar_t *q = fi->lvfi.psz;
-            if (!M.oa || !M.nrows || !q || !q[0] || !(fi->lvfi.flags & (LVFI_STRING | LVFI_PARTIAL))) return -1;
+            if (!M.h || !M.nrows || !q || !q[0] || !(fi->lvfi.flags & (LVFI_STRING | LVFI_PARTIAL))) return -1;
             int n = (int)M.nrows, ql = lstrlenW(q);
             int start = (fi->iStart >= 0 && fi->iStart < n) ? fi->iStart : 0;
             for (int k = 0; k < n; k++) {
@@ -1289,19 +1589,19 @@ static LRESULT on_notify(NMHDR *nh)
         case NM_RCLICK: {
             POINT pt;
             GetCursorPos(&pt);
-            if (M.oa) context_menu(pt.x, pt.y);
+            if (M.h) context_menu(pt.x, pt.y);
             return 0;
         }
         }
     } else if (nh->idFrom == ID_TREE) {
         if (nh->code == TVN_ITEMEXPANDINGW) {
             NMTREEVIEWW *t = (NMTREEVIEWW *)nh;
-            if (M.oa && (t->action & TVE_EXPAND)) tree_populate((i32)t->itemNew.lParam);
+            if (M.h && M.tpop && (t->action & TVE_EXPAND)) tree_populate((i32)t->itemNew.lParam);
             return 0;
         }
         if (nh->code == TVN_SELCHANGEDW && !M.syncing) {
             NMTREEVIEWW *t = (NMTREEVIEWW *)nh;
-            if (M.oa && (i32)t->itemNew.lParam != M.cur) {
+            if (M.h && (i32)t->itemNew.lParam != M.cur) {
                 M.syncing = 1;
                 navigate((i32)t->itemNew.lParam, -1);
                 M.syncing = 0;
@@ -1337,7 +1637,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_SETCURSOR:
-        if ((HWND)wp == h && LOWORD(lp) == HTCLIENT && M.oa && g_set.show_tree) {
+        if ((HWND)wp == h && LOWORD(lp) == HTCLIENT && M.h && g_set.show_tree) {
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(h, &pt);
@@ -1345,7 +1645,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         }
         break;
     case WM_LBUTTONDOWN:
-        if (M.oa && g_set.show_tree) {
+        if (M.h && g_set.show_tree) {
             int x = (short)LOWORD(lp);
             if (x >= M.split && x < M.split + scale(4)) { M.dragging = 1; SetCapture(h); }
         }
@@ -1371,24 +1671,15 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == 7) { KillTimer(h, 7); update_status(); }
         return 0;
-    case WM_DROPFILES: {
-        wchar_t p[MAX_PATH * 2];
-        HDROP d = (HDROP)wp;
-        if (DragQueryFileW(d, 0, p, MAX_PATH * 2)) {
-            DragFinish(d);
-            SetForegroundWindow(h);
-            open_archive(p);
-        } else {
-            DragFinish(d);
-        }
+    case WM_DROPFILES:
+        on_drop((HDROP)wp);
         return 0;
-    }
     case WM_INITMENUPOPUP: {
         HMENU pm = (HMENU)wp;
         UINT need[] = { CMD_CLOSE, CMD_INFO, CMD_EXTRACT, CMD_HERE, CMD_SMART, CMD_EXTRACT_SEL, CMD_TEST, CMD_VIEW,
-                        CMD_UP, CMD_SELALL };
+                        CMD_OPENINSIDE, CMD_UP, CMD_SELALL };
         for (u32 i = 0; i < GZ_COUNTOF(need); i++)
-            EnableMenuItem(pm, need[i], MF_BYCOMMAND | (M.oa ? MF_ENABLED : MF_GRAYED));
+            EnableMenuItem(pm, need[i], MF_BYCOMMAND | (M.h ? MF_ENABLED : MF_GRAYED));
         CheckMenuItem(pm, CMD_TREE, MF_BYCOMMAND | (g_set.show_tree ? MF_CHECKED : MF_UNCHECKED));
         return 0;
     }
@@ -1402,23 +1693,25 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         }
         if (id >= CMD_CP0 && id < CMD_CP0 + g_cp_count) { set_codepage(g_cp_list[id - CMD_CP0].cp); return 0; }
         switch (id) {
+        case CMD_NEW: cmd_new(); break;
         case CMD_OPEN: cmd_open(); break;
         case CMD_WELCOME_EXTRACT:
             cmd_open();
-            if (M.oa) cmd_extract(X_DIALOG, 0);
+            if (M.h) cmd_extract(X_DIALOG, 0);
             break;
         case CMD_CLOSE: close_archive(); break;
         case CMD_EXIT: PostMessageW(h, WM_CLOSE, 0, 0); break;
-        case CMD_INFO: dlg_info(h, M.oa); break;
+        case CMD_INFO: dlg_info(h, M.h); break;
         case CMD_EXTRACT: cmd_extract(X_DIALOG, 0); break;
         case CMD_SMART: cmd_extract(X_SMART, 0); break;
         case CMD_HERE: cmd_extract(X_HERE, 0); break;
         case CMD_EXTRACT_SEL: cmd_extract(X_DIALOG, 1); break;
-        case CMD_TEST: if (M.oa) do_extract(h, M.oa, X_TEST, 0, 0, 0, 0); break;
-        case CMD_VIEW: if (M.oa) activate_row(focused_or_selected()); break;
-        case CMD_UP: if (M.oa && M.cur) navigate(M.oa->arc->f[M.cur].parent, M.cur); break;
+        case CMD_TEST: if (M.h) do_extract(h, M.h, root_path(), X_TEST, 0, 0, 0, 0); break;
+        case CMD_VIEW: if (M.h) activate_row(focused_or_selected(), 0); break;
+        case CMD_OPENINSIDE: if (M.h) activate_row(focused_or_selected(), 1); break;
+        case CMD_UP: go_up(); break;
         case CMD_SELALL:
-            if (M.oa) { ListView_SetItemState(M.list, -1, LVIS_SELECTED, LVIS_SELECTED); SetFocus(M.list); }
+            if (M.h) { ListView_SetItemState(M.list, -1, LVIS_SELECTED, LVIS_SELECTED); SetFocus(M.list); }
             break;
         case CMD_TREE: g_set.show_tree = !g_set.show_tree; layout(); break;
         case CMD_SETTINGS: {
@@ -1494,10 +1787,11 @@ static void register_classes(void)
 }
 
 static ACCEL k_acc[] = {
-    { FCONTROL | FVIRTKEY, 'O', CMD_OPEN }, { FCONTROL | FVIRTKEY, 'W', CMD_CLOSE },
-    { FCONTROL | FVIRTKEY, 'E', CMD_EXTRACT }, { FCONTROL | FVIRTKEY, 'Q', CMD_SMART },
-    { FCONTROL | FVIRTKEY, 'T', CMD_TEST }, { FCONTROL | FVIRTKEY, 'A', CMD_SELALL },
-    { FALT | FVIRTKEY, VK_RETURN, CMD_INFO }, { FVIRTKEY, VK_F1, CMD_ABOUT },
+    { FCONTROL | FVIRTKEY, 'N', CMD_NEW }, { FCONTROL | FVIRTKEY, 'O', CMD_OPEN },
+    { FCONTROL | FVIRTKEY, 'W', CMD_CLOSE }, { FCONTROL | FVIRTKEY, 'E', CMD_EXTRACT },
+    { FCONTROL | FVIRTKEY, 'Q', CMD_SMART }, { FCONTROL | FVIRTKEY, 'T', CMD_TEST },
+    { FCONTROL | FVIRTKEY, 'A', CMD_SELALL }, { FALT | FVIRTKEY, VK_RETURN, CMD_INFO },
+    { FVIRTKEY, VK_F1, CMD_ABOUT },
 };
 
 HWND mainwnd_create(const wchar_t *open_path, int show)

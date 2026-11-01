@@ -17,6 +17,7 @@
 #define IC_FOLDER        13
 #define IC_CHECK         14
 #define IC_ERROR         15
-#define IC_LOGO          16
-#define IC_COUNT         17
+#define IC_COMPRESS      16
+#define IC_LOGO          17
+#define IC_COUNT         18
 #endif
