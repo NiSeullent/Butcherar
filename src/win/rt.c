@@ -63,6 +63,22 @@ int memcmp(const void *a, const void *b, size_t n)
     return 0;
 }
 
+/* GCC may turn byte loops in the core into strlen/memchr calls */
+size_t strlen(const char *s)
+{
+    const char *p = s;
+    while (*p) p++;
+    return (size_t)(p - s);
+}
+
+void *memchr(const void *s, int c, size_t n)
+{
+    const u8 *p = (const u8 *)s;
+    for (size_t i = 0; i < n; i++)
+        if (p[i] == (u8)c) return (void *)(p + i);
+    return 0;
+}
+
 /* ---------------- memory ---------------- */
 
 static HANDLE s_heap;
