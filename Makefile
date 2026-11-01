@@ -120,18 +120,25 @@ $(B)/host/%.o: src/%.c $(HDRS)
 $(B)/gzt: tests/gzt.c $(HOSTOBJ)
 	$(HOSTCC) $(HOSTFLAGS) -o $@ tests/gzt.c $(HOSTOBJ) $(HOST_LIBS)
 
+# command line tool: core + POSIX layer + portable engine (cli.c holds main, so it is
+# linked directly and never lands in build/host where test drivers pick up objects)
+APPOBJ := $(patsubst src/%.c,$(B)/host/%.o,$(filter-out src/app/cli.c,$(APP)))
+$(B)/gogitzip: src/app/cli.c $(HOSTOBJ) $(APPOBJ)
+	$(HOSTCC) $(HOSTFLAGS) -o $@ src/app/cli.c $(HOSTOBJ) $(APPOBJ) $(HOST_LIBS)
+cli: $(B)/gogitzip
+
 ICORE := src/core/cpu.c src/core/crc32.c src/codec/inflate.c src/core/crypto.c src/core/stream.c
 $(B)/test_inflate: tests/test_inflate.c $(ICORE) $(HDRS)
 	@mkdir -p $(B)
 	$(HOSTCC) -O2 -g $(INC) -o $@ tests/test_inflate.c $(ICORE) -lz
 
-test: $(B)/test_inflate $(B)/gzt
+test: $(B)/test_inflate $(B)/gzt $(B)/gogitzip
 	$(B)/test_inflate
 	HOST_CFLAGS="$(HOST_CFLAGS)" HOSTCC="$(HOSTCC)" python3 tests/run_tests.py --gzt $(B)/gzt --work $(B)/testwork $(TESTARGS)
 
 # rebuild host objects (e.g. after switching HOST_CFLAGS to sanitizers)
 clean-host:
-	rm -rf $(B)/host $(B)/gzt $(B)/test_inflate
+	rm -rf $(B)/host $(B)/gzt $(B)/gogitzip $(B)/test_inflate
 
 assets:
 	python3 tools/gen_assets.py
@@ -139,4 +146,4 @@ assets:
 clean:
 	rm -rf $(B)
 
-.PHONY: all win test assets clean clean-host
+.PHONY: all win cli test assets clean clean-host
