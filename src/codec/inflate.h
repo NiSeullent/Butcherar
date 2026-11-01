@@ -48,6 +48,12 @@ void gz_inflater_free(gz_inflater *z);
 /* Decode one complete deflate stream. Output is CRC'ed and pushed to io->write. */
 int gz_inflate_run(gz_inflater *z, const gz_stream_io *io, int deflate64);
 
+/* Same, with a preset history: matches may reach back into dict[0..dict_len)
+ * (dict_len <= GZ_INFLATE_DICT_MAX), e.g. CAB MSZIP blocks continue the previous
+ * block's window. Only the new data is pushed, CRC'ed and counted in total_out. */
+#define GZ_INFLATE_DICT_MAX 32768u
+int gz_inflate_run_dict(gz_inflater *z, const gz_stream_io *io, const u8 *dict, u32 dict_len);
+
 /* Copy a stored stream (no compression) with CRC, using the inflater's buffer. */
 int gz_store_run(gz_inflater *z, const gz_stream_io *io);
 
