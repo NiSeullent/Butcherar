@@ -93,7 +93,7 @@ add_zip_case(p, names=cp_names)
 
 # 2b) CP949 names that happen to be valid UTF-8 ("캡처" = C4 B8 C3 B3) must stay CP949
 p = os.path.join(WORK, "cp949_ambiguous.zip")
-amb = ["캡처.png", "캡처v2.png", "Win캡처.png", "readme.txt"]
+amb = ["캡처.png", "캡처v2.png", "Win캡처.png", "Img캡처.jpg", "캡처_v2.png", "readme.txt"]
 with zipfile.ZipFile(p, "w") as z:
     for k in amb:
         z.writestr(RawInfo(k.encode("cp949")), k.encode())
@@ -102,24 +102,36 @@ add_zip_case(p, names=amb)
 # 2c) genuine UTF-8 names without the flag that use only 2-byte sequences must stay UTF-8
 p = os.path.join(WORK, "latin_utf8.zip")
 lat = ["Résumé.pdf", "café/menu.txt", unicodedata.normalize("NFD", "été.txt"), "Ångström.txt",
-       "Отчёт.txt", "Αθήνα.txt"]
+       "Отчёт.txt", "Αθήνα.txt", "Größe.txt", "Documentos/Apresentação.pptx", "Příloha.pdf",
+       "Müşteri.xlsx", unicodedata.normalize("NFD", "Việt Nam.txt"), unicodedata.normalize("NFD", "Füße.jpg")]
 with zipfile.ZipFile(p, "w") as z:
     for k in lat:
         z.writestr(RawInfo(k.encode("utf-8")), k.encode())
 add_zip_case(p, names=lat)
+latin_exp = cases[-1][2]
+LATIN_ACP = {}
+for acp in ("936", "932"):                        # same archive on Chinese / Japanese Windows
+    p2 = os.path.join(WORK, "latin_utf8_%s.zip" % acp)
+    shutil.copy(p, p2)
+    LATIN_ACP[p2] = acp
+    cases.append((p2, None, latin_exp))
 p = os.path.join(WORK, "cyrillic_utf8.tar")       # GNU tar: raw UTF-8, no pax path
 with tarfile.open(p, "w", format=tarfile.GNU_FORMAT, encoding="utf-8") as t:
     ti = tarfile.TarInfo("Отчёт.txt"); ti.size = 3; t.addfile(ti, io.BytesIO(b"abc"))
 with tarfile.open(p, encoding="utf-8") as t:
     cases.append((p, None, {i: (m.name, t.extractfile(m).read()) for i, m in enumerate(t.getmembers())}))
+p2 = os.path.join(WORK, "cyrillic_utf8_936.tar")   # same tarball on Chinese Windows
+shutil.copy(p, p2)
+cases.append((p2, None, cases[-1][2]))
 
 # 2d) GBK names on Chinese Windows (ACP 936) must stay GBK ("通" = CD A8 looks like UTF-8)
 p = os.path.join(WORK, "gbk.zip")
-gbk = ["通知.doc", "通讯录.xls", "readme.txt"]
+gbk = ["通知.doc", "通讯录.xls", "v通知.doc", "Re通知.txt", "readme.txt"]
 with zipfile.ZipFile(p, "w") as z:
     for k in gbk:
         z.writestr(RawInfo(k.encode("gbk")), k.encode())
-ACP_FOR = {p: "936"}
+ACP_FOR = {p: "936", os.path.join(WORK, "cyrillic_utf8_936.tar"): "936"}
+ACP_FOR.update(LATIN_ACP)
 add_zip_case(p, names=gbk)
 
 # 3) macOS style: decomposed Hangul (NFD) UTF-8 without flag, plus backslashes

@@ -204,21 +204,24 @@ static int utf8_max_seq(const u8 *s, size_t n)
 
 /* Weigh one name that is valid UTF-8 using only 2-byte sequences, so it could
  * also be a legacy DBCS name (CP949 "캡처" = C4 B8 C3 B3, GBK "通知" = CD A8 D6 AA).
- *   UTF-8 evidence : the bytes are invalid in the ANSI code page (decisive), or a
- *                    2-byte sequence sits alone between ASCII characters next to a
- *                    letter, the shape of an accented Latin letter ("Résumé").
+ *   UTF-8 evidence : the bytes are invalid in the ANSI code page (decisive), or
+ *                    accented letters sitting inside a Latin word (see below).
  *   legacy evidence: the ANSI decoding is Hangul syllables / CJK ideographs / kana. */
 static void score_ambiguous(const u8 *s, size_t n, int acp, int *u, int *l)
 {
     if (!gz_plat_mb_valid(acp, s, (int)n)) { *u += 100; return; }
-    for (size_t i = 0; i + 1 < n; i++) {
-        if (s[i] < 0xC2 || s[i] > 0xDF) continue;
-        u8 pb = i ? s[i - 1] : 0, pf = i + 2 < n ? s[i + 2] : 0;
-        if (pb < 0x80 && pf < 0x80) {
-            u8 b = (u8)(pb | 0x20), f = (u8)(pf | 0x20);
-            if ((b >= 'a' && b <= 'z') || (f >= 'a' && f <= 'z')) *u += 3;
-        }
-        i++;
+    /* Score each run of consecutive 2-byte sequences: one sequence touching an ASCII
+     * letter ("Résumé", NFD "e+◌́"), or a longer run with letters on BOTH sides
+     * ("Größe", "Situação", NFD "Việt"). "캡처v2", "Win캡처", "v通知" touch a letter on
+     * one side only and stay legacy. */
+    for (size_t i = 0; i + 1 < n;) {
+        if (s[i] < 0xC2 || s[i] > 0xDF) { i++; continue; }
+        size_t j = i;
+        while (j + 1 < n && s[j] >= 0xC2 && s[j] <= 0xDF) j += 2;
+        u8 b = i ? (u8)(s[i - 1] | 0x20) : 0, f = j < n ? (u8)(s[j] | 0x20) : 0;
+        int lb = b >= 'a' && b <= 'z', lf = f >= 'a' && f <= 'z';
+        if (j - i == 2 ? (lb || lf) : (lb && lf)) *u += 3 * (int)((j - i) / 2);
+        i = j;
     }
     wchar_t w[512];
     int m = n < 255 ? gz_plat_mb2wc(acp, s, (int)n, w, 512) : 0;
@@ -234,8 +237,12 @@ static int choose_codepage(gz_archive *a)
 {
     if (a->codepage != GZ_CP_AUTO) return a->codepage;
     int acp = gz_plat_acp();
-    int dbcs = acp == 932 || acp == 936 || acp == 949 || acp == 950;
-    int legacy = 0, all_utf8 = 1, u = 0, l = 0;
+    /* DBCS names that happen to be valid UTF-8 come from ZIPs made on CJK Windows.
+     * TAR/GZ names are raw bytes from Linux/macOS: UTF-8 whenever they are valid. */
+    int dbcs = a->type == GZ_ARC_ZIP && (acp == 932 || acp == 936 || acp == 949 || acp == 950);
+    /* Each name votes on its own evidence, so a few names that both readings
+     * accept cannot outweigh many clearly-Latin ones (or the other way round). */
+    int legacy = 0, all_utf8 = 1, vu = 0, vl = 0;
     for (u32 i = 0; i < a->n; i++) {
         gz_entry *e = &a->e[i];
         if (e->uni_len || e->utf8) continue;
@@ -244,10 +251,12 @@ static int choose_codepage(gz_archive *a)
         legacy = 1;
         if (!gz_utf8_valid(r, e->raw_len)) { all_utf8 = 0; break; }
         if (!dbcs) continue;
-        if (utf8_max_seq(r, e->raw_len) >= 3) u += 100;   /* real Hangul/CJK UTF-8 */
-        else score_ambiguous(r, e->raw_len, acp, &u, &l);
+        if (utf8_max_seq(r, e->raw_len) >= 3) { vu++; continue; }   /* real Hangul/CJK UTF-8 */
+        int u = 0, l = 0;
+        score_ambiguous(r, e->raw_len, acp, &u, &l);
+        if (u > l) vu++; else vl++;
     }
-    if (legacy && all_utf8 && (!dbcs || u > l)) return GZ_CP_UTF8;
+    if (legacy && all_utf8 && (!dbcs || vu > vl)) return GZ_CP_UTF8;
     return acp;
 }
 
