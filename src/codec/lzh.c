@@ -120,18 +120,31 @@ static const u16 k_crc16[256] = {
     0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040,
 };
 
+/* Slice-by-8 for large buffers: t[k][v] is the CRC of byte v followed by k zero
+ * bytes. The 4 KiB of tables are derived on the stack per call (1792 lookups),
+ * which costs < 1% of a 1 MiB chunk and needs no global state. */
+#define CRC16_SLICE_MIN 4096u
+
+static GZ_NOINLINE u32 crc16_slice8(u32 c, const u8 *s, size_t n)
+{
+    u16 t[8][256];
+    for (u32 i = 0; i < 256; i++) t[0][i] = k_crc16[i];
+    for (u32 k = 1; k < 8; k++)
+        for (u32 i = 0; i < 256; i++) t[k][i] = (u16)((t[k - 1][i] >> 8) ^ k_crc16[t[k - 1][i] & 0xff]);
+    for (; n >= 8; s += 8, n -= 8) {
+        u32 x = c ^ rd16(s);
+        c = (u32)t[7][x & 0xff] ^ t[6][x >> 8] ^ t[5][s[2]] ^ t[4][s[3]] ^
+            t[3][s[4]] ^ t[2][s[5]] ^ t[1][s[6]] ^ t[0][s[7]];
+    }
+    while (n--) c = (c >> 8) ^ k_crc16[(c ^ *s++) & 0xff];
+    return c;
+}
+
 u16 gz_crc16(u16 crc, const void *p, size_t n)
 {
     const u8 *s = (const u8 *)p;
     u32 c = crc;
-    while (n >= 4) {
-        c = (c >> 8) ^ k_crc16[(c ^ s[0]) & 0xff];
-        c = (c >> 8) ^ k_crc16[(c ^ s[1]) & 0xff];
-        c = (c >> 8) ^ k_crc16[(c ^ s[2]) & 0xff];
-        c = (c >> 8) ^ k_crc16[(c ^ s[3]) & 0xff];
-        s += 4;
-        n -= 4;
-    }
+    if (n >= CRC16_SLICE_MIN) return (u16)crc16_slice8(c, s, n);
     while (n--) c = (c >> 8) ^ k_crc16[(c ^ *s++) & 0xff];
     return (u16)c;
 }
@@ -335,10 +348,10 @@ static int arj_fast(gz_lg_in *in, gz_lg_out *o)
             if (r) return r == 1 ? GZ_OK : r;
         }
         if (gz_lg_need_msb(in, 40)) return in->err;
-        /* length: up to 7 one-bits (terminated by 0 unless 7), then as many raw bits */
-        u32 ones = 0;
-        while (ones < 7 && (in->bb >> 63)) { gz_lg_drop_msb(in, 1); ones++; }
-        if (ones < 7) gz_lg_drop_msb(in, 1);
+        /* length: up to 7 one-bits (terminated by 0 unless 7), then as many raw bits;
+         * the marker bit caps the count of leading ones */
+        u32 ones = (u32)__builtin_clz(~(u32)(in->bb >> 32) | (1u << 24));
+        gz_lg_drop_msb(in, ones + (ones < 7));
         u32 c = (1u << ones) - 1 + getbits(in, ones);
         u8 *out = o->out;
         if (c == 0) {
@@ -348,9 +361,8 @@ static int arj_fast(gz_lg_in *in, gz_lg_out *o)
         }
         u32 len = c + 2;
         /* position: up to 4 one-bits, then 9..13 raw bits */
-        u32 k = 0;
-        while (k < 4 && (in->bb >> 63)) { gz_lg_drop_msb(in, 1); k++; }
-        if (k < 4) gz_lg_drop_msb(in, 1);
+        u32 k = (u32)__builtin_clz(~(u32)(in->bb >> 32) | (1u << 27));
+        gz_lg_drop_msb(in, k + (k < 4));
         u32 dist = 512u * ((1u << k) - 1) + getbits(in, 9 + k) + 1;
         if (o->left != GZ_SIZE_UNKNOWN && len > o->left - (u64)(out - o->flushed))
             len = (u32)(o->left - (u64)(out - o->flushed));

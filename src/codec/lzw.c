@@ -44,6 +44,9 @@ void gz_lzw_dec_free(gz_lzw_dec *d)
     if (d) gz_free_big(d, d->mem_size);
 }
 
+void *gz_lzw_slot_new(void) { return gz_lzw_dec_new(); }
+void gz_lzw_slot_free(void *d) { gz_lzw_dec_free((gz_lzw_dec *)d); }
+
 /* ---------------- Unix compress ---------------- */
 
 /* Skip the rest of the current group of 8 codes (ncompress reads codes in

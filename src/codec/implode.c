@@ -46,6 +46,9 @@ void gz_implode_dec_free(gz_implode_dec *d)
     if (d) gz_free_big(d, d->mem_size);
 }
 
+void *gz_implode_slot_new(void) { return gz_implode_dec_new(); }
+void gz_implode_slot_free(void *d) { gz_implode_dec_free((gz_implode_dec *)d); }
+
 static u32 bitrev(u32 v, u32 n)
 {
     u32 r = 0;

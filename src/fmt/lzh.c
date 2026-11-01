@@ -60,17 +60,6 @@ static int header_ok(const u8 *h, u32 n)
     return 0;
 }
 
-static int lzh_probe(gz_src *s, const u8 *h, u32 n)
-{
-    (void)s;
-    if (header_ok(h, n)) return 90;
-    /* SFX: LHA's self-extractors put the archive after the stub */
-    if (n < 2 || h[0] != 'M' || h[1] != 'Z') return 0;
-    for (u32 i = 2; i + 24 <= n; i++)
-        if (h[i + 2] == '-' && h[i + 3] == 'l' && h[i + 6] == '-' && header_ok(h + i, n - i)) return 70;
-    return 0;
-}
-
 /* ---------------- header parsing ---------------- */
 
 typedef struct {
@@ -278,6 +267,58 @@ static int parse_header(gz_src *s, u64 pos, lzh_hdr *x, u64 *data)
     return GZ_E_FORMAT;
 }
 
+/* ---------------- probing / SFX ---------------- */
+
+#define SFX_TRIES 32u                    /* candidates fully parsed per file */
+
+/* A header candidate inside an SFX stub must parse completely, name something,
+ * its data must fit in the file, and it must be followed by the end of the file,
+ * the end marker or another valid header (LHA's own stubs hold "-lh5-" strings). */
+static int sfx_candidate(gz_src *s, u64 pos, lzh_hdr *x)
+{
+    u64 data;
+    if (parse_header(s, pos, x, &data) != GZ_OK || !(x->name_len + x->dir_len)) return 0;
+    u64 next = data + x->csize;
+    if (next < data || next > s->size) return 0;
+    if (next == s->size) return 1;
+    int r = parse_header(s, next, x, &data);
+    return r == 1 || (r == GZ_OK && data + x->csize >= data && data + x->csize <= s->size);
+}
+
+#define SFX_SCAN (256u << 10)            /* stub sizes searched (Windows SFX stubs exceed 64 KiB) */
+
+static int is_stub(const u8 *h) { return (h[0] == 'M' && h[1] == 'Z') || h[0] == 0xE9 || h[0] == 0xEB; }
+
+/* First archive header after an executable stub (MZ, or a .COM starting with a
+ * jump: LHarc 1.x) in the first SFX_SCAN bytes. Returns 1 and *pos, 0, or GZ_E_NOMEM. */
+static int sfx_find(gz_src *s, u64 *pos)
+{
+    u32 n = s->size < SFX_SCAN ? (u32)s->size : SFX_SCAN;
+    if (n < 24) return 0;
+    u8 *h = (u8 *)gz_alloc(n);
+    lzh_hdr *x = (lzh_hdr *)gz_alloc(sizeof(lzh_hdr));
+    int found = !h || !x ? GZ_E_NOMEM : 0;
+    if (!found && !gz_src_read_exact(s, 0, h, n) && is_stub(h)) {
+        u32 tries = 0;
+        for (u32 i = 1; i + 24 <= n && tries < SFX_TRIES; i++) {
+            if (h[i + 2] != '-' || h[i + 6] != '-' || !header_ok(h + i, n - i)) continue;
+            tries++;
+            if (sfx_candidate(s, i, x)) { *pos = i; found = 1; break; }
+        }
+    }
+    if (x) gz_free(x->buf);
+    gz_free(x);
+    gz_free(h);
+    return found;
+}
+
+static int lzh_probe(gz_src *s, const u8 *h, u32 n)
+{
+    if (header_ok(h, n)) return 90;
+    u64 pos;
+    return n >= 24 && is_stub(h) && sfx_find(s, &pos) == 1 ? 70 : 0;
+}
+
 static int lzh_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
 {
     (void)o;
@@ -288,18 +329,9 @@ static int lzh_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
         int r = gz_src_read_exact(s, 0, head, n);
         if (r) return r;
         if (!header_ok(head, n)) {
-            /* SFX: find the first header in the first 64 KiB */
-            u32 max = s->size < 65536 + 512 ? (u32)s->size : 65536 + 512;
-            u8 *buf = (u8 *)gz_alloc(max);
-            if (!buf) return GZ_E_NOMEM;
-            r = gz_src_read_exact(s, 0, buf, max);
-            u32 i = 1;
-            for (; !r && i + 24 <= max; i++)
-                if (buf[i + 2] == '-' && buf[i + 3] == 'l' && buf[i + 6] == '-' && header_ok(buf + i, max - i)) break;
-            int found = !r && i + 24 <= max;
-            gz_free(buf);
-            if (!found) return r ? r : GZ_E_FORMAT;
-            pos = i;
+            /* SFX: the first valid header after the stub (as the probe found it) */
+            r = sfx_find(s, &pos);
+            if (r != 1) return r ? r : GZ_E_FORMAT;
             a->sfx_shift = pos;
         }
     }

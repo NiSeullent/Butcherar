@@ -18,6 +18,10 @@ typedef struct gz_lzw_dec gz_lzw_dec;     /* ~2.5 MiB, reusable */
 
 gz_lzw_dec *gz_lzw_dec_new(void);
 void gz_lzw_dec_free(gz_lzw_dec *d);
+/* create/destroy pair for gz_ctx_slot(c, GZ_SLOT_MISC3, gz_lzw_slot_new, gz_lzw_slot_free):
+ * .Z and ZIP Shrink use the same pair, so one cached decoder serves both */
+void *gz_lzw_slot_new(void);
+void  gz_lzw_slot_free(void *d);
 
 /* Unix compress data following the 3-byte header 1F 9D <flags>.
  * flags: header byte 2 (bits 0-4 max code bits 9..16, 0x80 block mode).

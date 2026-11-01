@@ -435,6 +435,8 @@ def lha_member(level, method, name, comp, raw, mtime=1600000000, dtime=None, os_
         return bytes([len(h), sum(h) & 0xFF]) + h + comp
     if level == 1:
         exts = []
+        if ext_name:                     # long names: empty base name, 0x01 extended header
+            exts.append(ext(1, name))
         if dirname:
             exts.append(ext(2, dirname.replace(b"/", b"\xff")))
         if unix_mode is not None:
@@ -445,8 +447,6 @@ def lha_member(level, method, name, comp, raw, mtime=1600000000, dtime=None, os_
         for k, e in enumerate(exts):
             blobs += e + struct.pack("<H", sizes[k + 1] if k + 1 < len(sizes) else 0)
         nm = b"" if ext_name else name
-        if ext_name:
-            pass
         base = method + struct.pack("<IIIBBB", len(comp) + len(blobs), len(raw), dtime, 0x20, 1, len(nm)) + nm + \
             struct.pack("<H", crc) + os_id + struct.pack("<H", sizes[0] if sizes else 0)
         return bytes([len(base), sum(base) & 0xFF]) + base + blobs + comp

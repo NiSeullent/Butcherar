@@ -169,67 +169,26 @@ static int ms_write(void *ctx, const u8 *p, size_t n)
 }
 
 
-/* KWAJ MS-ZIP: blocks of [len16]['C''K'][deflate], each may refer to the previous
- * 32 KiB. The existing inflater has no preset dictionary, so the history is fed
- * in front of each block as a stored block and dropped from the output. */
+/* KWAJ MS-ZIP (as libmspack): blocks of [len16]['C''K'][deflate stream] until a
+ * zero length; each block may refer to the previous 32 KiB of output. The length
+ * field is not trusted: the next block starts at the byte after the deflate stream. */
 typedef struct {
-    gz_src *s;
-    u64 pos, end;            /* compressed block data in s */
-    const u8 *pre;           /* stored-block prefix: header + history */
-    u32 pre_len, pre_pos;
-    volatile long *cancel;
-} mz_reader;
-
-typedef struct {
-    mz_reader rd;            /* first: read callback casts ctx */
+    gz_range_reader rd;      /* first: gz_range_read casts the ctx */
     gz_out *out;
     u8 *hist;                /* last 32 KiB of output */
     u32 hist_len;
-    u32 skip;                /* history bytes still to drop from the inflater output */
-    u64 n;
+    u64 n, limit;            /* limit: stored length (GZ_SIZE_UNKNOWN: none) */
 } mz_io;
-
-static int mz_read(void *ctx, u8 *buf, u32 cap, u32 *got)
-{
-    mz_io *m = (mz_io *)ctx;
-    mz_reader *r = &m->rd;
-    *got = 0;
-    if (r->cancel && *r->cancel) return GZ_E_CANCEL;
-    if (r->pre_pos < r->pre_len) {
-        u32 k = r->pre_len - r->pre_pos;
-        if (k > cap) k = cap;
-        __builtin_memcpy(buf, r->pre + r->pre_pos, k);
-        r->pre_pos += k;
-        *got = k;
-        return GZ_OK;
-    }
-    if (r->pos >= r->end) return GZ_OK;
-    u64 left = r->end - r->pos;
-    u32 n = cap < left ? cap : (u32)left, g = 0;
-    int e = r->s->read_at(r->s, r->pos, buf, n, &g);
-    if (e) return e;
-    if (!g) return GZ_E_TRUNC;
-    r->pos += g;
-    *got = g;
-    return GZ_OK;
-}
 
 static int mz_write(void *ctx, const u8 *p, size_t n)
 {
     mz_io *m = (mz_io *)ctx;
-    if (m->skip) {
-        size_t k = n < m->skip ? n : m->skip;
-        m->skip -= (u32)k;
-        p += k;
-        n -= k;
-        if (!n) return GZ_OK;
-    }
-    /* keep the last 32 KiB for the next block */
-    if (n >= 32768) {
-        __builtin_memcpy(m->hist, p + n - 32768, 32768);
-        m->hist_len = 32768;
+    if (m->limit != GZ_SIZE_UNKNOWN && n > m->limit - m->n) return GZ_E_DATA;   /* longer than stored */
+    if (n >= GZ_INFLATE_DICT_MAX) {
+        __builtin_memcpy(m->hist, p + n - GZ_INFLATE_DICT_MAX, GZ_INFLATE_DICT_MAX);
+        m->hist_len = GZ_INFLATE_DICT_MAX;
     } else {
-        u32 keep = m->hist_len + (u32)n > 32768 ? 32768 - (u32)n : m->hist_len;
+        u32 keep = m->hist_len + (u32)n > GZ_INFLATE_DICT_MAX ? GZ_INFLATE_DICT_MAX - (u32)n : m->hist_len;
         __builtin_memmove(m->hist, m->hist + m->hist_len - keep, keep);
         __builtin_memcpy(m->hist + keep, p, n);
         m->hist_len = keep + (u32)n;
@@ -238,45 +197,36 @@ static int mz_write(void *ctx, const u8 *p, size_t n)
     return m->out->write(m->out, p, n);
 }
 
-static int kwaj_mszip(gz_src *s, u64 pos, gz_out *out, gz_ctx *c, u64 *produced)
+static int kwaj_mszip(gz_src *s, u64 pos, u64 usize, gz_out *out, gz_ctx *c, u64 *produced)
 {
     gz_inflater *z = gz_ctx_inflater(c);
-    u8 *buf = (u8 *)gz_alloc(5 + 32768 + 32768);
-    if (!z || !buf) { gz_free(buf); return GZ_E_NOMEM; }
+    u8 *hist = (u8 *)gz_alloc(GZ_INFLATE_DICT_MAX);
+    if (!z || !hist) { gz_free(hist); return GZ_E_NOMEM; }
     mz_io m;
     __builtin_memset(&m, 0, sizeof m);
     m.out = out;
-    m.hist = buf + 5 + 32768;
+    m.hist = hist;
+    m.limit = usize;
+    m.rd.src = s;
+    m.rd.end = s->size;
+    m.rd.cancel = c->cancel;
     int st = GZ_OK;
-    for (u32 blocks = 0;; blocks++) {
+    for (;;) {
         u8 b[4];
         if (pos + 2 > s->size) break;                 /* missing terminator: tolerated */
         if ((st = gz_src_read_exact(s, pos, b, 2))) break;
         if (rd16(b) == 0) break;
         if ((st = gz_src_read_exact(s, pos + 2, b, 2))) break;
         if (b[0] != 'C' || b[1] != 'K') { st = GZ_E_DATA; break; }
-        /* stored block (not final) holding the history */
-        u32 hl = m.hist_len;
-        buf[0] = 0;
-        wr16(buf + 1, (u16)hl);
-        wr16(buf + 3, (u16)~hl);
-        __builtin_memcpy(buf + 5, m.hist, hl);
-        m.rd.s = s;
+        /* the inflater copies the history into its window before the sink updates it */
         m.rd.pos = pos + 4;
-        m.rd.end = s->size;
-        m.rd.pre = buf;
-        m.rd.pre_len = 5 + hl;
-        m.rd.pre_pos = 0;
-        m.rd.cancel = c->cancel;
-        m.skip = hl;
-        gz_stream_io io = { mz_read, mz_write, &m };
-        st = gz_inflate_run(z, &io, 0);
+        gz_stream_io io = { gz_range_read, mz_write, &m };
+        st = gz_inflate_run_dict(z, &io, m.hist, m.hist_len);
         if (st) break;
-        if (m.rd.pos < z->rest_len + pos + 4) { st = GZ_E_DATA; break; }
-        pos = m.rd.pos - z->rest_len;               /* next block starts byte aligned */
-        if (blocks > (1u << 26)) { st = GZ_E_LIMIT; break; }
+        if (m.rd.pos < (u64)z->rest_len + pos + 4) { st = GZ_E_DATA; break; }
+        pos = m.rd.pos - z->rest_len;                 /* strictly increasing: >= 1 byte consumed */
     }
-    gz_free(buf);
+    gz_free(hist);
     *produced = m.n;
     return st;
 }
@@ -303,7 +253,7 @@ static int mslz_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, gz_ctx *
         st = d ? gz_lzh_decode(d, &io, e->usize, lzh) : GZ_E_NOMEM;
     } else if (method == KW_MSZIP) {
         u64 n = 0;
-        st = kwaj_mszip(s, e->off, out, c, &n);
+        st = kwaj_mszip(s, e->off, e->usize, out, c, &n);
         x.n = n;
         if (!st && e->usize != GZ_SIZE_UNKNOWN && n != e->usize) st = GZ_E_DATA;
     } else {

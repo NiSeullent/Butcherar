@@ -15,6 +15,9 @@ typedef struct gz_implode_dec gz_implode_dec;   /* ~1.2 MiB, reusable */
 
 gz_implode_dec *gz_implode_dec_new(void);
 void gz_implode_dec_free(gz_implode_dec *d);
+/* create/destroy pair for gz_ctx_slot(c, GZ_SLOT_MISC2, gz_implode_slot_new, gz_implode_slot_free) */
+void *gz_implode_slot_new(void);
+void  gz_implode_slot_free(void *d);
 
 /* Decode one imploded entry. d may be NULL (a decoder is created for the call).
  * out_size: uncompressed size from the ZIP header (Implode has no end marker;

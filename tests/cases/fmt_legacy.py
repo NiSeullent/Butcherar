@@ -6,7 +6,10 @@ the ZIP Shrink / Implode codecs (raw streams through a C driver).
 Fixtures come from the reference tools (ncompress, arj, mscompress, jlha when
 installed) and from the Python encoders in _legacy_enc.py, which are checked
 against independent decoders (uncompress, lhasa, 7-Zip, Info-ZIP unzip,
-libmspack) before our decoders are compared with them."""
+libmspack) before our decoders are compared with them. Hostile inputs: corrupted
+files through gzt, plus in-process mutation fuzzing of every codec and format
+(tests/drivers/legacy_codec.c fuzz; GZ_FUZZ_ITERS sets the iterations per target).
+Real PKZIP 1.x / LHA / ARJ archives are downloaded at test time when online."""
 import io, os, random, shutil, struct, subprocess, sys, tarfile, zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -51,25 +54,9 @@ def corruptions(data, n=8, seed=5, header=64):
         out.append(bytes(b))
     return out
 
-def hostile_check(t, path, label):
-    """t.check_hostile, but tolerating the gz_ctx that tests/gzt.c leaks when an
-    archive fails to open (LeakSanitizer suppression for that one allocation)"""
-    supp = os.path.join(t.work, "lsan.supp")
-    if not os.path.exists(supp):
-        with open(supp, "w") as f:
-            f.write("leak:gz_ctx_new\n")
-    env = {"LSAN_OPTIONS": "suppressions=%s:print_suppressions=0" % supp}
-    try:
-        r, rows, out = t.extract(path, env=env, timeout=60)
-    except subprocess.TimeoutExpired:
-        return t.record(False, label, "timeout")
-    err = r.stderr.decode(errors="replace")
-    bad = r.returncode not in (0, 1) or "Sanitizer" in err or "runtime error" in err
-    return t.record(not bad, label, "rc=%d %s" % (r.returncode, err[-600:] if bad else ""))
-
 def hostile_set(t, label, data, n=8, header=64):
     for k, d in enumerate(corruptions(data, n, header=header)):
-        hostile_check(t, write(t, "hostile/%s_%d.bin" % (label, k), d), "hostile %s #%d" % (label, k))
+        t.check_hostile(write(t, "hostile/%s_%d.bin" % (label, k), d), "hostile %s #%d" % (label, k), timeout=60)
 
 # ------------------------------------------------------------------ .Z
 
@@ -77,17 +64,19 @@ def section_z(t):
     files = {"txt": TXT, "rnd": RND, "mix": MIX}
     if t.tool("compress"):
         for nm, d in files.items():
-            for bits in (10, 12, 13, 16):
+            # (ncompress 5.0 -b9 output is undecodable even by its own compress -d)
+            for bits in (10, 11, 12, 13, 14, 15, 16):
                 z = t.sh(["compress", "-f", "-b%d" % bits, "-c"], input=d, check=False).stdout   # rc 2: grew
                 t.check_extract(write(t, "z/%s%d.dat.Z" % (nm, bits), z), {"%s%d.dat" % (nm, bits): d},
                                 expect_type="Z", label="compress -b%d %s" % (bits, nm))
     # our encoder: -b9 (codes widen to 10 bits like compress 4.x), non-block mode, CLEAR codes
     for bits, block, ce in ((9, True, 0), (9, False, 0), (11, True, 1500), (16, False, 0), (14, True, 700)):
         z = E.compress_Z(MIX, bits, block, ce)
-        ok_ref = True
-        if t.tool("uncompress"):
-            ok_ref = t.sh(["uncompress", "-c"], input=z, check=False).stdout == MIX
-            t.record(ok_ref, "uncompress accepts encoder b%d block=%d clear=%d" % (bits, block, ce))
+        # two independent decoders: uncompress (often gzip's unlzw) and ncompress's compress -d
+        for ref in (["uncompress", "-c"], ["compress", "-dc"]):
+            if t.tool(ref[0]):
+                ok_ref = t.sh(ref, input=z, check=False).stdout == MIX
+                t.record(ok_ref, "%s accepts encoder b%d block=%d clear=%d" % (ref[0], bits, block, ce))
         name = "enc_b%d_%d_%d" % (bits, block, ce)
         t.check_extract(write(t, "z/%s.Z" % name, z), {name: MIX}, label="encoder .Z b%d block=%d clear=%d" % (bits, block, ce))
     # tarball inside: .tar.Z and .taz
@@ -156,9 +145,9 @@ def arj_build(recs):
 def zlib_crc(b):
     return zlib.crc32(b) & 0xFFFFFFFF
 
-def arj_to_dos(data, codepage):
+def arj_to_dos(data, codepage, backslash=False):
     """rewrite a Unix-host ARJ as a DOS-host one: OS 0, DOS times, DOS attributes,
-    names re-encoded in the OEM code page"""
+    names re-encoded in the OEM code page (backslash: '\\' separators, PATHSYM_FLAG off)"""
     recs = arj_headers(data)
     out = []
     for r in recs:
@@ -172,6 +161,9 @@ def arj_to_dos(data, codepage):
         name = rest.split(b"\0")[0]
         comment = rest[len(name) + 1:].split(b"\0")[0]
         name = name.decode("utf-8").encode(codepage)
+        if backslash:
+            name = name.replace(b"/", b"\\")
+            h[4] &= ~0x10
         if h[6] != 2:
             struct.pack_into("<I", h, 8, E.dos_time(2019, 12, 31, 23, 59, 58))
             struct.pack_into("<H", h, 26, 0x10 if h[6] == 3 else 0x20)
@@ -210,21 +202,42 @@ def section_arj(t):
     p = make("gk.arj", "-m1", "-g고기맛")
     t.check_extract(p, ARJ_FILES, pw="고기맛", label="arj garble UTF-8 Korean password")
     t.check_extract(p, ARJ_FILES, pw="고기맛", acp=949, label="arj garble Korean password, CP949 system")
+    # encryption version >= 2 (GOST, ARJ 2.6x -hg) is not supported: GZ_E_METHOD, not a password error
+    recs = arj_headers(open(t.path("arj", "g1.arj"), "rb").read())
+    mh = bytearray(recs[0][1])
+    mh[28] = 4
+    recs[0] = ("hdr", bytes(mh), recs[0][2], recs[0][3])
+    r, rows, out = t.extract(write(t, "arj/gost.arj", arj_build(recs)), pw="gogi1234")
+    t.record(rows and all(st == 5 for st, isdir, size, nm in rows.values() if size), "arj GOST -> GZ_E_METHOD",
+             str(list(rows.values())[:3]))
     # multi-volume set with files split across volumes
     p = make("vol.arj", "-m1", "-v40k")
     vols = sorted(f for f in os.listdir(os.path.dirname(p)) if f.startswith("vol."))
     t.record(len(vols) >= 3, "arj -v40k made %d volumes" % len(vols), str(vols))
     t.check_extract(p, ARJ_FILES, label="arj multi-volume")
+    # opened at the second volume: the files starting in vol.a01 or later (it goes on
+    # with vol.a02, not with vol.a01 again)
+    want = {}
+    for v in vols[:-1]:                                      # vol.a01, vol.a02, ... (vol.arj sorts last)
+        for rec in arj_headers(open(t.path("arj", v), "rb").read())[1:]:
+            if rec[0] == "hdr" and not rec[1][4] & 8:        # not EXTFILE: starts in this volume
+                h = rec[1]
+                nm = h[h[0]:].split(b"\0")[0].decode()
+                want[nm] = ARJ_FILES[nm]
+    t.record(want and len(want) < len(ARJ_FILES), "arj volumes after the first start files", str(sorted(want)))
+    t.check_extract(t.path("arj", "vol.a01"), want, label="arj opened at vol.a01")
     os.remove(t.path("arj", "vol.a02"))
     r, rows, out = t.extract(p)
     t.record(r.returncode in (0, 1) and any(st != 0 for st, isdir, size, nm in rows.values()),
              "arj missing volume reported", str(list(rows.values())[:6]))
     # SFX stub in front
-    sfx = write(t, "arj/sfx.exe", b"MZ" + rand(20000, 9).replace(b"\x60\xea", b"\x61\xea") + open(t.path("arj", "m1.arj"), "rb").read())
+    sfx = write(t, "arj/sfx.exe", b"MZ" + rand(100000, 9).replace(b"\x60\xea", b"\x61\xea") + open(t.path("arj", "m1.arj"), "rb").read())
     t.check_extract(sfx, ARJ_FILES, label="arj SFX")
     # DOS host: OEM names (CP949 on Korean DOS, CP437 elsewhere), DOS times
     base = open(t.path("arj", "m1.arj"), "rb").read()
     t.check_extract(write(t, "arj/dos949.arj", arj_to_dos(base, "cp949")), ARJ_FILES, acp=949, label="arj DOS host CP949 names")
+    t.check_extract(write(t, "arj/dosbs.arj", arj_to_dos(base, "cp949", True)), ARJ_FILES, acp=949,
+                    label="arj DOS host backslash paths")
     lat = {"café/naïve.txt": TXT[:2000], "Größe.txt": RND[:100]}
     src2 = t.write_tree(os.path.join(t.work, "arj_src2"), lat)
     p2 = t.path("arj", "lat.arj")
@@ -316,8 +329,15 @@ def section_lzh(t):
     # LHa for UNIX splits "a/lnk|../f.txt" at the last '/': directory "a/lnk|../", name "f.txt"
     ents += E.lha_member(2, "-lhd-", b"f.txt", b"", b"", dirname=b"a/lnk|../", unix_mode=0o120777)
     ents += E.lha_member(1, "-lh5-", b"l1.txt", E.lha_compress(TXT[:999], "-lh5-"), TXT[:999], dirname=b"x/y/", unix_mode=0o100755)
+    # level 1 with the name in an 0x01 extended header (long names)
+    ents += E.lha_member(1, "-lh5-", b"long name, level 1.txt", E.lha_compress(TXT[:777], "-lh5-"), TXT[:777],
+                         dirname=b"x/", ext_name=True)
     p = write(t, "lzh/ext.lzh", ents + b"\0")
-    t.check_extract(p, {"a/b/f.txt": TXT[:5000], "x/y/l1.txt": TXT[:999], "a/empty": None}, allow_extra=True, label="lzh ext headers")
+    files = {"a/b/f.txt": TXT[:5000], "x/y/l1.txt": TXT[:999], "x/long name, level 1.txt": TXT[:777]}
+    if have_lhasa:
+        got = lhasa_extract(t, p)
+        t.record(got == files, "lhasa accepts ext header archive", str(sorted(got)))
+    t.check_extract(p, dict(files, **{"a/empty": None}), allow_extra=True, label="lzh ext headers")
     r, typ, rows = t.listing(p)
     lk = [x for x in rows if x["name"].startswith("a/lnk")]
     t.record(lk and lk[0]["name"] == "a/lnk -> ../f.txt" and (lk[0]["mode"] & 0o170000) == 0o120000, "lzh symlink", str(lk))
@@ -342,8 +362,15 @@ def section_lzh(t):
     p = write(t, "lzh/cp949.lzh", lha_archive(1, "-lh5-", files, os_id=b"M"))
     t.check_extract(p, {"자료/보고서.txt": TXT[:500]}, acp=949, label="lzh CP949 names")
     # SFX
-    p = write(t, "lzh/sfx.exe", b"MZ" + rand(30000, 3).replace(b"-l", b"-L") + lha_archive(2, "-lh5-", LZH_FILES[:3]))
+    p = write(t, "lzh/sfx.exe", b"MZ" + rand(150000, 3).replace(b"-l", b"-L") + lha_archive(2, "-lh5-", LZH_FILES[:3]))
     t.check_extract(p, {k.decode(): v for k, v in LZH_FILES[:3]}, label="lzh SFX")
+    # LHarc .COM self-extractor (starts with a jump) whose stub holds header-like decoys
+    decoy = b"\x40\x00-lh5-" + b"\xff" * 13 + b"\x02" + b"\xff" * 41 + b"\x20\x00-lh1-" + b"\x00" * 13 + b"\x02" + bytes(30)
+    p = write(t, "lzh/sfx.com", b"\xe9\x40\x00" + decoy + rand(3000, 4).replace(b"-l", b"-L") + lha_archive(1, "-lh1-", LZH_FILES[:2]))
+    t.check_extract(p, {k.decode(): v for k, v in LZH_FILES[:2]}, label="lzh .COM SFX with decoy headers")
+    r, rows, out = t.extract(write(t, "lzh/decoy.exe", b"MZ" + decoy * 50 + rand(5000, 5).replace(b"-l", b"-L")))
+    t.record("type=LZH" not in r.stderr.decode(errors="replace"), "lzh decoy headers in an EXE are not an archive",
+             r.stdout.decode(errors="replace")[:60])
     # unsupported method listed, extraction fails cleanly
     p = write(t, "lzh/lh3.lzh", E.lha_member(2, "-lh3-", b"x.bin", b"\x12\x34", b"zz") + b"\0")
     r, rows, out = t.extract(p)
@@ -486,6 +513,46 @@ def section_codecs(t, drv):
         r, s = run_drv(["bench", codec, i, "-", str(n)] + [str(x) for x in params] + ["20"], timeout=300)
         t.record(r is not None and s.startswith("status=0 "), "throughput %s" % label, s)
 
+def section_fuzz(t, drv):
+    """in-process mutation fuzzing (tests/drivers/legacy_codec.c fuzz): one reused
+    decoder / gz_ctx per target, every iteration time-limited; meant to run under
+    ASan/UBSan (GZ_FUZZ_ITERS=20000 for a long campaign)"""
+    iters = int(os.environ.get("GZ_FUZZ_ITERS", "300"))
+    C = t.path("codec") + "/"
+    jobs = []
+    for meth, num in (("-lh1-", 1), ("-lh5-", 3), ("-lh7-", 5), ("-lzs-", 6), ("-lz5-", 7)):
+        jobs.append(("raw " + meth, ["lzh", C + "raw_%s.in" % meth, "60000", str(num)]))
+    jobs += [("raw SZDD", ["lzh", C + "raw_SZDD.in", "60000", "10"]),
+             ("raw KWAJ", ["lzh", C + "raw_KWAJ.in", "60000", "12"]),
+             ("raw ARJ 1-3", ["lzh", C + "raw_-lh7-.in", "60000", "8"]),
+             ("raw ARJ 4", ["lzh", C + "raw_-lh5-.in", "60000", "9"]),
+             ("raw LZW", ["lzw", C + "raw_LZW.in", "-1", str(0x8d)]),
+             ("raw Shrink", ["shrink", C + "shrink_txt_(4_partial_clears).in", "150000"]),
+             ("raw Implode 4K/2", ["implode", C + "implode_4K_2_trees.in", "293000", "0", "0"]),
+             ("raw Implode 8K/3", ["implode", C + "implode_8K_3_trees.in", "293000", "1", "1"])]
+    arcs = [("arj", "m1.arj", None), ("arj", "m4.arj", None), ("arj", "g1.arj", "gogi1234"), ("arj", "tree.arj", None),
+            ("arj", "sfx.exe", None), ("lzh", "lh1_l0.lzh", None), ("lzh", "lh5_l1.lzh", None), ("lzh", "lh6_l2.lzh", None),
+            ("lzh", "lh7_l3.lzh", None), ("lzh", "lzs_l2.lzh", None), ("lzh", "lz5_l0.lzh", None), ("lzh", "ext.lzh", None),
+            ("lzh", "jlha_5_1.lzh", None), ("lzh", "sfx.exe", None), ("lzh", "sfx.com", None), ("z", "a.tar.Z", None),
+            ("z", "enc_b14_1_700.Z", None), ("ms", "SETUP.EX_", None), ("ms", "qb.ex_", None)]
+    arcs += [("ms", "kw%d%d.dat_" % (m, l), None) for m in (2, 3, 4) for l in (0, 1)]
+    for d, n, pw in arcs:
+        if os.path.exists(t.path(d, n)):
+            jobs.append(("%s/%s" % (d, n), ["arc", t.path(d, n), n] + ([pw] if pw else [])))
+    for k, (label, a) in enumerate(jobs):
+        if not os.path.exists(a[1]):
+            t.record(False, "fuzz " + label, "missing input " + a[1])
+            continue
+        try:
+            r = subprocess.run([drv, "fuzz", a[0], a[1], str(iters), str(100 + k)] + a[2:], capture_output=True, timeout=900)
+        except subprocess.TimeoutExpired:
+            t.record(False, "fuzz " + label, "timeout")
+            continue
+        err = r.stderr.decode(errors="replace")
+        out = r.stdout.decode(errors="replace").strip()
+        ok = r.returncode == 0 and out.startswith("fuzz ") and "Sanitizer" not in err and "runtime error" not in err
+        t.record(ok, "fuzz " + label, out if ok else "rc=%d %s %s" % (r.returncode, out, err[-1500:]))
+
 def hostile_codec(t, drv, label, comp, size, head, params):
     for k, d in enumerate(corruptions(comp, 10, seed=11, header=40)):
         i = write(t, "codec/hostile_%s_%d.in" % (label, k), d)
@@ -510,18 +577,27 @@ BBS_ZIPS = ["cica9207/WIN3/ICONS/TGICONS1.ZIP", "cica9207/WIN3/ICONS/TAMR101.ZIP
 BBS_ARCS = ["garbo/PC/ARCERS/HYPER25.LZH", "garbo/PC/ARCERS/SQPC131.LZH", "garbo/PC/ARCERS/LHA213.EXE",
             "garbo/PC/ARCERS/ARJ230NG.EXE"]
 
+_offline = []
+
 def fetch(t, rel):
+    """download into the work directory (cached); after one failure the rest is skipped"""
     import urllib.request
     p = os.path.join(t.work, "bbs", os.path.basename(rel))
     if os.path.exists(p) and os.path.getsize(p):
         return p
+    if _offline:
+        return None
     os.makedirs(os.path.dirname(p), exist_ok=True)
     try:
-        d = urllib.request.urlopen(BBS + rel, timeout=20).read()
+        d = urllib.request.urlopen(BBS + rel, timeout=15).read()
     except Exception:
+        _offline.append(rel)
         return None
-    with open(p, "wb") as f:
+    if len(d) > 4 << 20:
+        return None
+    with open(p + ".part", "wb") as f:
         f.write(d)
+    os.replace(p + ".part", p)
     return p
 
 def section_bbs(t, drv):
@@ -583,4 +659,5 @@ def run(t):
     section_lzh(t)
     section_mslz(t, ref)
     section_codecs(t, drv)
+    section_fuzz(t, drv)
     section_bbs(t, drv)

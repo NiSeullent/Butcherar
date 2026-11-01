@@ -69,16 +69,18 @@ static int read_header(gz_src *s, u64 off, arj_hdr *hd)
         u32 es = rd16(b);
         p += 2;
         if (!es) { hd->data = p; return GZ_OK; }
-        u8 x[3 + 2 + 512];
-        u32 want = es < sizeof x ? es : (u32)sizeof x;
-        if (gz_src_read_exact(s, p, x, want)) return GZ_E_TRUNC;
-        /* 'U' UXSPECIAL: tag, continuation flag, block: id<<5 | size (31 = 16-bit size follows) */
-        if (x[0] == 'U' && want >= 3 && (x[2] >> 5) == 2 && !hd->link_len) {
-            u32 bl = x[2] & 31, st = 3;
-            if (bl == 31 && want >= 5) { bl = rd16(x + 3); st = 5; }
-            if (bl < sizeof hd->link && st + bl <= want) {
-                __builtin_memcpy(hd->link, x + st, bl);
-                hd->link_len = bl;
+        /* 'U' UXSPECIAL: tag, continuation flag, block: id<<5 | size (31 = 16-bit size
+         * follows); only symlink targets (id 2) are used, larger blocks are skipped */
+        u8 x[3 + 2 + 512 + 4];
+        if (es + 4 <= sizeof x && !hd->link_len) {
+            if (gz_src_read_exact(s, p, x, es + 4)) return GZ_E_TRUNC;
+            if (x[0] == 'U' && es >= 3 && (x[2] >> 5) == 2 && gz_crc32(0, x, es) == rd32(x + es)) {
+                u32 bl = x[2] & 31, st = 3;
+                if (bl == 31 && es >= 5) { bl = rd16(x + 3); st = 5; }
+                if (bl < sizeof hd->link && st + bl <= es) {
+                    __builtin_memcpy(hd->link, x + st, bl);
+                    hd->link_len = bl;
+                }
             }
         }
         p += (u64)es + 4;
@@ -103,15 +105,30 @@ static int is_main_header(const u8 *b, u32 n)
     return gz_crc32(0, b + 4, size) == rd32(b + 4 + size);
 }
 
+#define SFX_SCAN (256u << 10)            /* stub sizes searched (ARJ32 SFX stubs exceed 64 KiB) */
+
+/* SFX: the archive follows an executable stub; find the first main header with
+ * a valid CRC that starts in the first SFX_SCAN bytes. 1 and *pos, 0, or GZ_E_NOMEM. */
+static int sfx_find(gz_src *s, u64 *pos)
+{
+    u32 max = s->size < SFX_SCAN + ARJ_HDR_MAX + 8 ? (u32)s->size : SFX_SCAN + ARJ_HDR_MAX + 8;
+    if (max < 4 + ARJ_FIRST_MIN + 4) return 0;
+    u8 *b = (u8 *)gz_alloc(max);
+    if (!b) return GZ_E_NOMEM;
+    int found = 0;
+    if (!gz_src_read_exact(s, 0, b, max) && b[0] == 'M' && b[1] == 'Z') {
+        for (u32 i = 2; i < SFX_SCAN && i + 4 + ARJ_FIRST_MIN + 4 <= max; i++)
+            if (b[i] == 0x60 && b[i + 1] == 0xEA && is_main_header(b + i, max - i)) { *pos = i; found = 1; break; }
+    }
+    gz_free(b);
+    return found;
+}
+
 static int arj_probe(gz_src *s, const u8 *h, u32 n)
 {
-    (void)s;
     if (is_main_header(h, n)) return 95;
-    /* SFX: the archive follows an executable stub */
-    if (n < 2 || h[0] != 'M' || h[1] != 'Z') return 0;
-    for (u32 i = 2; i + 4 + ARJ_FIRST_MIN + 4 <= n; i++)
-        if (h[i] == 0x60 && h[i + 1] == 0xEA && is_main_header(h + i, n - i)) return 70;
-    return 0;
+    u64 pos;
+    return n >= 2 && h[0] == 'M' && h[1] == 'Z' && sfx_find(s, &pos) == 1 ? 70 : 0;
 }
 
 static int part_add(arj_priv *pv, const arj_part *p)
@@ -148,6 +165,18 @@ static gzch *volume_name(const gzch *fn, u32 k)
     return v;
 }
 
+/* volume number of an opened name: .a01 -> 1, .123 -> 123, anything else 0 */
+static u32 volume_index(const gzch *fn)
+{
+    size_t n = gz_wcslen(fn);
+    if (n < 4 || fn[n - 4] != '.') return 0;
+    const gzch *e = fn + n - 3;
+    if (e[1] < '0' || e[1] > '9' || e[2] < '0' || e[2] > '9') return 0;
+    u32 v = (u32)(e[1] - '0') * 10 + (u32)(e[2] - '0');
+    if (e[0] == 'a' || e[0] == 'A') return v;
+    return e[0] >= '0' && e[0] <= '9' ? (u32)(e[0] - '0') * 100 + v : 0;
+}
+
 static int arj_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
 {
     u8 head[4096];
@@ -156,18 +185,8 @@ static int arj_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
     if (r) return r;
     u64 start = 0;
     if (!is_main_header(head, hn)) {
-        /* SFX: search the first 64 KiB for a main header with a valid CRC */
-        u32 max = s->size < 65536 + 4096 ? (u32)s->size : 65536 + 4096;
-        u8 *buf = (u8 *)gz_alloc(max);
-        if (!buf) return GZ_E_NOMEM;
-        r = gz_src_read_exact(s, 0, buf, max);
-        u32 i = 1;
-        for (; !r && i + 4 + ARJ_FIRST_MIN + 4 <= max; i++)
-            if (buf[i] == 0x60 && buf[i + 1] == 0xEA && is_main_header(buf + i, max - i)) break;
-        int found = !r && i + 4 + ARJ_FIRST_MIN + 4 <= max;
-        gz_free(buf);
-        if (!found) return r ? r : GZ_E_FORMAT;
-        start = i;
+        r = sfx_find(s, &start);
+        if (r != 1) return r ? r : GZ_E_FORMAT;
         a->sfx_shift = start;
     }
     arj_priv *pv = (arj_priv *)gz_alloc(sizeof(arj_priv));
@@ -283,8 +302,10 @@ static int arj_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
         if (!vol) first_vol_ok = 1;
         if (!more_vols || !o->open_volume || !o->file_name) break;
         /* next volume */
-        if (vol + 1 >= ARJ_MAX_VOLS) break;
-        gzch *vn = volume_name(o->file_name, vol + 1);
+        /* opened at a later volume (name.a05): continue from its number */
+        u32 vnum = volume_index(o->file_name) + vol + 1;
+        if (vnum >= ARJ_MAX_VOLS) break;
+        gzch *vn = volume_name(o->file_name, vnum);
         if (!vn) { r = GZ_E_NOMEM; break; }
         gz_src *nv = 0;
         int vr = o->open_volume(o->user, vn, &nv);
