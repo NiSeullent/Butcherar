@@ -5,15 +5,29 @@
  *   gz_crc32_pclmul   4x128-bit carry-less folding        (SSE4.1 + PCLMULQDQ)
  *   gz_crc32_avx      same, VEX encoded                   (AVX, Win7 SP1+)
  *   gz_crc32_vpclmul  4x256-bit folding with VPCLMULQDQ   (AVX2 + VPCLMULQDQ)
+ *   gz_crc32_arm      CRC32X instructions                 (AArch64 CRC32)
+ *   gz_crc32_pmull    8x128-bit PMULL folding, CRC32X for the rest (AArch64 PMULL + CRC32)
  *
  * Folding method: V. Gopal et al., "Fast CRC Computation for Generic
  * Polynomials Using PCLMULQDQ Instruction", Intel 2009.
  */
 #include "crc32.h"
+#include "crc64.h"
 
 #if defined(__i386__) || defined(__x86_64__)
 #include <immintrin.h>
 #define GZ_HAVE_CLMUL 1
+#endif
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#include <arm_acle.h>
+#if defined(__clang__)
+#define GZ_TARGET_CRC __attribute__((target("crc")))
+#define GZ_TARGET_CRC_PMULL __attribute__((target("crc,aes")))
+#else
+#define GZ_TARGET_CRC __attribute__((target("+crc")))
+#define GZ_TARGET_CRC_PMULL __attribute__((target("+crc+aes")))
+#endif
 #endif
 
 u32 gz_crc_table[8][256];
@@ -33,6 +47,7 @@ void gz_crc32_init(void)
             gz_crc_table[t][i] = c;
         }
     }
+    gz_crc64_init();
 }
 
 u32 gz_crc32_byte(u32 s, u8 b)
@@ -64,9 +79,8 @@ u32 gz_crc32_slice8(u32 crc, const u8 *p, size_t n)
     return ~crc_raw_slice8(~crc, p, n);
 }
 
-#ifdef GZ_HAVE_CLMUL
-
-/* (x^(D+32) mod P)' << 1, (x^(D-32) mod P)' << 1 for the fold distances D. */
+/* (x^(D+32) mod P)' << 1, (x^(D-32) mod P)' << 1 for the fold distances D
+ * (shared by the PCLMULQDQ and PMULL kernels). */
 #define K_FOLD512_LO  0x0154442bd4ULL
 #define K_FOLD512_HI  0x01c6e41596ULL
 #define K_FOLD128_LO  0x01751997d0ULL
@@ -78,6 +92,8 @@ u32 gz_crc32_slice8(u32 crc, const u8 *p, size_t n)
 #define K_FOLD1024_HI 0x014a7fe880ULL
 #define K_FOLD256_LO  0x00f1da05aaULL
 #define K_FOLD256_HI  0x015a546366ULL
+
+#ifdef GZ_HAVE_CLMUL
 
 #define CLMUL_TAIL_BODY                                                       \
     /* single 16-byte folds */                                                \
@@ -259,4 +275,72 @@ u32 gz_crc32_vpclmul(u32 crc, const u8 *p, size_t n)
 u32 gz_crc32_pclmul(u32 crc, const u8 *p, size_t n) { return gz_crc32_slice8(crc, p, n); }
 u32 gz_crc32_avx(u32 crc, const u8 *p, size_t n) { return gz_crc32_slice8(crc, p, n); }
 u32 gz_crc32_vpclmul(u32 crc, const u8 *p, size_t n) { return gz_crc32_slice8(crc, p, n); }
+#endif
+
+#if defined(__aarch64__)
+
+/* raw state in/out */
+GZ_TARGET_CRC
+static u32 crc_raw_arm(u32 c, const u8 *p, size_t n)
+{
+    while (n && ((uintptr_t)p & 7)) { c = __crc32b(c, *p++); n--; }
+    for (; n >= 32; p += 32, n -= 32) {
+        c = __crc32d(c, rd64(p));      c = __crc32d(c, rd64(p + 8));
+        c = __crc32d(c, rd64(p + 16)); c = __crc32d(c, rd64(p + 24));
+    }
+    for (; n >= 8; p += 8, n -= 8) c = __crc32d(c, rd64(p));
+    while (n--) c = __crc32b(c, *p++);
+    return c;
+}
+
+u32 gz_crc32_arm(u32 crc, const u8 *p, size_t n)
+{
+    return ~crc_raw_arm(~crc, p, n);
+}
+
+#define PM_LO(x, k) vreinterpretq_u64_p128(vmull_p64((poly64_t)vgetq_lane_u64(x, 0), (poly64_t)vgetq_lane_u64(k, 0)))
+#define PM_HI(x, k) vreinterpretq_u64_p128(vmull_high_p64(vreinterpretq_p64_u64(x), vreinterpretq_p64_u64(k)))
+#define PM_FOLD(x, k, d) veorq_u64(veorq_u64(PM_LO(x, k), PM_HI(x, k)), d)
+#define PM_LD(o) vreinterpretq_u64_u8(vld1q_u8(buf + (o)))
+
+/* 8 lanes folded by 1024 bits, then into one lane; the remaining 128 bits are
+ * reduced with two CRC32X (the fold keeps the CRC of the stream unchanged).
+ * len >= 128, multiple of 16. */
+GZ_TARGET_CRC_PMULL
+static u32 crc_raw_pmull(u32 crc, const u8 *buf, size_t len)
+{
+    const uint64x2_t k1024 = vcombine_u64(vcreate_u64(K_FOLD1024_LO), vcreate_u64(K_FOLD1024_HI));
+    const uint64x2_t k128 = vcombine_u64(vcreate_u64(K_FOLD128_LO), vcreate_u64(K_FOLD128_HI));
+    uint64x2_t x0 = PM_LD(0x00), x1 = PM_LD(0x10), x2 = PM_LD(0x20), x3 = PM_LD(0x30);
+    uint64x2_t x4 = PM_LD(0x40), x5 = PM_LD(0x50), x6 = PM_LD(0x60), x7 = PM_LD(0x70);
+    x0 = veorq_u64(x0, vcombine_u64(vcreate_u64(crc), vcreate_u64(0)));
+    buf += 128; len -= 128;
+    while (len >= 128) {
+        x0 = PM_FOLD(x0, k1024, PM_LD(0x00)); x1 = PM_FOLD(x1, k1024, PM_LD(0x10));
+        x2 = PM_FOLD(x2, k1024, PM_LD(0x20)); x3 = PM_FOLD(x3, k1024, PM_LD(0x30));
+        x4 = PM_FOLD(x4, k1024, PM_LD(0x40)); x5 = PM_FOLD(x5, k1024, PM_LD(0x50));
+        x6 = PM_FOLD(x6, k1024, PM_LD(0x60)); x7 = PM_FOLD(x7, k1024, PM_LD(0x70));
+        buf += 128; len -= 128;
+    }
+    uint64x2_t x = PM_FOLD(x0, k128, x1);
+    x = PM_FOLD(x, k128, x2); x = PM_FOLD(x, k128, x3); x = PM_FOLD(x, k128, x4);
+    x = PM_FOLD(x, k128, x5); x = PM_FOLD(x, k128, x6); x = PM_FOLD(x, k128, x7);
+    for (; len >= 16; buf += 16, len -= 16) x = PM_FOLD(x, k128, PM_LD(0));
+    return __crc32d(__crc32d(0, vgetq_lane_u64(x, 0)), vgetq_lane_u64(x, 1));
+}
+
+u32 gz_crc32_pmull(u32 crc, const u8 *p, size_t n)
+{
+    u32 c = ~crc;
+    if (n >= 256) {
+        size_t blk = n & ~(size_t)15;
+        c = crc_raw_pmull(c, p, blk);
+        p += blk; n -= blk;
+    }
+    return ~crc_raw_arm(c, p, n);
+}
+
+#else
+u32 gz_crc32_arm(u32 crc, const u8 *p, size_t n) { return gz_crc32_slice8(crc, p, n); }
+u32 gz_crc32_pmull(u32 crc, const u8 *p, size_t n) { return gz_crc32_slice8(crc, p, n); }
 #endif
