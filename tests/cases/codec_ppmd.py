@@ -1,7 +1,8 @@
 """PPMd codecs: var.H (Ppmd7: 7z coder, RAR 3.x coder, 7z encoder) and var.I rev.1 (Ppmd8: ZIP
 method 98) against pyppmd (7-Zip's C code), 7-Zip itself (7z/ZIP archives, RAR 3.x via the Rar
 codec) and unar (independent var.I / RAR implementation); memory-exhaustion restarts, FREEZE,
-a Python reference port of the RAR range decoder, hostile streams, speed."""
+a Python reference port of the RAR range decoder, hostile streams (fuzzed in-process), 32-bit and
+AArch64 (qemu) builds of the driver, speed."""
 import os, random, shutil, struct, subprocess, sys, time, zlib
 
 SAN = "sanitize" in os.environ.get("HOST_CFLAGS", "")
@@ -108,6 +109,15 @@ def make_rar3(name, data, packed):
                      zlib.crc32(data), ftime, 29, 0x35, len(fn), 0x20) + fn
     return (b"Rar!\x1a\x07\x00" + struct.pack("<H", zlib.crc32(mh) & 0xFFFF) + mh
             + struct.pack("<H", zlib.crc32(fh) & 0xFFFF) + fh + packed + bytes.fromhex("c43d7b00400700"))
+
+def props_7z(arc):
+    """(order, mem) of the PPMd coder in a 7z archive with a plain (-mhc=off) header."""
+    hoff, hsize = struct.unpack("<QQ", arc[12:28])
+    h = arc[32 + hoff:32 + hoff + hsize]
+    i = h.find(b"\x23\x03\x04\x01\x05")
+    if i < 0:
+        return None
+    return h[i + 5], struct.unpack("<I", h[i + 6:i + 10])[0]
 
 # ---------------------------------------------------------------- RAR range decoder reference
 
@@ -289,9 +299,12 @@ def run(t):
             t.record(rc == 0 and rd("7z.enc") == s7[32:32 + hoff], "7-Zip 7z o=%d mem=2^%d encode identical" % (o, m), out)
 
         # default parameters per level: ours (gz_ppmd7z_level / gz_ppmd8_zip_level) vs 7-Zip's choice
-        for size in (1000, 100000, 2300000):
-            wr("lv.bin", src[:size])
-            for level in (1, 3, 5, 7, 9):
+        # (the big size crosses the memory reduction threshold of every level: 256 MiB / 16)
+        big_runs = blob("runs", 17 << 20, 9)
+        for data in (src[:1000], src[:100000], src[:2300000], big_runs):
+            size = len(data)
+            wr("lv.bin", data)
+            for level in ((1, 3, 5, 7, 9) if size < (1 << 24) else (5, 7, 8, 9)):
                 r = subprocess.run([drv, "level", str(level), str(size)], capture_output=True)
                 f = r.stdout.decode().split()
                 want7, wantz = (int(f[1]), int(f[2])), (int(f[4]), int(f[5]), int(f[6]))
@@ -299,8 +312,7 @@ def run(t):
                 if os.path.exists(arc):
                     os.remove(arc)
                 t.sh(["7z", "a", "-t7z", "-m0=PPMd", "-mx=%d" % level, "-mhc=off", arc, t.path("lv.bin")])
-                _, rc, out = D("7z", arc, t.path("lv.out"))
-                got7 = tuple(int(x.split("=")[1]) for x in out.split()[:2])
+                got7 = props_7z(open(arc, "rb").read())
                 arc = t.path("lv.zip")
                 if os.path.exists(arc):
                     os.remove(arc)
@@ -309,8 +321,10 @@ def run(t):
                 nlen, xlen = struct.unpack("<HH", z[26:30])
                 v = struct.unpack("<H", z[30 + nlen + xlen:32 + nlen + xlen])[0]
                 gotz = ((v & 15) + 1, ((v >> 4) & 255) + 1, v >> 12)
-                t.record(got7 == want7 and gotz == wantz, "level %d size %d defaults match 7-Zip" % (level, size),
+                t.record(got7 == want7 and gotz == wantz and struct.unpack("<H", z[8:10])[0] == 98,
+                         "level %d size %d defaults match 7-Zip" % (level, size),
                          "7z %s/%s zip %s/%s" % (got7, want7, gotz, wantz))
+        del big_runs
 
         # our encoders inside hand-made containers, checked by 7-Zip itself
         for (order, mem, kind, n) in ((6, 1 << 24, "text", 400000), (32, 1 << 16, "mixed", 500000), (2, 2048, "allbytes", 9000)):
@@ -337,6 +351,9 @@ def run(t):
         _, rc2, out2 = D("d8", len(data), t.path("fz.enc"), t.path("fz.out"))
         lab = "ppmd8 FREEZE o%d %dM %d" % (order, mb, len(data))
         t.record(rc == 0 and rc2 == 0 and rd("fz.out") == data, lab + " round trip", out + " | " + out2)
+        # the models only differ once the memory is exhausted: make sure FREEZE really ran
+        D("e8", order, mb, 0, t.path("fz.raw"), t.path("fz0.enc"))
+        t.record(rd("fz0.enc") != rd("fz.enc"), lab + " memory exhausted (differs from RESTART)")
         if has_unar:
             arc = wr("freeze_o%d.zip" % order, make_zip98("f.bin", data, rd("fz.enc")))
             od = t.path("unar_fz")
@@ -354,7 +371,7 @@ def run(t):
                  ("10:1:700000,3:2:700000,0:0:0", 2, "mixed", 2000000), ("5:1:0", 2, "text", 0)]
     if not has_rar3:
         t.record(True, "7-Zip has no Rar3 codec (Debian: apt-get install 7zip-rar): RAR checked by unar only")
-    rar_streams = []
+    rar_streams, rar_sizes = [], []
     for i, (spec, esc, kind, n) in enumerate(rar_cases):
         data = blob(kind, sz(n) if n else 0, 500 + i)
         lab = "rar ppm %s esc%d %d" % (spec, esc, len(data))
@@ -364,6 +381,7 @@ def run(t):
             continue
         pk = rd("r.pk")
         rar_streams.append(pk)
+        rar_sizes.append(len(data))
         _, rc, out = D("drar", len(data), t.path("r.pk"), t.path("r.out"))
         t.record(rc == 0 and rd("r.out") == data, lab + " decode", out)
         arc = wr("r%d.rar" % i, make_rar3("f.txt", data, pk))
@@ -387,6 +405,14 @@ def run(t):
             t.record(code in (0, 1), lab + " bit flip handled", out)
             code, rc, out = D("drar", len(data), wr("rcut.pk", pk[:len(pk) // 3]), t.path("rcut.out"), timeout=60)
             t.record(code == 1, lab + " truncation detected", out)
+
+    # PPM block headers the RAR decoder rejects (rc_init / model errors)
+    for lab, payload, want in (("continue without a model", b"\x85" + bytes(8), 3),
+                               ("reset with order 1", b"\xa0\x00" + bytes(8), 3),
+                               ("start code 0xFFFFFFFF", b"\xa5\x00\xff\xff\xff\xff" + bytes(8), 3),
+                               ("truncated start code", b"\xa5\x00\x00\x00", 9)):
+        code, rc, out = D("drar", 100, wr("rhdr.pk", payload), t.path("rhdr.out"), timeout=60)
+        t.record(code == 1 and rc == want, "rar ppm header: " + lab, out)
 
     # range decoder against the Python port of unrar's RangeCoder
     streams = [random.Random(9).randbytes(40000), bytes(20000), b"\xff" * 100, b"\x7f\xff\xff\xff" + bytes(1000)]
@@ -429,6 +455,12 @@ def run(t):
         t.record(code == 0, "ppmd7 fuzz small model", out)
         code, rc, out = D("fuzz8", len(small), iters * 4, 4, wr("t8.ppmd", tiny8), timeout=900)
         t.record(code == 0, "ppmd8 fuzz small stream", out)
+    # RAR PPM blocks: one model, a model kept across blocks, new models, small and 2 MiB memory
+    for k in (0, 2, 3):
+        if k < len(rar_streams) and rar_sizes[k]:
+            pk = rar_streams[k][:60000] if not SAN else rar_streams[k][:20000]
+            code, rc, out = D("fuzzrar", rar_sizes[k], iters, 5 + k, wr("rf.pk", pk), timeout=900)
+            t.record(code == 0 and "fuzz ok" in out, "rar ppm fuzz stream %d" % k, out)
 
     E = {"DATA": 3, "METHOD": 5, "TRUNC": 9, "SKIP": 10, "LIMIT": 15}
     hostile = [
@@ -440,6 +472,7 @@ def run(t):
         ("7z mem 2047", ["d7", 6, 2047, 100], s7, E["METHOD"]),
         ("7z mem above format max", ["d7", 6, 0xFFFFFFFF, 100], s7, E["METHOD"]),
         ("7z mem 3 GiB (cap)", ["d7", 6, 3 << 30, 100], s7, E["LIMIT"]),
+        ("7z mem 2 GiB + 4 (cap)", ["d7", 6, (2 << 30) + 4, 100], s7, E["LIMIT"]),
         ("7z huge size, short input", ["d7", 8, 1 << 16, 1 << 40], s7, E["TRUNC"]),
         ("7z unknown size, no end marker", ["d7", 8, 1 << 16, "u"], s7, E["TRUNC"]),
         ("7z zero stream, unknown size", ["d7", 6, 1 << 20, "u"], bytes(5000), None),
@@ -474,6 +507,72 @@ def run(t):
     _, rc, out = D("e7", 6, 1 << 20, t.path("h.raw") if os.path.exists(t.path("h.raw")) else wr("h.raw", base),
                    t.path("skip.out"), env={"PPMD_FAIL_AFTER": "0"})
     t.record(rc == E["SKIP"], "ppmd7 encoder sink error propagated", out)
+
+    # ------------------------------------------------ other builds: 32-bit and AArch64 (qemu)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    targets = []
+    if not SAN and shutil.which("gcc"):
+        targets.append(("m32", ["gcc", "-m32"], []))
+    if not SAN and shutil.which("aarch64-linux-gnu-gcc") and shutil.which("qemu-aarch64"):
+        targets.append(("aarch64", ["aarch64-linux-gnu-gcc"],
+                        ["qemu-aarch64", "-cpu", "max", "-L", "/usr/aarch64-linux-gnu"]))
+    xdata = blob("mixed", 800000, 61)
+    wr("x.raw", xdata)
+    # (command, input) pairs whose output the cross builds must reproduce byte for byte
+    xjobs = [("e7 o4 2K", ["e7", 4, 2048], "x.raw"), ("e7 o32 1M", ["e7", 32, 1 << 20], "x.raw"),
+             ("e8 o8 1M cut-off", ["e8", 8, 1, 1], "x.raw"), ("e8 o6 1M freeze", ["e8", 6, 1, 2], "x.raw"),
+             ("e8 o4 1M restart", ["e8", 4, 1, 0], "x.raw"),
+             ("erar", ["erar", "12:1:300000,0:0:100000,5:1:0", 7], "x.raw")]
+    host_out = {}
+    for i, (lab, args, src_name) in enumerate(xjobs):
+        D(*(args + [t.path(src_name), t.path("xh_%d" % i)]))
+        host_out[lab] = rd("xh_%d" % i)
+    for tag, cc, runner in targets:
+        exe = t.path("ppmd_test_" + tag)
+        r = subprocess.run(cc + ["-std=gnu11", "-O2", "-DPPMD_TEST_STANDALONE",
+                                 "-I" + os.path.join(root, "src/core"), "-I" + os.path.join(root, "src/codec"),
+                                 "-o", exe, os.path.join(root, "tests/drivers/ppmd_test.c"),
+                                 os.path.join(root, "src/codec/ppmd7.c"), os.path.join(root, "src/codec/ppmd8.c")],
+                           capture_output=True)
+        if r.returncode:
+            if tag == "m32":
+                t.record(True, "m32: no multilib, 32-bit run skipped")
+                continue
+            t.record(False, tag + " build", r.stderr.decode(errors="replace")[-300:])
+            continue
+
+        def X(*args, timeout=900):
+            rr = subprocess.run(runner + [exe] + [str(a) for a in args], capture_output=True, timeout=timeout)
+            o = rr.stdout.decode(errors="replace").strip()
+            rcx = None
+            for tok in o.split():
+                if tok.startswith("rc="):
+                    rcx = int(tok[3:])
+            return rcx, o + rr.stderr.decode(errors="replace")[-300:]
+
+        for lab, args, src_name in xjobs:
+            rcx, out = X(*(args + [t.path(src_name), t.path("xc.out")]))
+            t.record(rcx == 0 and rd("xc.out") == host_out[lab], "%s %s identical to host" % (tag, lab), out)
+        # decoders on the same streams
+        for lab, args in (("d7 o4 2K", ["d7", 4, 2048, len(xdata)]), ("d7 o32 1M", ["d7", 32, 1 << 20, len(xdata)]),
+                          ("d8 cut-off", ["d8", len(xdata)]), ("d8 freeze", ["d8", "u"]),
+                          ("drar", ["drar", len(xdata)])):
+            stream = host_out[{"d7 o4 2K": "e7 o4 2K", "d7 o32 1M": "e7 o32 1M", "d8 cut-off": "e8 o8 1M cut-off",
+                               "d8 freeze": "e8 o6 1M freeze", "drar": "erar"}[lab]]
+            rcx, out = X(*(args + [wr("xc.pk", stream), t.path("xc.out")]))
+            t.record(rcx == 0 and rd("xc.out") == xdata, "%s %s" % (tag, lab), out)
+        if has7z and os.path.exists(t.path("s32_24.7z")):
+            rcx, out = X("7z", t.path("s32_24.7z"), t.path("xc.out"))
+            t.record(rcx == 0 and rd("xc.out") == rd("src.bin"), tag + " 7-Zip 7z o=32 mem=2^24", out)
+            for zn in ("zmmPPMdo16mem1ma1.zip", "zmmPPMdmx9.zip"):      # cut-off with exhaustion, -mx=9
+                if os.path.exists(t.path(zn)):
+                    rcx, out = X("zip", t.path(zn), t.path("xc.out"))
+                    t.record(rcx == 0 and rd("xc.out") == rd("src.bin"), tag + " 7-Zip " + zn, out)
+        if tag == "m32":     # 32-bit memory cap: 1 GiB
+            rcx, out = X("d7", 6, (1 << 30) + 4, 100, wr("xc.pk", host_out["e7 o4 2K"]), t.path("xc.out"))
+            t.record(rcx == 15, "m32 7z mem 1 GiB + 4 -> GZ_E_LIMIT", out)
+            rcx, out = X("d8", 100, wr("xc.pk", b"\xff\x0f" + bytes(100)), t.path("xc.out"))
+            t.record(rcx in (3, 9), "m32 zip 256 MiB model allocates", out)
 
     # ------------------------------------------------ speed (informational)
     if not SAN and has7z:

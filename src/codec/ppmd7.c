@@ -1055,14 +1055,18 @@ int gz_ppmd7_rar_model(gz_ppmd7 *p, u32 max_order, u32 mem)
     return GZ_OK;
 }
 
-void gz_ppmd7_rar_rc_init(gz_ppmd7 *p, gz_ppmd_in *in)
+int gz_ppmd7_rar_rc_init(gz_ppmd7 *p, gz_ppmd_in *in)
 {
     int i;
-    p->in = in;
+    p->in = 0;                       /* no symbols until the decoder is started */
     p->Code = 0;
     p->Range = 0xFFFFFFFF;
     p->Low = 0;
     for (i = 0; i < 4; i++) p->Code = (p->Code << 8) | gz_ppmd_in_byte(in);
+    if (in->extra) return in->err ? in->err : GZ_E_TRUNC;
+    if (p->Code == 0xFFFFFFFF) return GZ_E_DATA;       /* Ppmd7a_RangeDec_Init */
+    p->in = in;
+    return GZ_OK;
 }
 
 GZ_NOINLINE int gz_ppmd7_rar_decode(gz_ppmd7 *p)
@@ -1432,7 +1436,8 @@ void gz_ppmd7_rar_rc_test(gz_ppmd7 *p, gz_ppmd_in *in, u32 seed, u32 n,
 {
     u32 rec[8], x = seed | 1, i;
 #define RND() (x ^= x << 13, x ^= x >> 17, x ^= x << 5, x)
-    gz_ppmd7_rar_rc_init(p, in);
+    (void)gz_ppmd7_rar_rc_init(p, in);
+    p->in = in;                      /* also replay a 0xFFFFFFFF start code */
     for (i = 0; i < n; i++) {
         __builtin_memset(rec, 0, sizeof(rec));
         if (RND() & 1) {

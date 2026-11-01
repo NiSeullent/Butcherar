@@ -15,18 +15,42 @@
  *   ppmd_test level LEVEL SIZE|u               7-Zip's default 7z / ZIP parameters
  *   ppmd_test fuzz7 ORDER MEM SIZE ITERS SEED IN   truncated / bit-flipped 7z streams
  *   ppmd_test fuzz8 SIZE ITERS SEED IN             truncated / bit-flipped ZIP streams
+ *   ppmd_test fuzzrar SIZE ITERS SEED IN           truncated / bit-flipped RAR PPM blocks
  *
  * Prints "rc=<code> in=<bytes used> out=<bytes> ms=<time>" and exits 0 when rc == 0,
  * 1 on a codec error, 2 on usage / IO problems.
  */
 #include "ppmd7.h"
 #include "ppmd8.h"
-#include "crc32.h"
-#include "cpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#ifdef PPMD_TEST_STANDALONE
+/* Build without the host objects (gcc -m32, aarch64 under qemu):
+ *   cc -std=gnu11 -O2 -DPPMD_TEST_STANDALONE -Isrc/core -Isrc/codec \
+ *      tests/drivers/ppmd_test.c src/codec/ppmd7.c src/codec/ppmd8.c                    */
+void *gz_alloc(size_t n) { return calloc(1, n ? n : 1); }
+void *gz_realloc(void *p, size_t n) { return realloc(p, n); }
+void gz_free(void *p) { free(p); }
+void *gz_alloc_big(size_t n) { return calloc(1, n ? n : 1); }
+void gz_free_big(void *p, size_t n) { (void)n; free(p); }
+static u32 gz_crc32(u32 crc, const void *p, size_t n)
+{
+    const u8 *b = (const u8 *)p;
+    crc = ~crc;
+    while (n--) {
+        int k;
+        crc ^= *b++;
+        for (k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1)));
+    }
+    return ~crc;
+}
+#else
+#include "crc32.h"
+#include "cpu.h"
+#endif
 
 static double now_ms(void)
 {
@@ -321,28 +345,27 @@ static int cmd_erar(const char *spec, int esc, const char *in, const char *out)
     return report(rc, n, m.on, t);
 }
 
-static int cmd_drar(u64 size, const char *in, const char *out)
+/* Decode RAR 3.x PPM-only packed data the way the RAR decoder will drive the codec
+ * (see ppmd7.h). Returns the status; *on bytes went to o (capacity size). */
+static int rar_decode_buf(gz_ppmd7 *p, const u8 *f, size_t n, u8 *o, u64 size, u64 *on_out,
+                          int *blocks_out, size_t *used)
 {
-    size_t n;
-    u8 *f = load(in, &n);
     gz_ppmd_in bi;
-    gz_ppmd7 *p = gz_ppmd7_new();
-    u8 *o = (u8 *)track(malloc(size ? size : 1));
     u64 on = 0;
     int esc = 2, rc = 0, blocks = 0;
-    double t = now_ms();
     memset(&bi, 0, sizeof(bi));
     bi.cur = f;
     bi.end = f + n;
+    gz_ppmd7_rar_drop(p);                     /* a new non-solid file */
     for (;;) {
         /* PPM block header (byte-aligned): 1 flag bit + 7 bits flags [, maxMB][, esc] */
         u32 b = gz_ppmd_in_byte(&bi), flags, maxmb = 0;
-        if (bi.extra || !(b & 0x80)) { rc = GZ_E_DATA; break; }
+        if (bi.extra || !(b & 0x80)) { rc = bi.extra ? GZ_E_TRUNC : GZ_E_DATA; break; }
         flags = b & 0x7F;
         if (flags & 0x20) maxmb = gz_ppmd_in_byte(&bi);
         else if (!gz_ppmd7_rar_ready(p)) { rc = GZ_E_DATA; break; }
         if (flags & 0x40) esc = (int)gz_ppmd_in_byte(&bi);
-        gz_ppmd7_rar_rc_init(p, &bi);
+        if ((rc = gz_ppmd7_rar_rc_init(p, &bi)) != GZ_OK) break;
         if (flags & 0x20) {
             u32 order = (flags & 0x1F) + 1;
             if (order > 16) order = 16 + (order - 16) * 3;
@@ -365,12 +388,28 @@ static int cmd_drar(u64 size, const char *in, const char *out)
         }
     }
 end:
-    t = now_ms() - t;
     if (!rc && on != size) rc = GZ_E_DATA;
+    *on_out = on;
+    *blocks_out = blocks;
+    *used = (size_t)(bi.cur - f);
+    return rc;
+}
+
+static int cmd_drar(u64 size, const char *in, const char *out)
+{
+    size_t n, used;
+    u8 *f = load(in, &n);
+    gz_ppmd7 *p = gz_ppmd7_new();
+    u8 *o = (u8 *)track(malloc(size ? size : 1));
+    u64 on = 0;
+    int rc, blocks = 0;
+    double t = now_ms();
+    rc = rar_decode_buf(p, f, n, o, size, &on, &blocks, &used);
+    t = now_ms() - t;
     save(out, o, (size_t)on);
     printf("blocks=%d ", blocks);
     gz_ppmd7_free(p);
-    return report(rc, (u64)(bi.cur - f), (size_t)on, t);
+    return report(rc, used, (size_t)on, t);
 }
 
 static void rc_cb(void *user, const u32 r[8])
@@ -402,6 +441,7 @@ static int cmd_fuzz(int kind, const char *in, u32 a, u32 b, u64 size, u32 iters,
     gz_ppmd7 *p7 = gz_ppmd7_new();
     gz_ppmd8 *p8 = gz_ppmd8_new();
     u32 x = seed | 1, cnt[16] = { 0 };
+    u8 *rbuf = 0;
 #define RND() (x ^= x << 13, x ^= x >> 17, x ^= x << 5, x)
     for (i = 0; i < iters; i++) {
         mio m;
@@ -420,7 +460,14 @@ static int cmd_fuzz(int kind, const char *in, u32 a, u32 b, u64 size, u32 iters,
         mio_init(&m, g, len);
         m.chunk = 1 + RND() % 5000;
         if (kind == 7) rc = gz_ppmd7z_decode(p7, a, b, &io, (i & 1) ? size : GZ_SIZE_UNKNOWN);
-        else rc = gz_ppmd8_zip_decode(p8, &io, (i & 1) ? size : GZ_SIZE_UNKNOWN);
+        else if (kind == 8) rc = gz_ppmd8_zip_decode(p8, &io, (i & 1) ? size : GZ_SIZE_UNKNOWN);
+        else {
+            u64 on;
+            int blocks;
+            size_t used;
+            if (!rbuf) rbuf = (u8 *)track(malloc(size ? size : 1));
+            rc = rar_decode_buf(p7, g, len, rbuf, size, &on, &blocks, &used);
+        }
         if (m.on > size + 16 && size != GZ_SIZE_UNKNOWN && (i & 1)) { printf("overrun\n"); return 1; }
         cnt[rc & 15]++;
         free(m.out);
@@ -437,9 +484,11 @@ static int cmd_fuzz(int kind, const char *in, u32 a, u32 b, u64 size, u32 iters,
 int main(int argc, char **argv)
 {
     atexit(free_all);
+#ifndef PPMD_TEST_STANDALONE
     gz_cpu_detect();
     gz_crc32_init();
     gz_dispatch_init(-1);
+#endif
     if (argc >= 7 && !strcmp(argv[1], "d7")) {
         size_t n;
         u8 *f = load(argv[5], &n);
@@ -541,6 +590,8 @@ int main(int argc, char **argv)
                         (u32)atoi(argv[5]), (u32)atoi(argv[6]));
     if (argc >= 6 && !strcmp(argv[1], "fuzz8"))
         return cmd_fuzz(8, argv[5], 0, 0, parse_size(argv[2]), (u32)atoi(argv[3]), (u32)atoi(argv[4]));
+    if (argc >= 6 && !strcmp(argv[1], "fuzzrar"))     /* fuzzrar SIZE ITERS SEED IN */
+        return cmd_fuzz(3, argv[5], 0, 0, parse_size(argv[2]), (u32)atoi(argv[3]), (u32)atoi(argv[4]));
     fprintf(stderr, "usage: see tests/drivers/ppmd_test.c\n");
     return 2;
 }

@@ -30,7 +30,9 @@ void gz_ppmd8_free(gz_ppmd8 *p);
  * the end marker). The model memory is kept and reused when the size is unchanged.
  * Returns GZ_OK, GZ_E_DATA (corrupt / bad header), GZ_E_TRUNC, GZ_E_METHOD (restore
  * method > 2), GZ_E_NOMEM or a callback error (GZ_E_SKIP etc. unchanged).
- * *in_used (optional) receives the number of packed bytes consumed. */
+ * *in_used (optional) receives the number of packed bytes consumed; like 7-Zip, a ZIP
+ * reader should also treat *in_used != the entry's packed size as a data error.
+ * Restore method 2 (FREEZE) is decoded too, although 7-Zip rejects it as unsupported. */
 int gz_ppmd8_zip_decode(gz_ppmd8 *p, const gz_stream_io *io, u64 out_size);
 int gz_ppmd8_zip_decode_ex(gz_ppmd8 *p, const gz_stream_io *io, u64 out_size, u64 *in_used);
 

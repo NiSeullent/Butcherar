@@ -52,35 +52,49 @@ void gz_ppmd7z_level(int level, u64 size, u32 *order, u32 *mem);
  *
  * RAR 3.x interleaves PPMd and LZ blocks in one bit stream and handles the escape
  * character itself, so the RAR decoder drives the model symbol by symbol. 7-Zip's
- * Rar3Decoder::InitPPM()/DecodePPM() are the reference; the RAR decoder must do this:
+ * Rar3Decoder::InitPPM()/DecodePPM() (and unrar's ModelPPM::DecodeInit()/Unpack29())
+ * are the reference; the RAR decoder must do this:
  *
- *   PPM block start (after ReadTables found the PPM flag bit, bit stream byte-aligned):
+ *   Start of a non-solid file: escChar = 2; gz_ppmd7_rar_drop(p) (7-Zip: PpmError = true),
+ *   so a PPM block without the reset flag fails until a model was set up.
+ *
+ *   PPM block start: ReadTables aligns the bit stream to a byte and finds the PPM flag
+ *   (bit 7 of that byte); the remaining 7 bits are the flags, so everything below is
+ *   byte-aligned:
  *     flags = 7 bits; reset = flags & 0x20
- *     if reset: maxMB = next 8 bits            (else: fail if no model or after an error)
- *     if flags & 0x40: escChar = next 8 bits   (initially 2, persists across blocks)
- *     gz_ppmd7_rar_rc_init(p, in)              -- reads the next 4 bytes of the stream
+ *     if reset: maxMB = next 8 bits
+ *     else if !gz_ppmd7_rar_ready(p): data error  (no model yet, or the last one failed)
+ *     if flags & 0x40: escChar = next 8 bits   (2 at the start of a non-solid file;
+ *                                               kept across blocks and solid files)
+ *     r = gz_ppmd7_rar_rc_init(p, in)          -- reads the next 4 bytes of the stream;
+ *                                               != GZ_OK: data error / truncated / I/O
  *     if reset:
  *         order = (flags & 0x1F) + 1; if (order > 16) order = 16 + (order - 16) * 3;
- *         if (order == 1) -> data error (and drop the model: gz_ppmd7_rar_drop)
- *         gz_ppmd7_rar_model(p, order, (maxMB + 1) << 20)   -- GZ_OK or error
+ *         if (order == 1): gz_ppmd7_rar_drop(p), data error
+ *         r = gz_ppmd7_rar_model(p, order, (maxMB + 1) << 20)  -- GZ_OK, GZ_E_NOMEM,
+ *                                               GZ_E_LIMIT (above GZ_PPMD_MEM_CAP)
  *     The range decoder is re-initialised at every PPM block start, also when the model
  *     continues (no reset): model and range coder are independent.
  *
  *   Each symbol: c = gz_ppmd7_rar_decode(p)
  *     c < 0  : data error (GZ_PPMD_SYM_END is an error in RAR too). The model is then
- *              unusable until the next reset; gz_ppmd7_rar_decode keeps returning
+ *              unusable until the next reset: gz_ppmd7_rar_decode keeps returning
  *              GZ_PPMD_SYM_ERROR and gz_ppmd7_rar_ready() is 0.
  *     c != escChar: literal byte c
  *     c == escChar: n = gz_ppmd7_rar_decode(p);
  *         n == 0: end of PPM block -> ReadTables (next block may be LZ or PPM)
- *         n == 2: end of file (of this solid entry)
- *         n == 3: RAR VM filter code, its bytes decoded as PPM symbols
+ *         n == 2: end of this file. In a solid archive the next file goes on decoding
+ *                 symbols with the same model and range decoder (no block header).
+ *         n == 3: RAR VM filter code: f = symbol, len = (f & 7) + 1;
+ *                 len 7: len = s + 7; len 8: len = s1 * 256 + s2 (next symbols);
+ *                 then len code bytes, one symbol each (7-Zip: ReadVmCodePPM)
  *         n == 4: match: 3 symbols = distance - 2 (big-endian), 1 symbol = length - 32
  *         n == 5: match at distance 1, 1 symbol = length - 4
  *                 (unrar: CopyString(c + 32, d + 2) / CopyString(c + 4, 1))
  *         other : literal escChar
- *   Also check in->extra / in->err as needed: reading past the end of the packed data
- *   yields zero bytes and counts them in in->extra.
+ *   After each symbol (or before it, like 7-Zip's InputEofError_Fast) check
+ *   in->extra / in->err: reading past the end of the packed data yields zero bytes and
+ *   counts them in in->extra; a well-formed stream never needs such bytes.
  *
  * The byte reader `in` must stay valid while symbols are decoded; the RAR decoder can
  * point in->cur/end straight at its input buffer when its bit reader is byte-aligned
@@ -91,7 +105,10 @@ void gz_ppmd7z_level(int level, u64 size, u32 *order, u32 *mem);
  * context escape sets Range = (Range & ~(BIN_SCALE - 1)) - size0, and a frequency sum
  * larger than Range is a data error (7z's Range >= 2^24 makes that impossible). */
 int  gz_ppmd7_rar_model(gz_ppmd7 *p, u32 max_order, u32 mem);  /* alloc (reuse) + restart */
-void gz_ppmd7_rar_rc_init(gz_ppmd7 *p, gz_ppmd_in *in);
+/* Start the range decoder on in (4 bytes). GZ_OK; GZ_E_DATA for code 0xFFFFFFFF (as
+ * 7-Zip); in->err or GZ_E_TRUNC when the bytes are missing. On failure symbols cannot
+ * be decoded until the next successful call. */
+int  gz_ppmd7_rar_rc_init(gz_ppmd7 *p, gz_ppmd_in *in);
 int  gz_ppmd7_rar_decode(gz_ppmd7 *p);                         /* 0..255 or < 0 */
 int  gz_ppmd7_rar_ready(const gz_ppmd7 *p);                    /* model usable */
 void gz_ppmd7_rar_drop(gz_ppmd7 *p);                           /* forget the model (error) */
