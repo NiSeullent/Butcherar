@@ -135,16 +135,12 @@ static int chm_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
     u8 ih[0x54];
     if ((r = gz_src_read_exact(s, dir, ih, 0x54))) return r;
     if (rd32(ih) != ITSP_SIG) return GZ_E_FORMAT;
-    u32 ihl = rd32(ih + 8), csz = rd32(ih + 0x10);
-    u32 first = rd32(ih + 0x20), last = rd32(ih + 0x24), nch = rd32(ih + 0x2C);
+    /* The listing chunks are taken from the whole directory (index chunks skipped)
+     * instead of the first/last PMGL numbers: chmcmd stores a wrong first one. */
+    u32 ihl = rd32(ih + 8), csz = rd32(ih + 0x10), nch = rd32(ih + 0x2C);
     if (ihl < 0x54 || ihl > dlen || csz < 0x20 || csz > (1u << 20)) return GZ_E_FORMAT;
     if (nch > (dlen - ihl) / csz) nch = (u32)((dlen - ihl) / csz);
     if (!nch) return GZ_E_FORMAT;
-    /* Listing chunks are taken from the whole directory (index chunks skipped): some
-     * writers (chmcmd) store a wrong first-PMGL number. */
-    (void)first; (void)last;
-    first = 0;
-    last = nch - 1;
 
     chm_priv *p = (chm_priv *)gz_alloc(sizeof(chm_priv));
     if (!p) return GZ_E_NOMEM;
@@ -156,24 +152,26 @@ static int chm_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
     u8 *batch = (u8 *)gz_alloc((size_t)per * csz);
     if (!batch) return GZ_E_NOMEM;
     sec0_ref rc = { 0, 0, 0 }, rctl = { 0, 0, 0 }, rrt = { 0, 0, 0 }, rspan = { 0, 0, 0 };
-    for (u32 ci = first; ci <= last && !r; ci++) {
-        u32 bi = (ci - first) % per;
+    int damaged = 0;
+    for (u32 ci = 0; ci < nch && !r; ci++) {
+        u32 bi = ci % per;
         if (!bi) {
-            u32 k = last - ci + 1 < per ? last - ci + 1 : per;
+            u32 k = nch - ci < per ? nch - ci : per;
             if ((r = gz_src_read_exact(s, dir + ihl + (u64)ci * csz, batch, k * csz))) break;
         }
         const u8 *chunk = batch + (size_t)bi * csz;
         if (rd32(chunk) != PMGL_SIG) continue;
         u32 fr = rd32(chunk + 4);
-        if (fr > csz - 0x14) { r = GZ_E_FORMAT; break; }
+        if (fr > csz - 0x14) { damaged = 1; continue; }
         u32 end = csz - fr, pos = 0x14;
         while (pos < end) {
+            /* a damaged chunk ends the listing of that chunk only */
             u64 nl, sec, off, len;
-            if (!encint(chunk, end, &pos, &nl) || nl > end - pos) { r = GZ_E_FORMAT; break; }
+            if (!encint(chunk, end, &pos, &nl) || nl > end - pos) { damaged = 1; break; }
             const u8 *nm = chunk + pos;
             pos += (u32)nl;
             if (!encint(chunk, end, &pos, &sec) || !encint(chunk, end, &pos, &off) ||
-                !encint(chunk, end, &pos, &len)) { r = GZ_E_FORMAT; break; }
+                !encint(chunk, end, &pos, &len)) { damaged = 1; break; }
             u32 n = (u32)nl;
             if (n >= 2 && nm[0] == ':' && nm[1] == ':') {
                 /* storage internals: remember the ones section 1 needs */
@@ -198,12 +196,13 @@ static int chm_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
             e->is_aux = nm[1] == '#' || nm[1] == '$';
         }
         if (!bi) {
-            if (c && c->progress) c->progress(c->progress_user, ci - first + 1, last - first + 1);
+            if (c && c->progress) c->progress(c->progress_user, ci + 1, nch);
             if (gz_cancelled(c)) r = GZ_E_CANCEL;
         }
     }
     gz_free(batch);
     if (r) return r;
+    if (damaged && !a->n) return GZ_E_FORMAT;
     p->lzx_err = setup_lzx(s, p, &rc, &rctl, &rrt, &rspan);
     return GZ_OK;
 }

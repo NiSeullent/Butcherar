@@ -159,7 +159,7 @@ def check_random(t, drv, arc, exp, order, label):
     out = t.path("rnd_" + os.path.basename(arc) + "_" + order)
     shutil.rmtree(out, ignore_errors=True)
     r = t.sh([drv, arc, out, order, "7"], check=False)
-    bad = []
+    bad, seen = [], set()
     for line in r.stdout.decode("utf-8", "replace").splitlines():
         p = line.split("\t")
         if len(p) != 5 or not p[0].isdigit():
@@ -167,8 +167,11 @@ def check_random(t, drv, arc, exp, order, label):
         i, st, isdir, name = int(p[0]), int(p[1]), int(p[2]), p[4]
         if isdir or name not in exp:
             continue
+        seen.add(name)
         if st != 0 or open(os.path.join(out, "%d.bin" % i), "rb").read() != exp[name]:
             bad.append("%s:%d" % (name, st))
+    bad += ["missing " + k for k in exp if k not in seen]
+    shutil.rmtree(out, ignore_errors=True)
     return t.record(r.returncode == 0 and not bad, label, ",".join(bad[:5]))
 
 def synthetic_ref(t, p, exp):
@@ -263,6 +266,7 @@ def run(t):
         sec1 = {"/" + k: v for k, v in src.items() if not k.endswith("pic0.bin")}
         sec0 = {"/" + k: v for k, v in src.items() if k.endswith("pic0.bin")}
         sec0["/#SYSTEM"] = b"\x03\x00\x00\x00" + bytes(range(60))
+        sec1["/한글/고기 메뉴.html"] = "<p>삼겹살 목살 갈비</p>".encode() * 50     # UTF-8 names
         stream = b"".join(sec1[k] for k in sorted(sec1))
         stream += bytes(-len(stream) % 32768)      # like hhc / chmcmd: whole frames
         sp = t.path("syn_%d.bin" % i)

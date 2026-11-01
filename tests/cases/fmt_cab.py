@@ -253,6 +253,26 @@ def check_hostile2(t, drv, path):
     shutil.rmtree(out, ignore_errors=True)
     return t.record(not bad, label, err[-400:] if bad else "")
 
+def check_random(t, drv, arc, exp, order, label):
+    """per-entry extraction (random access path) against expected {name: bytes}"""
+    out = t.path("rnd_" + os.path.basename(arc) + "_" + order)
+    shutil.rmtree(out, ignore_errors=True)
+    r = t.sh([drv, arc, out, order, "7"], check=False)
+    bad, seen = [], set()
+    for line in r.stdout.decode("utf-8", "replace").splitlines():
+        p = line.split("\t")
+        if len(p) != 5 or not p[0].isdigit():
+            continue
+        i, st, isdir, name = int(p[0]), int(p[1]), int(p[2]), p[4]
+        if isdir or name not in exp:
+            continue
+        seen.add(name)
+        if st != 0 or open(os.path.join(out, "%d.bin" % i), "rb").read() != exp[name]:
+            bad.append("%s:%d" % (name, st))
+    bad += ["missing " + k for k in exp if k not in seen]
+    shutil.rmtree(out, ignore_errors=True)
+    return t.record(r.returncode == 0 and not bad, label, ",".join(bad[:5]))
+
 def listing_map(t, path, **kw):
     r, typ, rows = t.listing(path, **kw)
     return typ, {x["name"]: x for x in rows}
@@ -439,6 +459,7 @@ def run(t):
             t.check_extract(os.path.join(d2, n2[1]), ex, label="two cabinets %s (from second)" % vname)
         t.check_extract(first, ex, label="cabinet set %s (from first)" % vname)
         t.check_extract(os.path.join(d, cabnames[1]), ex, label="cabinet set %s (from middle)" % vname)
+        check_random(t, drv, os.path.join(d, cabnames[2]), ex, "shuffle", "cabinet set %s per-entry (from last)" % vname)
         if has7z and vname == "lzx":
             t.check_vs_7z(first, label="vs 7z cabinet set")
         # last cabinet missing: files that need it fail with GZ_E_VOLUME, the others extract
@@ -502,6 +523,8 @@ def run(t):
     p = write(t.path("four_methods.cab"), build_cab(mixed4, fl4))
     if ref_ok(t, p, exp4, "four_methods.cab"):
         t.check_extract(p, exp4, label="None + MSZIP + LZX + Quantum folders")
+        check_random(t, drv, p, exp4, "rev", "four methods, per-entry extraction")
+    check_random(t, drv, t.path("multi_folder.cab"), exp, "shuffle", "multi_folder.cab per-entry extraction")
 
     # ---- checksum / data errors are reported per folder
     good = build_cab(folders, files)
