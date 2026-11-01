@@ -158,13 +158,14 @@ GZV_ATTR int GZV_FN(gz_inflater *z, const gz_stream_io *io)
             in -= bitcnt >> 3;               /* give whole bytes back */
             bitbuf = 0;
             bitcnt = 0;
-            while (z->in_end - in < 4) {
+            const int hl = z->nsis ? 2 : 4;  /* NSIS 2: LEN only */
+            while (z->in_end - in < hl) {
                 if (z->in_eof) FAIL(GZ_E_TRUNC);
                 REFILL_IN();
             }
-            u32 len = rd16(in), nlen = rd16(in + 2);
-            in += 4;
-            if ((len ^ 0xffffu) != nlen) FAIL(GZ_E_DATA);
+            u32 len = rd16(in);
+            if (hl == 4 && (len ^ 0xffffu) != rd16(in + 2)) FAIL(GZ_E_DATA);
+            in += hl;
             while (len) {
                 size_t avail = (size_t)(z->in_end - in);
                 if (!avail) {

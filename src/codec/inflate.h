@@ -40,6 +40,7 @@ typedef struct gz_inflater {
     /* after a successful run: bytes left unconsumed in ibuf */
     const u8 *rest;
     u32 rest_len;
+    int nsis;            /* stored blocks without NLEN (gz_inflate_run_nsis) */
 } gz_inflater;
 
 gz_inflater *gz_inflater_new(void);
@@ -47,6 +48,11 @@ void gz_inflater_free(gz_inflater *z);
 
 /* Decode one complete deflate stream. Output is CRC'ed and pushed to io->write. */
 int gz_inflate_run(gz_inflater *z, const gz_stream_io *io, int deflate64);
+
+/* NSIS 2 variant ("SetCompressor zlib" in NSIS 2.x installers, 7-Zip's NsisMode):
+ * a stored block header is LEN (2 bytes) only, no NLEN. Otherwise the same as
+ * gz_inflate_run(z, io, 0). */
+int gz_inflate_run_nsis(gz_inflater *z, const gz_stream_io *io);
 
 /* Same, with a preset history: matches may reach back into dict[0..dict_len)
  * (dict_len <= GZ_INFLATE_DICT_MAX), e.g. CAB MSZIP blocks continue the previous
