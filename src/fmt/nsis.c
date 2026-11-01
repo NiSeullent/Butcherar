@@ -114,6 +114,9 @@ typedef struct {
 
 typedef int (*ns_sink_fn)(void *user, const u8 *p, size_t n);
 
+/* header parsing runs once per open: optimise it for size, not speed */
+#define NS_COLD __attribute__((cold))
+
 static void *lz_new(void) { return gz_lzma_dec_new(); }
 static void lz_free(void *p) { gz_lzma_dec_free((gz_lzma_dec *)p); }
 static void *bz_new(void) { return gz_bzip2_dec_new(); }
@@ -191,8 +194,10 @@ static int ns_probe(gz_src *s, const u8 *head, u32 n)
 
 /* Decode one stream at [off, end) of s with method m into sink. lzma_flag: a BCJ x86
  * flag byte precedes the LZMA properties (*filt receives it). nsis_zlib: NSIS 2
- * stored blocks. A sink returning GZ_E_SKIP stops decoding (returned unchanged). */
-static int ns_run(gz_src *s, u64 off, u64 end, int m, int lzma_flag, int nsis_zlib,
+ * stored blocks. want: GZ_SIZE_UNKNOWN, or the number of output bytes needed (the
+ * stream goes on: LZMA / BZip2 stop there instead of filling a whole output chunk).
+ * A sink returning GZ_E_SKIP stops decoding (returned unchanged). */
+static int ns_run(gz_src *s, u64 off, u64 end, int m, int lzma_flag, int nsis_zlib, u64 want,
                   ns_sink_fn sink, void *user, gz_ctx *c, int *filt)
 {
     if (off > end) return GZ_E_DATA;
@@ -221,7 +226,7 @@ static int ns_run(gz_src *s, u64 off, u64 end, int m, int lzma_flag, int nsis_zl
     case M_BZIP2: {
         gz_bzip2_dec *d = (gz_bzip2_dec *)gz_ctx_slot(c, GZ_SLOT_BZIP2, bz_new, bz_free);
         if (!d) return GZ_E_NOMEM;
-        return gz_bzip2_decode_nsis(d, &io, GZ_SIZE_UNKNOWN, 0);
+        return gz_bzip2_decode_nsis(d, &io, want, 0);
     }
     case M_LZMA: {
         u8 hd[6];
@@ -235,7 +240,7 @@ static int ns_run(gz_src *s, u64 off, u64 end, int m, int lzma_flag, int nsis_zl
         pp.rd.pos = off + hn;
         gz_lzma_dec *d = (gz_lzma_dec *)gz_ctx_slot(c, GZ_SLOT_LZMA, lz_new, lz_free);
         if (!d) return GZ_E_NOMEM;
-        gz_lzma_dec_set_flags(d, 0);
+        gz_lzma_dec_set_flags(d, want == GZ_SIZE_UNKNOWN ? 0 : GZ_LZMA_LENIENT_END);
         gz_filter_push *fp = 0;
         if (flag) {
             fp = (gz_filter_push *)gz_alloc(sizeof *fp);
@@ -244,7 +249,8 @@ static int ns_run(gz_src *s, u64 off, u64 end, int m, int lzma_flag, int nsis_zl
             pp.sink = gz_filter_push_write;
             pp.user = fp;
         }
-        r = gz_lzma_decode(d, hd + (lzma_flag ? 1 : 0), &io, GZ_SIZE_UNKNOWN, 0);
+        r = gz_lzma_decode(d, hd + (lzma_flag ? 1 : 0), &io, want, 0);
+        gz_lzma_dec_set_flags(d, 0);      /* the decoder is shared through the ctx slot */
         if (!r && fp) r = gz_filter_push_finish(fp);
         gz_free(fp);
         return r;
@@ -254,7 +260,7 @@ static int ns_run(gz_src *s, u64 off, u64 end, int m, int lzma_flag, int nsis_zl
 }
 
 /* method of a compressed block when the header was stored ("Copy" archives) */
-static int sniff_method(gz_src *s, u64 off, u64 n, u8 *flag)
+static NS_COLD int sniff_method(gz_src *s, u64 off, u64 n, u8 *flag)
 {
     u8 b[8] = { 0 };
     u32 dict;
@@ -276,11 +282,11 @@ static int ns_block(const ns_priv *p, gz_src *s, u64 off, ns_sink_fn sink, void 
     u64 st = off + 4, n = v & ~COMP_FLAG;
     if (n > s->size - st) return GZ_E_TRUNC;
     if (next) *next = st + n;
-    if (!(v & COMP_FLAG)) return ns_run(s, st, st + n, M_COPY, 0, 0, sink, user, c, 0);
+    if (!(v & COMP_FLAG)) return ns_run(s, st, st + n, M_COPY, 0, 0, GZ_SIZE_UNKNOWN, sink, user, c, 0);
     int m = p->method;
     u8 fl = p->lzma_flag;
     if (m == M_COPY) m = sniff_method(s, st, n, &fl);
-    return ns_run(s, st, st + n, m, fl, p->nsis_zlib, sink, user, c, 0);
+    return ns_run(s, st, st + n, m, fl, p->nsis_zlib, GZ_SIZE_UNKNOWN, sink, user, c, 0);
 }
 
 /* growing buffer sink that stops (GZ_E_SKIP) once want bytes are collected */
@@ -327,7 +333,7 @@ typedef struct {
     int err;
 } ns_parse;
 
-static void wb_put(wbuf *b, u32 c)
+static NS_COLD void wb_put(wbuf *b, u32 c)
 {
     if (b->n == b->cap) {
         if (b->cap >= STR_MAX) return;        /* silently truncated */
@@ -340,9 +346,9 @@ static void wb_put(wbuf *b, u32 c)
     b->p[b->n++] = (u16)c;
 }
 
-static void wb_ascii(wbuf *b, const char *s) { while (*s) wb_put(b, (u8)*s++); }
+static NS_COLD void wb_ascii(wbuf *b, const char *s) { while (*s) wb_put(b, (u8)*s++); }
 
-static void wb_uint(wbuf *b, u32 v)
+static NS_COLD void wb_uint(wbuf *b, u32 v)
 {
     char t[12];
     int i = 11;
@@ -351,15 +357,15 @@ static void wb_uint(wbuf *b, u32 v)
     wb_ascii(b, t + i);
 }
 
-static void wb_copy(wbuf *b, const u16 *s, u32 n) { for (u32 i = 0; i < n; i++) wb_put(b, s[i]); }
+static NS_COLD void wb_copy(wbuf *b, const u16 *s, u32 n) { for (u32 i = 0; i < n; i++) wb_put(b, s[i]); }
 
-static u32 ch_at(const ns_parse *P, u32 i)
+static NS_COLD u32 ch_at(const ns_parse *P, u32 i)
 {
     if (i >= P->nchars) return 0;
     return P->uni ? rd16(P->st + 2 * (size_t)i) : P->st[i];
 }
 
-static void put_var(const ns_parse *P, u32 idx, wbuf *o)
+static NS_COLD void put_var(const ns_parse *P, u32 idx, wbuf *o)
 {
     wb_put(o, '$');
     if (idx < 20) {
@@ -378,14 +384,14 @@ static void put_var(const ns_parse *P, u32 idx, wbuf *o)
     }
 }
 
-static void put_lang(wbuf *o, u32 id)
+static NS_COLD void put_lang(wbuf *o, u32 id)
 {
     wb_ascii(o, "$(LSTR_");
     wb_uint(o, id);
     wb_put(o, ')');
 }
 
-static int str_is(const ns_parse *P, u32 off, const char *lit)
+static NS_COLD int str_is(const ns_parse *P, u32 off, const char *lit)
 {
     for (u32 i = 0;; i++) {
         u32 c = ch_at(P, off + i);
@@ -394,7 +400,7 @@ static int str_is(const ns_parse *P, u32 off, const char *lit)
     }
 }
 
-static void put_shell(const ns_parse *P, u32 i1, u32 i2, wbuf *o)
+static NS_COLD void put_shell(const ns_parse *P, u32 i1, u32 i2, wbuf *o)
 {
     if (i1 & 0x80) {
         /* registry value under HKLM\Software\Microsoft\Windows\CurrentVersion */
@@ -426,7 +432,7 @@ static void put_shell(const ns_parse *P, u32 i1, u32 i2, wbuf *o)
 }
 
 /* Append the string at char index pos (negative: language string) to o. */
-static void ns_string(const ns_parse *P, u32 pos, wbuf *o)
+static NS_COLD void ns_string(const ns_parse *P, u32 pos, wbuf *o)
 {
     if ((i32)pos < 0) { put_lang(o, ~pos); return; }
     if (pos >= P->nchars) { wb_ascii(o, "$_ERROR_STR_"); return; }
@@ -487,7 +493,7 @@ static void ns_string(const ns_parse *P, u32 pos, wbuf *o)
 }
 
 /* variable index if the string at pos starts with a variable code, else -1 */
-static i32 var_index(const ns_parse *P, u32 pos)
+static NS_COLD i32 var_index(const ns_parse *P, u32 pos)
 {
     if (pos >= P->nchars) return -1;
     if (P->uni) {
@@ -504,7 +510,7 @@ static i32 var_index(const ns_parse *P, u32 pos)
 }
 
 /* same, *skip = chars taken by the variable code */
-static i32 var_index_skip(const ns_parse *P, u32 pos, u32 *skip)
+static NS_COLD i32 var_index_skip(const ns_parse *P, u32 pos, u32 *skip)
 {
     *skip = 0;
     i32 v = var_index(P, pos);
@@ -513,7 +519,7 @@ static i32 var_index_skip(const ns_parse *P, u32 pos, u32 *skip)
 }
 
 /* variable index if the string is exactly a variable followed by end_char */
-static i32 var_index_end(const ns_parse *P, u32 pos, u32 end_char, u32 *skip)
+static NS_COLD i32 var_index_end(const ns_parse *P, u32 pos, u32 end_char, u32 *skip)
 {
     *skip = 0;
     i32 v = var_index(P, pos);
@@ -524,14 +530,14 @@ static i32 var_index_end(const ns_parse *P, u32 pos, u32 end_char, u32 *skip)
     return v;
 }
 
-static int is_var_str(const ns_parse *P, u32 pos, u32 var)
+static NS_COLD int is_var_str(const ns_parse *P, u32 pos, u32 var)
 {
     u32 skip;
     return var <= 0x7FFF && var_index_end(P, pos, 0, &skip) == (i32)var;
 }
 
 /* the string starts at the beginning of a string (or after a backslash) */
-static int good_string(const ns_parse *P, u32 pos)
+static NS_COLD int good_string(const ns_parse *P, u32 pos)
 {
     if (pos >= P->nchars) return 0;
     if (!pos) return 1;
@@ -539,7 +545,7 @@ static int good_string(const ns_parse *P, u32 pos)
     return c == 0 || c == '\\';
 }
 
-static int same_strings(const ns_parse *P, u32 a, u32 b)
+static NS_COLD int same_strings(const ns_parse *P, u32 a, u32 b)
 {
     if (a == b) return 1;
     if (a >= P->nchars || b >= P->nchars) return 0;
@@ -553,7 +559,7 @@ static int same_strings(const ns_parse *P, u32 a, u32 b)
 
 /* ---- command layout: NSIS 2 / 3, Park 1..3, with or without EW_LOG ---- */
 
-static u32 get_cmd(const ns_parse *P, u32 a)
+static NS_COLD u32 get_cmd(const ns_parse *P, u32 a)
 {
     if (P->type < NT_PARK1) {
         if (!P->log || a < EW_SECTIONSET) return a;
@@ -581,7 +587,7 @@ static u32 get_cmd(const ns_parse *P, u32 a)
 }
 
 /* lowest command id whose parameter count does not fit the guessed layout */
-static void find_bad(ns_parse *P, const u8 *p, u32 num)
+static NS_COLD void find_bad(ns_parse *P, const u8 *p, u32 num)
 {
     P->bad = -1;
     for (u32 k = 0; k < num; k++, p += CMD_SIZE) {
@@ -596,7 +602,7 @@ static void find_bad(ns_parse *P, const u8 *p, u32 num)
 }
 
 /* Version / fork / layout detection (7-Zip's DetectNsisType heuristics). */
-static void detect_type(ns_parse *P, const u8 *cmds, u32 num)
+static NS_COLD void detect_type(ns_parse *P, const u8 *cmds, u32 num)
 {
     int strong_park = 0, strong_nsis = 0;
     P->type = NT_NSIS2;
@@ -678,7 +684,7 @@ static void detect_type(ns_parse *P, const u8 *cmds, u32 num)
 
 /* ---- items ---- */
 
-static int pool_add(ns_parse *P, const u16 *s, u32 n, u32 *off)
+static NS_COLD int pool_add(ns_parse *P, const u16 *s, u32 n, u32 *off)
 {
     if (n > POOL_MAX - P->pn) return GZ_E_LIMIT;
     if (P->pn + n > P->pcap) {
@@ -696,7 +702,7 @@ static int pool_add(ns_parse *P, const u16 *s, u32 n, u32 *off)
 }
 
 /* prefix table index of the current output directory (stored on first use) */
-static int cur_prefix(ns_parse *P, i32 *idx)
+static NS_COLD int cur_prefix(ns_parse *P, i32 *idx)
 {
     if (P->cur_idx < 0) {
         if (P->npfx == P->cappfx) {
@@ -717,7 +723,7 @@ static int cur_prefix(ns_parse *P, i32 *idx)
     return GZ_OK;
 }
 
-static ns_item *item_new(ns_parse *P)
+static NS_COLD ns_item *item_new(ns_parse *P)
 {
     if (P->nit == P->capit) {
         if (P->capit >= MAX_CMDS) { P->err = GZ_E_LIMIT; return 0; }
@@ -733,14 +739,14 @@ static ns_item *item_new(ns_parse *P)
     return it;
 }
 
-static int is_abs_var(const ns_parse *P, u32 pos)
+static NS_COLD int is_abs_var(const ns_parse *P, u32 pos)
 {
     i32 v = var_index(P, pos);
     return v == V_INSTDIR || v == V_EXEDIR || v == V_TEMP || v == V_PLUGINSDIR;
 }
 
 /* name from string pos; relative names get the current output directory */
-static int set_name(ns_parse *P, ns_item *it, u32 pos)
+static NS_COLD int set_name(ns_parse *P, ns_item *it, u32 pos)
 {
     P->tmp.n = 0;
     ns_string(P, pos, &P->tmp);
@@ -755,7 +761,7 @@ static int set_name(ns_parse *P, ns_item *it, u32 pos)
     return abs ? GZ_OK : cur_prefix(P, &it->prefix);
 }
 
-static int read_entries(ns_parse *P, const u8 *cmds, u32 num)
+static NS_COLD int read_entries(ns_parse *P, const u8 *cmds, u32 num)
 {
     u32 spec_var = P->n225 ? V_SPEC_OUTDIR_225 : V_SPEC_OUTDIR;
     P->cur.n = 0;
@@ -839,7 +845,7 @@ static int read_entries(ns_parse *P, const u8 *cmds, u32 num)
     return GZ_OK;
 }
 
-static int cmp_units(const u16 *a, u32 an, const u16 *b, u32 bn)
+static NS_COLD int cmp_units(const u16 *a, u32 an, const u16 *b, u32 bn)
 {
     u32 n = an < bn ? an : bn;
     for (u32 i = 0; i < n; i++)
@@ -847,13 +853,13 @@ static int cmp_units(const u16 *a, u32 an, const u16 *b, u32 bn)
     return an == bn ? 0 : an < bn ? -1 : 1;
 }
 
-static int cmp_prefix(const ns_parse *P, i32 x, i32 y)
+static NS_COLD int cmp_prefix(const ns_parse *P, i32 x, i32 y)
 {
     return cmp_units(P->pool + P->pfx[2 * x], P->pfx[2 * x + 1], P->pool + P->pfx[2 * y], P->pfx[2 * y + 1]);
 }
 
 /* 7-Zip's order: data position, then prefix (none first), then name */
-static int cmp_item(const ns_parse *P, const ns_item *a, const ns_item *b)
+static NS_COLD int cmp_item(const ns_parse *P, const ns_item *a, const ns_item *b)
 {
     if (a->pos != b->pos) return a->pos < b->pos ? -1 : 1;
     if (a->prefix != b->prefix) {
@@ -866,7 +872,7 @@ static int cmp_item(const ns_parse *P, const ns_item *a, const ns_item *b)
 }
 
 /* stable bottom-up merge sort of item indices */
-static int sort_items(const ns_parse *P, u32 *ix, u32 n)
+static NS_COLD int sort_items(const ns_parse *P, u32 *ix, u32 n)
 {
     u32 *tmp = (u32 *)gz_alloc((size_t)n * sizeof(u32) + 4);
     if (!tmp) return GZ_E_NOMEM;
@@ -886,7 +892,7 @@ static int sort_items(const ns_parse *P, u32 *ix, u32 n)
     return GZ_OK;
 }
 
-static int same_item(const ns_parse *P, const ns_item *a, const ns_item *b)
+static NS_COLD int same_item(const ns_parse *P, const ns_item *a, const ns_item *b)
 {
     if (a->pos != b->pos) return 0;
     if (cmp_units(P->pool + a->noff, a->nlen, P->pool + b->noff, b->nlen)) return 0;
@@ -896,7 +902,7 @@ static int same_item(const ns_parse *P, const ns_item *a, const ns_item *b)
 }
 
 /* Parse the decompressed header: string table, version, commands -> P->it. */
-static int parse_header(ns_parse *P)
+static NS_COLD int parse_header(ns_parse *P)
 {
     const u8 *h = P->h;
     u32 hn = P->hn;
@@ -923,7 +929,7 @@ static int parse_header(ns_parse *P)
     return read_entries(P, h + ent_off, ent_num);
 }
 
-static void parse_free(ns_parse *P)
+static NS_COLD void parse_free(ns_parse *P)
 {
     gz_free(P->it);
     gz_free(P->pool);
@@ -942,7 +948,7 @@ static void ns_close(gz_archive *a)
 }
 
 /* "$INSTDIR\" (any case) at the start of s */
-static int instdir_prefix(const u16 *s, u32 n)
+static NS_COLD int instdir_prefix(const u16 *s, u32 n)
 {
     static const char k[] = "$INSTDIR\\";
     if (n < 9) return 0;
@@ -955,7 +961,7 @@ static int instdir_prefix(const u16 *s, u32 n)
 }
 
 /* Turn the sorted items into entries. ix: sorted item indices, n of them. */
-static int add_entries(gz_archive *a, ns_parse *P, const u32 *ix, u32 n, gz_src *s, gz_ctx *c)
+static NS_COLD int add_entries(gz_archive *a, ns_parse *P, const u32 *ix, u32 n, gz_src *s, gz_ctx *c)
 {
     ns_priv *p = (ns_priv *)a->priv;
     u8 *nb = (u8 *)gz_alloc(2 * (STR_MAX * 2 + 16));
@@ -1053,26 +1059,27 @@ static int add_entries(gz_archive *a, ns_parse *P, const u32 *ix, u32 n, gz_src 
  * block flavours). On success hb holds [u32 size]? + header. */
 typedef struct { u8 method, solid, lzma_flag, nsis_zlib; } ns_guess;
 
-static int decode_header(ns_priv *p, gz_src *s, const ns_guess *g, u32 csize, grab_sink *hb, gz_ctx *c,
+static NS_COLD int decode_header(ns_priv *p, gz_src *s, const ns_guess *g, u32 csize, grab_sink *hb, gz_ctx *c,
                          int *filt)
 {
     hb->n = 0;
     u64 data = p->base + FH_SIZE;
     if (g->solid) {
         hb->want = p->hdr_size + 4;
-        int r = ns_run(s, data, p->end, g->method, g->lzma_flag, g->nsis_zlib, grab_write, hb, c, filt);
+        int r = ns_run(s, data, p->end, g->method, g->lzma_flag, g->nsis_zlib, hb->want, grab_write, hb, c, filt);
         if (r && r != GZ_E_SKIP) return r;
         if (hb->n != hb->want || rd32(hb->p) != p->hdr_size) return GZ_E_FORMAT;
         return GZ_OK;
     }
     hb->want = p->hdr_size;
     if (data + 4 + (u64)csize > p->end) return GZ_E_TRUNC;
-    int r = ns_run(s, data + 4, data + 4 + csize, g->method, g->lzma_flag, g->nsis_zlib, grab_write, hb, c, filt);
+    int r = ns_run(s, data + 4, data + 4 + csize, g->method, g->lzma_flag, g->nsis_zlib, hb->want, grab_write, hb,
+                   c, filt);
     if (r && r != GZ_E_SKIP) return r;
     return hb->n == hb->want ? GZ_OK : GZ_E_FORMAT;
 }
 
-static int ns_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
+static NS_COLD int ns_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
 {
     int r;
     u64 base, pe;
@@ -1454,7 +1461,8 @@ static int solid_extract(gz_archive *a, gz_src *s, const u8 *sel, gz_out *out, g
         x.a = a; x.p = p; x.s = s; x.out = out; x.list = list; x.nl = nl; x.done = done; x.res = res;
         x.mb.limit = DUP_MAX > PATCH_MAX ? DUP_MAX : PATCH_MAX;
         sx_next_group(&x, 0);
-        int r = ns_run(s, p->base + FH_SIZE, p->end, p->method, p->lzma_flag, p->nsis_zlib, sx_write, &x, c, 0);
+        int r = ns_run(s, p->base + FH_SIZE, p->end, p->method, p->lzma_flag, p->nsis_zlib, GZ_SIZE_UNKNOWN,
+                       sx_write, &x, c, 0);
         if (r == GZ_E_SKIP) r = GZ_OK;
         if (!r && x.gi < x.nl) r = GZ_E_DATA;            /* stream ended before the data */
         gz_mem_sink_free(&x.mb);
@@ -1533,7 +1541,7 @@ static gz_src *ns_view(gz_archive *a, gz_src *s, u32 idx)
     return gz_src_sub(s, e->off + 4, e->usize);
 }
 
-static void ns_method(const gz_archive *a, const gz_entry *e, char *buf, u32 cap)
+static NS_COLD void ns_method(const gz_archive *a, const gz_entry *e, char *buf, u32 cap)
 {
     (void)a;
     char t[48];

@@ -5,8 +5,9 @@
  *       idx <TAB> name <TAB> usize <TAB> csize <TAB> method <TAB> filetime <TAB> attr
  *       (usize/csize -1 = unknown, filetime 0 = none)
  *   nsis_drv inflate <in> <out> <nsis>
- *       decode a raw Deflate stream (nsis 1: stored blocks without NLEN) into <out>;
- *       prints "ok <bytes>" or "err <code>"
+ *       decode a raw Deflate stream (nsis 1: stored blocks without NLEN) into <out>
+ *       with every inflate kernel the CPU has (results must agree);
+ *       prints "ok <bytes> tiers=<n>" or "err <code> tiers=<n>"
  *   nsis_drv subsets <archive>
  *       CRC of every entry from a full pass ("C <TAB> idx <TAB> crc" lines), then from
  *       single-entry extraction and from extract_solid with several selections (incl.
@@ -83,7 +84,7 @@ static int cmd_list(const char *path)
 
 /* ---- inflate ---- */
 
-typedef struct { const u8 *p; size_t n, pos; FILE *out; u64 total; } mem_io;
+typedef struct { const u8 *p; size_t n, pos; u8 *o; size_t on, ocap; } mem_io;
 static int mi_read(void *ctx, u8 *buf, u32 cap, u32 *got)
 {
     mem_io *m = (mem_io *)ctx;
@@ -99,33 +100,58 @@ static int mi_read(void *ctx, u8 *buf, u32 cap, u32 *got)
 static int mi_write(void *ctx, const u8 *p, size_t n)
 {
     mem_io *m = (mem_io *)ctx;
-    m->total += n;
-    return fwrite(p, 1, n, m->out) == n ? 0 : GZ_E_IO;
+    if (m->on + n > m->ocap) {
+        m->ocap = (m->on + n) * 2 + 4096;
+        m->o = (u8 *)realloc(m->o, m->ocap);
+        if (!m->o) return GZ_E_NOMEM;
+    }
+    memcpy(m->o + m->on, p, n);
+    m->on += n;
+    return 0;
 }
 
+/* decode with every inflate kernel the CPU supports; all must agree */
 static int cmd_inflate(const char *in, const char *out, int nsis)
 {
     size_t n;
     u8 *buf = load(in, &n);
-    mem_io m = { buf, n, 0, fopen(out, "wb"), 0 };
-    if (!m.out) return 2;
     gz_inflater *z = gz_inflater_new();
-    gz_stream_io io = { mi_read, mi_write, &m };
-    int r = nsis ? gz_inflate_run_nsis(z, &io) : gz_inflate_run(z, &io, 0);
-    fclose(m.out);
-    if (r) printf("err %d\n", r); else printf("ok %llu\n", (unsigned long long)m.total);
+    mem_io first = { 0 };
+    int r = 0, tiers = 0, bad = 0;
+    for (int tier = 0; tier < GZ_TIER_COUNT; tier++) {
+        if (!gz_cpu_tier_supported(tier)) continue;
+        gz_dispatch_init(tier);
+        mem_io m = { buf, n, 0, 0, 0, 0 };
+        gz_stream_io io = { mi_read, mi_write, &m };
+        int rr = nsis ? gz_inflate_run_nsis(z, &io) : gz_inflate_run(z, &io, 0);
+        if (!tiers) { first = m; r = rr; }
+        else {
+            if (rr != r || m.on != first.on || (m.on && memcmp(m.o, first.o, m.on))) {
+                printf("kernel %s differs: %d/%d %zu/%zu\n", gz_dispatch_inflate_name(), rr, r, m.on, first.on);
+                bad++;
+            }
+            free(m.o);
+        }
+        tiers++;
+    }
+    gz_dispatch_init(-1);
+    FILE *f = fopen(out, "wb");
+    if (!f || (first.on && fwrite(first.o, 1, first.on, f) != first.on)) return 2;
+    fclose(f);
+    if (r) printf("err %d tiers=%d\n", r, tiers); else printf("ok %zu tiers=%d\n", first.on, tiers);
     /* a following standard run must not inherit the NSIS flag */
     if (nsis && !r) {
         static const u8 stored[] = { 0x01, 0x01, 0x00, 0xFE, 0xFF, 'x' };
-        mem_io m2 = { stored, sizeof stored, 0, fopen("/dev/null", "wb"), 0 };
+        mem_io m2 = { stored, sizeof stored, 0, 0, 0, 0 };
         gz_stream_io io2 = { mi_read, mi_write, &m2 };
         int r2 = gz_inflate_run(z, &io2, 0);
-        fclose(m2.out);
-        if (r2 || m2.total != 1) { printf("stale nsis flag %d\n", r2); r = 1; }
+        if (r2 || m2.on != 1) { printf("stale nsis flag %d\n", r2); bad++; }
+        free(m2.o);
     }
+    free(first.o);
     gz_inflater_free(z);
     free(buf);
-    return r ? 1 : 0;
+    return r || bad ? 1 : 0;
 }
 
 /* ---- subsets ---- */
