@@ -295,14 +295,16 @@ static int fse_block(gz_lzfse_dec *d, const u8 *in, const u8 *p, const u8 *ie, u
         if (nd) D = nd;
         if (L > (size_t)(lit_end - lit) || L + M > (size_t)(blk_end - op) ||
             D > (size_t)(op - out) + L) return GZ_E_DATA;
-        if ((size_t)(oe - op) >= L + M + 16) {
-            for (size_t k = 0; k < L; k += 16) gz_cp16(op + k, lit + k);
+        if (GZ_LIKELY((size_t)(oe - op) >= L + M + 32)) {
+            gz_cp16(op, lit);                       /* L <= 315; lits has 64 bytes of slack */
+            for (size_t k = 16; k < L; k += 16) gz_cp16(op + k, lit + k);
         } else {
             __builtin_memcpy(op, lit, L);
         }
         op += L;
         lit += L;
-        if (M) { gz_lz_match(op, D, M, oe); op += M; }
+        gz_lz_match(op, D, M, oe);                  /* D was checked even when M is 0 */
+        op += M;
     }
     if (op != blk_end) return GZ_E_DATA;
     *pop = op;
@@ -312,113 +314,144 @@ static int fse_block(gz_lzfse_dec *d, const u8 *in, const u8 *p, const u8 *ie, u
 
 /* ---------------- LZVN ---------------- */
 
-enum { SML_D, MED_D, LRG_D, PRE_D, SML_M, LRG_M, SML_L, LRG_L, NOP, EOS, UDEF };
-
-static const u8 lzvn_class[256] = {
-    0, 0, 0, 0, 0, 0, 9, 2, 0, 0, 0, 0, 0, 0, 8, 2,
-    0, 0, 0, 0, 0, 0, 8, 2, 0, 0, 0, 0, 0, 0, 10, 2,
-    0, 0, 0, 0, 0, 0, 10, 2, 0, 0, 0, 0, 0, 0, 10, 2,
-    0, 0, 0, 0, 0, 0, 10, 2, 0, 0, 0, 0, 0, 0, 10, 2,
-    0, 0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0, 0, 0, 3, 2,
-    0, 0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0, 0, 0, 3, 2,
-    0, 0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0, 0, 0, 3, 2,
-    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
-    0, 0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0, 0, 0, 3, 2,
-    0, 0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0, 0, 0, 3, 2,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    0, 0, 0, 0, 0, 0, 3, 2, 0, 0, 0, 0, 0, 0, 3, 2,
-    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
-    7, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-    5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-};
-
 /* Decode LZVN from [ip, ie) into [op, oe) up to the end opcode. out = start of the
  * whole output (lower bound for distances). Every instruction except the end opcode
  * needs at least one more input byte after it (the stream must end with 0x06...). */
 static int lzvn_run(const u8 *ip, const u8 *ie, u8 *out, u8 *op, u8 *oe, const u8 **pip, u8 **pop)
 {
-    size_t D = 0, L, M, oplen;
+    /* threaded dispatch (GCC/clang labels as values), one entry per opcode:
+     * each handler jumps straight to the next one */
+#define SD &&sml_d
+#define MD &&med_d
+#define LD &&lrg_d
+#define PD &&pre_d
+#define SM &&sml_m
+#define LM &&lrg_m
+#define SL &&sml_l
+#define LL &&lrg_l
+#define NP &&nop
+#define EO &&eos
+#define UD &&udef
+    static const void *const tbl[256] = {
+        SD, SD, SD, SD, SD, SD, EO, LD, SD, SD, SD, SD, SD, SD, NP, LD,
+        SD, SD, SD, SD, SD, SD, NP, LD, SD, SD, SD, SD, SD, SD, UD, LD,
+        SD, SD, SD, SD, SD, SD, UD, LD, SD, SD, SD, SD, SD, SD, UD, LD,
+        SD, SD, SD, SD, SD, SD, UD, LD, SD, SD, SD, SD, SD, SD, UD, LD,
+        SD, SD, SD, SD, SD, SD, PD, LD, SD, SD, SD, SD, SD, SD, PD, LD,
+        SD, SD, SD, SD, SD, SD, PD, LD, SD, SD, SD, SD, SD, SD, PD, LD,
+        SD, SD, SD, SD, SD, SD, PD, LD, SD, SD, SD, SD, SD, SD, PD, LD,
+        UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD,
+        SD, SD, SD, SD, SD, SD, PD, LD, SD, SD, SD, SD, SD, SD, PD, LD,
+        SD, SD, SD, SD, SD, SD, PD, LD, SD, SD, SD, SD, SD, SD, PD, LD,
+        MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD,
+        MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD, MD,
+        SD, SD, SD, SD, SD, SD, PD, LD, SD, SD, SD, SD, SD, SD, PD, LD,
+        UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD, UD,
+        LL, SL, SL, SL, SL, SL, SL, SL, SL, SL, SL, SL, SL, SL, SL, SL,
+        LM, SM, SM, SM, SM, SM, SM, SM, SM, SM, SM, SM, SM, SM, SM, SM,
+    };
+#undef SD
+#undef MD
+#undef LD
+#undef PD
+#undef SM
+#undef LM
+#undef SL
+#undef LL
+#undef NP
+#undef EO
+#undef UD
+    size_t D = 0, L, M, oplen, sl;
+    u32 opc;
     int r;
-    for (;;) {
-        size_t sl = (size_t)(ie - ip);
-        if (!sl) { r = GZ_E_TRUNC; goto done; }
-        u32 opc = *ip;
-        switch (lzvn_class[opc]) {
-        case SML_D:                                     /* LLMMMDDD DDDDDDDD */
-            oplen = 2; L = opc >> 6; M = ((opc >> 3) & 7) + 3;
-            if (sl <= oplen + L) { r = GZ_E_TRUNC; goto done; }
-            D = (size_t)(opc & 7) << 8 | ip[1];
-            goto lit_match;
-        case MED_D: {                                   /* 101LLMMM DDDDDDMM DDDDDDDD */
-            oplen = 3; L = (opc >> 3) & 3;
-            if (sl <= oplen + L) { r = GZ_E_TRUNC; goto done; }
-            u32 v = rd16(ip + 1);
-            M = ((opc & 7) << 2 | (v & 3)) + 3;
-            D = v >> 2;
-            goto lit_match;
-        }
-        case LRG_D:                                     /* LLMMM111 DDDDDDDD DDDDDDDD */
-            oplen = 3; L = opc >> 6; M = ((opc >> 3) & 7) + 3;
-            if (sl <= oplen + L) { r = GZ_E_TRUNC; goto done; }
-            D = rd16(ip + 1);
-            goto lit_match;
-        case PRE_D:                                     /* LLMMM110: previous distance */
-            oplen = 1; L = opc >> 6; M = ((opc >> 3) & 7) + 3;
-            if (sl <= oplen + L) { r = GZ_E_TRUNC; goto done; }
-            goto lit_match;
-        case SML_M:                                     /* 1111MMMM */
-            if (sl <= 1) { r = GZ_E_TRUNC; goto done; }
-            M = opc & 15;
-            ip += 1;
-            goto match;
-        case LRG_M:                                     /* 11110000 MMMMMMMM */
-            if (sl <= 2) { r = GZ_E_TRUNC; goto done; }
-            M = (size_t)ip[1] + 16;
-            ip += 2;
-            goto match;
-        case SML_L:                                     /* 1110LLLL */
-            oplen = 1; L = opc & 15;
-            goto lit;
-        case LRG_L:                                     /* 11100000 LLLLLLLL */
-            if (sl <= 2) { r = GZ_E_TRUNC; goto done; }
-            oplen = 2; L = (size_t)ip[1] + 16;
-            goto lit;
-        case NOP:
-            if (sl <= 1) { r = GZ_E_TRUNC; goto done; }
-            ip++;
-            continue;
-        case EOS:
-            if (sl < 8) { r = GZ_E_TRUNC; goto done; }
-            ip += 8;
-            r = GZ_OK;
-            goto done;
-        default:
-            r = GZ_E_DATA;
-            goto done;
-        }
-    lit_match:
-        ip += oplen;
-        if (L > (size_t)(oe - op)) { r = GZ_E_DATA; goto done; }
-        if (oe - op >= 4 && ie - ip >= 4) wr32(op, rd32(ip));
-        else for (size_t i = 0; i < L; i++) op[i] = ip[i];
+    /* every handler leaves at least one input byte (the stream ends with the end opcode) */
+#define NEXT()                                                       \
+    do {                                                             \
+        sl = (size_t)(ie - ip);                                      \
+        opc = *ip;                                                   \
+        goto *tbl[opc];                                              \
+    } while (0)
+    if (ip >= ie) { r = GZ_E_TRUNC; goto done; }
+    NEXT();
+sml_d:                                          /* LLMMMDDD DDDDDDDD */
+    oplen = 2; L = opc >> 6; M = ((opc >> 3) & 7) + 3;
+    if (sl <= oplen + L) { r = GZ_E_TRUNC; goto done; }
+    D = (size_t)(opc & 7) << 8 | ip[1];
+    goto lit_match;
+med_d: {                                        /* 101LLMMM DDDDDDMM DDDDDDDD */
+    oplen = 3; L = (opc >> 3) & 3;
+    if (sl <= oplen + L) { r = GZ_E_TRUNC; goto done; }
+    u32 v = rd16(ip + 1);
+    M = ((opc & 7) << 2 | (v & 3)) + 3;
+    D = v >> 2;
+    goto lit_match;
+}
+lrg_d:                                          /* LLMMM111 DDDDDDDD DDDDDDDD */
+    oplen = 3; L = opc >> 6; M = ((opc >> 3) & 7) + 3;
+    if (sl <= oplen + L) { r = GZ_E_TRUNC; goto done; }
+    D = rd16(ip + 1);
+    goto lit_match;
+pre_d:                                          /* LLMMM110: previous distance */
+    oplen = 1; L = opc >> 6; M = ((opc >> 3) & 7) + 3;
+    if (sl <= oplen + L) { r = GZ_E_TRUNC; goto done; }
+lit_match:                                      /* literal (0..3 bytes) then match (<= 34) */
+    ip += oplen;
+    if (GZ_LIKELY(oe - op >= 64 && sl >= oplen + 4)) {
+        wr32(op, rd32(ip));
         op += L;
         ip += L;
-        if (D > (size_t)(op - out)) { r = GZ_E_DATA; goto done; }
-    match:
-        if (!D || M > (size_t)(oe - op)) { r = GZ_E_DATA; goto done; }
+        if (D - 1 >= (size_t)(op - out)) { r = GZ_E_DATA; goto done; }   /* also D == 0 */
         gz_lz_match(op, D, M, oe);
         op += M;
-        continue;
-    lit:
-        if (sl <= oplen + L) { r = GZ_E_TRUNC; goto done; }
-        ip += oplen;
-        if (L > (size_t)(oe - op)) { r = GZ_E_DATA; goto done; }
-        gz_lz_lit(op, ip, L, oe, ie);
-        op += L;
-        ip += L;
+        NEXT();
     }
+    if (L > (size_t)(oe - op)) { r = GZ_E_DATA; goto done; }
+    for (size_t i = 0; i < L; i++) op[i] = ip[i];
+    op += L;
+    ip += L;
+    if (D > (size_t)(op - out)) { r = GZ_E_DATA; goto done; }
+    goto match;
+sml_m:                                          /* 1111MMMM */
+    if (sl <= 1) { r = GZ_E_TRUNC; goto done; }
+    M = opc & 15;
+    ip += 1;
+    goto match;
+lrg_m:                                          /* 11110000 MMMMMMMM */
+    if (sl <= 2) { r = GZ_E_TRUNC; goto done; }
+    M = (size_t)ip[1] + 16;
+    ip += 2;
+match:
+    if (!D || M > (size_t)(oe - op)) { r = GZ_E_DATA; goto done; }
+    gz_lz_match(op, D, M, oe);
+    op += M;
+    NEXT();
+sml_l:                                          /* 1110LLLL */
+    oplen = 1; L = opc & 15;
+    goto lit;
+lrg_l:                                          /* 11100000 LLLLLLLL */
+    if (sl <= 2) { r = GZ_E_TRUNC; goto done; }
+    oplen = 2; L = (size_t)ip[1] + 16;
+lit:
+    if (sl <= oplen + L) { r = GZ_E_TRUNC; goto done; }
+    ip += oplen;
+    if (L > (size_t)(oe - op)) { r = GZ_E_DATA; goto done; }
+    gz_lz_lit(op, ip, L, oe, ie);
+    op += L;
+    ip += L;
+    NEXT();
+nop:
+    if (sl <= 1) { r = GZ_E_TRUNC; goto done; }
+    ip++;
+    NEXT();
+eos:
+    if (sl < 8) { r = GZ_E_TRUNC; goto done; }
+    ip += 8;
+    r = GZ_OK;
+    goto done;
+udef:
+    r = GZ_E_DATA;
 done:
+#undef NEXT
     *pip = ip;
     *pop = op;
     return r;

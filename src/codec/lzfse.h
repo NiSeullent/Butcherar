@@ -7,12 +7,18 @@
  *   bvx-         stored bytes
  *   bvx$         end of stream
  * Matches may reach back into earlier blocks of the same stream.
+ *
+ * Output buffers: the decoders below copy in 8/16-byte steps when there is room,
+ * so out[*out_n .. out_cap) may be overwritten too. Pass the exact expected size
+ * as out_cap when the rest of the buffer must stay intact.
  */
 #ifndef GZ_LZFSE_H
 #define GZ_LZFSE_H
 #include "base.h"
 
-typedef struct gz_lzfse_dec gz_lzfse_dec;     /* ~48 KiB of tables, reusable */
+/* ~48 KiB of FSE tables + literal buffer; reusable. Containers that decode many
+ * streams (APFS/decmpfs chunks, DMG) cache one per thread with gz_ctx_slot. */
+typedef struct gz_lzfse_dec gz_lzfse_dec;
 gz_lzfse_dec *gz_lzfse_dec_new(void);
 void gz_lzfse_dec_free(gz_lzfse_dec *d);
 

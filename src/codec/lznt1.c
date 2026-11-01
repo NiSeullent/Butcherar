@@ -12,33 +12,35 @@
 
 #define CHUNK 4096u
 
-/* Decode one compressed chunk [ip, ce) at op (chunk start). Writes stop at oe.
+/* Decode one compressed chunk [ip, ce) at cs (chunk start); writes stop at oe.
  * Returns GZ_OK (chunk done or output full) or GZ_E_DATA. */
 static int lznt1_chunk(const u8 *ip, const u8 *ce, u8 *cs, u8 *oe, u8 **pop)
 {
     u8 *op = cs;
-    /* write limit for this chunk: 4096 bytes or the end of the output */
-    u8 *lim = (size_t)(oe - cs) > CHUNK ? cs + CHUNK : oe;
     int r = GZ_OK;
     while (ip < ce) {
-        u32 flags = *ip++;
-        if (flags == 0 && ce - ip >= 8 && lim - op >= 8) {
-            /* 8 literals: the common case in poorly compressible data */
-            gz_cp8(op, ip);
-            op += 8;
-            ip += 8;
-            continue;
-        }
-        for (int k = 0; k < 8 && ip < ce; k++, flags >>= 1) {
-            size_t pos = (size_t)(op - cs);
-            if (!(flags & 1)) {
-                if (op >= lim) {
-                    if (pos >= CHUNK) r = GZ_E_DATA;   /* else: output full */
+        u32 flags = (u32)*ip++ | 0x100;         /* bit 8: end of this group of 8 tokens */
+        for (;;) {
+            /* literals up to the next match flag */
+            u32 run = (u32)__builtin_ctz(flags);
+            if (run) {
+                size_t n = run < (size_t)(ce - ip) ? run : (size_t)(ce - ip);
+                if (n > (size_t)(oe - op)) {     /* output full */
+                    __builtin_memcpy(op, ip, (size_t)(oe - op));
+                    op = oe;
                     goto out;
                 }
-                *op++ = *ip++;
-                continue;
+                if ((size_t)(op - cs) + n > CHUNK) { r = GZ_E_DATA; goto out; }
+                if (oe - op >= 8 && ce - ip >= 8) gz_cp8(op, ip);
+                else for (size_t i = 0; i < n; i++) op[i] = ip[i];
+                op += n;
+                ip += n;
+                if (ip >= ce) goto out;
+                flags >>= run;
             }
+            if (flags == 1) break;
+            flags >>= 1;
+            size_t pos = (size_t)(op - cs);
             if (ce - ip < 2 || pos == 0) { r = GZ_E_DATA; goto out; }
             u32 v = rd16(ip);
             ip += 2;
@@ -47,13 +49,14 @@ static int lznt1_chunk(const u8 *ip, const u8 *ce, u8 *cs, u8 *oe, u8 **pop)
             size_t dist = (size_t)(v >> (12 - lg)) + 1;
             size_t len = (size_t)(v & (0xfffu >> lg)) + 3;
             if (dist > pos || pos + len > CHUNK) { r = GZ_E_DATA; goto out; }
-            if (len > (size_t)(lim - op)) {          /* only when the output is full */
-                gz_lz_match(op, dist, (size_t)(lim - op), oe);
-                op = lim;
+            if (len > (size_t)(oe - op)) {       /* output full */
+                gz_lz_match(op, dist, (size_t)(oe - op), oe);
+                op = oe;
                 goto out;
             }
             gz_lz_match(op, dist, len, oe);
             op += len;
+            if (ip >= ce) goto out;
         }
     }
 out:

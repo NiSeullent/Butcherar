@@ -1,6 +1,10 @@
 /*
  * 고깃ZIP - Microsoft XPRESS decoders ([MS-XCA]): "Plain LZ77" (LZXPRESS) and
  * "LZ77+Huffman" (XPRESS Huffman: WIM, NTFS WOF system compression, hiberfil, SMB)
+ *
+ * Output buffers: the decoders below copy in 8/16-byte steps when there is room,
+ * so out[*out_n .. out_cap) may be overwritten too. Pass the exact expected size
+ * as out_cap when the rest of the buffer must stay intact.
  */
 #ifndef GZ_XPRESS_H
 #define GZ_XPRESS_H
