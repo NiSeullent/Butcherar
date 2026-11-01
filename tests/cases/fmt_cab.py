@@ -1,10 +1,11 @@
-"""CAB (+ LZX codec) tests.
+"""CAB (+ LZX and Quantum codec) tests.
 
 Fixtures: gcab (None / MSZIP), a Python CAB builder (MSZIP via zlib with preset
-dictionaries, reserve fields, multi-cabinet sets with split blocks, SFX stubs)
-and LZX folders from tests/drivers/lzx_tool.c (a reference-style LZX encoder whose
-output is cross-checked with 7-Zip and cabextract before it is used). LZX WIM mode
-is checked against wimlib-made WIMs (SHA-1 of every resource).
+dictionaries, reserve fields, multi-cabinet sets with split blocks, SFX stubs),
+LZX and Quantum folders from tests/drivers/lzx_tool.c and qtm_tool.c (encoders
+whose output is cross-checked with 7-Zip and cabextract before it is used) and
+libmspack's test cabinets (Microsoft-made set, MSZIP/LZX/Quantum sample). LZX WIM
+mode is checked against wimlib-made WIMs (SHA-1 of every resource).
 """
 import os, struct, random, zlib, shutil, subprocess, hashlib, math, time, importlib.util, tarfile, urllib.request
 
@@ -325,6 +326,7 @@ def run(t):
     # ---- LZX: the test encoder, cross-checked with 7-Zip / cabextract
     tool = t.build_driver("tests/drivers/lzx_tool.c")
     drv = t.build_driver("tests/drivers/arc_random.c")
+    qtool = t.build_driver("tests/drivers/qtm_tool.c")
     inputs = {
         "text": blob(400000, 1, 7),
         "x86": x86_like(300000, 8),
@@ -411,7 +413,10 @@ def run(t):
     src = write(t.path("set_in.bin"), data)
     lz = t.path("set.lzxf")
     t.sh([tool, "enc", src, lz, "17", "0", "a", "32768", "4"])
-    variants = [("mszip", 1, mszip_blocks(data)), ("lzx", 3 | 17 << 8, read_lzxf(lz)), ("none", 0, none_blocks(data))]
+    qf = t.path("set.frames")
+    t.sh([qtool, "enc", src, qf, "17", "4"])
+    variants = [("mszip", 1, mszip_blocks(data)), ("lzx", 3 | 17 << 8, read_lzxf(lz)), ("none", 0, none_blocks(data)),
+                ("quantum", 2 | 4 << 4 | 17 << 8, read_lzxf(qf))]
     for vname, ctype, blocks in variants:
         d = os.path.join(W, "set_" + vname)
         shutil.rmtree(d, ignore_errors=True)
@@ -458,13 +463,45 @@ def run(t):
     r, rows, out = t.extract(p)
     t.record(b"OPEN_ERROR" in r.stdout or "type=CAB" not in r.stderr.decode(), "no deep scan without MZ")
 
-    # ---- Quantum folders are reported, not decoded
-    p = write(t.path("quantum.cab"), build_cab([(2 | 7 << 4 | 21 << 8, [(b"\x00" * 100, 200)])],
-                                               file_list([(b"q.bin", 200)])))
-    r, rows, out = t.extract(p)
+    # ---- Quantum: the test encoder, cross-checked with 7-Zip / cabextract
+    qcases = [("text", 10, 0), ("x86", 15, 0), ("mixed", 16, 0), ("text", 18, 0), ("mixed", 21, 0),
+              ("small", 12, 0), ("mixed", 17, -1)]
+    for i, (name, wb, pad) in enumerate(qcases):
+        data = inputs[name]
+        src = write(t.path("qtm_in_%d.bin" % i), data)
+        qf = t.path("qtm_%d.frames" % i)
+        t.sh([qtool, "enc", src, qf, str(wb), str(i + 1), str(pad)])
+        names, ex = split_files(data, random.Random(50 + i), prefix=b"qtm\\part")
+        p = write(t.path("qtm_%s_%d_%d.cab" % (name, wb, i)),
+                  build_cab([(2 | 4 << 4 | wb << 8, read_lzxf(qf))], file_list(names)))
+        label = "Quantum:%d %s pad=%d" % (wb, name, pad)
+        # 7-Zip wants a block to end right after the coder's flush; Microsoft's tools
+        # (and cabextract) also allow up to 4 padding bytes
+        if ref_ok(t, p, ex, label, refs=("7z", "cabextract") if pad == 0 else ("cabextract",)):
+            t.check_extract(p, ex, label=label)
+        outp = t.path("qtm_dec.bin")
+        r = t.sh([qtool, "dec", qf, outp, str(wb)], check=False)
+        t.record(r.returncode == 0 and open(outp, "rb").read() == data, "codec " + label)
     typ, m = listing_map(t, p)
-    t.record(rows.get(0, (0,))[0] == 5 and m["q.bin"]["method"] == "Quantum:21", "Quantum -> GZ_E_METHOD",
-             str(rows) + str(m))
+    t.record(any(x["method"] == "Quantum:17" for x in m.values()), "Quantum method name", str(list(m.values())[:1]))
+    r = t.sh([qtool, "fuzz", t.path("qtm_4.frames"), "21", "300", "3"], check=False, timeout=300)
+    t.record(r.returncode == 0, "Quantum fuzz (frames)", r.stdout.decode(errors="replace").strip())
+    p = write(t.path("quantum_bad_window.cab"), build_cab([(2 | 7 << 4 | 9 << 8, [(b"\x00" * 100, 200)])],
+                                                          file_list([(b"q.bin", 200)])))
+    r, rows, out = t.extract(p)
+    t.record(rows.get(0, (0,))[0] == 5, "Quantum window 2^9 -> GZ_E_METHOD", str(rows))
+
+    # ---- all four methods in one cabinet
+    qf = t.path("qtm_2.frames")
+    ds, dm, dl = blob(50000, 0, 5), blob(200000, 1, 4), inputs["mixed"]
+    mixed4 = [(0, none_blocks(ds)), (1, mszip_blocks(dm)), (3 | 18 << 8, read_lzxf(t.path("lzx_4.lzxf"))),
+              (2 | 4 << 4 | 16 << 8, read_lzxf(qf))]
+    n4 = [(b"m4\\store.bin", len(ds)), (b"m4\\mszip.bin", len(dm)), (b"m4\\lzx.bin", len(dl)), (b"m4\\qtm.bin", len(dl))]
+    fl4 = [(nm, sz, 0, k, 0x20, 0x5A21, 0x6000) for k, (nm, sz) in enumerate(n4)]
+    exp4 = {"m4/store.bin": ds, "m4/mszip.bin": dm, "m4/lzx.bin": dl, "m4/qtm.bin": dl}
+    p = write(t.path("four_methods.cab"), build_cab(mixed4, fl4))
+    if ref_ok(t, p, exp4, "four_methods.cab"):
+        t.check_extract(p, exp4, label="None + MSZIP + LZX + Quantum folders")
 
     # ---- checksum / data errors are reported per folder
     good = build_cab(folders, files)
@@ -508,8 +545,7 @@ def run(t):
                     res = {name: (st, open(os.path.join(out, "%d.bin" % i), "rb").read() if st == 0 else None)
                            for i, (st, isdir, size, name) in rows.items()}
                     ok = res.get("mszip.txt", (1,))[1] == exp.get("mszip.txt") and res.get("lzx.txt", (1,))[1] == exp.get("lzx.txt")
-                    qst = res.get("qtm.txt", (1, None))
-                    ok = ok and (qst[0] == 5 or qst[1] == exp.get("qtm.txt"))
+                    ok = ok and res.get("qtm.txt", (1,))[1] == exp.get("qtm.txt")
                     t.record(ok, "libmspack " + nm, str({k: v[0] for k, v in res.items()}))
                 elif rc == 0 and exp:
                     t.check_extract(p, exp, label="libmspack " + nm)

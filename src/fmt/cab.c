@@ -1,8 +1,8 @@
 /*
  * 고깃ZIP - Microsoft Cabinet (CAB) reader
  *
- *   Header reserve fields, folders of type None / MSZIP / LZX (Quantum: not
- *   supported, GZ_E_METHOD), CFDATA checksums, files continued across cabinets
+ *   Header reserve fields, folders of type None / MSZIP / Quantum / LZX,
+ *   CFDATA checksums, files continued across cabinets
  *   (multi-cabinet sets are followed through o->open_volume with the previous /
  *   next cabinet names; folders split between cabinets are merged), CABs inside
  *   executables (IExpress / SFX installers: "MSCF" found in the first 16 MiB).
@@ -13,6 +13,7 @@
  */
 #include "arc.h"
 #include "lzx.h"
+#include "quantum.h"
 
 #define CAB_SIG      0x4643534du      /* "MSCF" */
 #define CAB_HDR      36u
@@ -523,6 +524,7 @@ typedef struct {
     u8 *in, *out, *hist;
     u32 hist_n;
     gz_lzx_dec *lzx;
+    gz_qtm_dec *qtm;     /* owned: allocated per extraction (Quantum is rare)        */
     u64 start, n;        /* folder offset and size of the block in out             */
     /* MSZIP output sink */
     u32 o_n, o_cap;
@@ -533,7 +535,9 @@ typedef struct {
 static int fr_init(frd *fr, gz_archive *a, gz_src *s, u32 fi, gz_ctx *c)
 {
     cab_priv *p = (cab_priv *)a->priv;
+    gz_qtm_dec *qtm = fr->qtm;           /* kept across restarts of the folder */
     __builtin_memset(fr, 0, sizeof *fr);
+    fr->qtm = qtm;
     fr->a = a;
     fr->p = p;
     fr->s = s;
@@ -552,6 +556,12 @@ static int fr_init(frd *fr, gz_archive *a, gz_src *s, u32 fi, gz_ctx *c)
         if (r) return r == GZ_E_NOMEM ? r : GZ_E_METHOD;
     } else if (type == M_MSZIP) {
         if (!gz_ctx_inflater(c)) return GZ_E_NOMEM;
+    } else if (type == M_QUANTUM) {
+        u32 wb = (fr->f->type >> 8) & 0x1f;
+        if (wb < 10 || wb > 21) return GZ_E_METHOD;
+        if (!fr->qtm) fr->qtm = gz_qtm_new(wb);
+        else if (gz_qtm_init(fr->qtm, wb)) return GZ_E_NOMEM;
+        if (!fr->qtm) return GZ_E_NOMEM;
     } else if (type != M_NONE) {
         return GZ_E_METHOD;
     }
@@ -682,6 +692,11 @@ static int fr_next(frd *fr, int *end)
         r = gz_lzx_decode_frame(fr->lzx, fr->in, n, 0, fr->out, u);
         if (r) return GZ_E_DATA;
         break;
+    case M_QUANTUM:
+        if (u > GZ_QTM_FRAME) return GZ_E_DATA;
+        r = gz_qtm_decode_frame(fr->qtm, fr->in, n, fr->out, u);
+        if (r) return GZ_E_DATA;
+        break;
     default:
         return GZ_E_METHOD;
     }
@@ -694,21 +709,22 @@ static int extract_folder(gz_archive *a, gz_src *s, u32 fi, const u32 *list, u32
                           int *last_st)
 {
     frd fr;
-    int ferr = fr_init(&fr, a, s, fi, c), started = 0;
-    if (!ferr && fr.lzx) gz_lzx_reset(fr.lzx);
+    fr.qtm = 0;
+    int ferr = fr_init(&fr, a, s, fi, c), started = 0, ret = GZ_OK;
     for (u32 k = 0; k < nl; k++) {
         u32 idx = list[k];
         gz_entry *e = &a->e[idx];
-        if (gz_cancelled(c)) return GZ_E_CANCEL;
+        if (gz_cancelled(c)) { ret = GZ_E_CANCEL; break; }
         int r = out->open(out, idx);
         if (r == GZ_E_SKIP) continue;
-        if (r) return r;
+        if (r) { ret = r; break; }
         int st = e->usize ? ferr : GZ_OK;
         if (!st && e->usize) {
             if (e->off < fr.start || !started) {
                 /* first file, or overlapping / out of order entries: restart the folder */
                 if (started && (st = fr_init(&fr, a, s, fi, c))) goto done;
                 if (fr.lzx) gz_lzx_reset(fr.lzx);
+                if (fr.qtm) gz_qtm_reset(fr.qtm);
                 fr.hist_n = 0;
                 started = 1;
             }
@@ -731,9 +747,10 @@ static int extract_folder(gz_archive *a, gz_src *s, u32 fi, const u32 *list, u32
 done:
         r = out->close(out, idx, st);
         if (last_st) *last_st = st ? st : r;
-        if (st == GZ_E_CANCEL || r == GZ_E_CANCEL) return GZ_E_CANCEL;
+        if (st == GZ_E_CANCEL || r == GZ_E_CANCEL) { ret = GZ_E_CANCEL; break; }
     }
-    return GZ_OK;
+    gz_qtm_free(fr.qtm);
+    return ret;
 }
 
 static int fail_entry(gz_out *out, u32 idx, int st)
