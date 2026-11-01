@@ -396,6 +396,18 @@ def check_expected(t, arc, src, label, prefix_map=None):
     return t.check_extract(arc, exp, label=label, allow_extra=True, expect_type="NSIS")
 
 
+def drop(t, *arcs):
+    """remove the extraction outputs (ours and 7-Zip's) of these archives"""
+    for arc in arcs:
+        for d in ("out_", "ref7z_"):
+            shutil.rmtree(os.path.join(t.work, d + os.path.basename(arc)), ignore_errors=True)
+
+
+def last_line(r):
+    lines = (r.stdout + r.stderr).decode("utf-8", "replace").strip().splitlines()
+    return lines[-1] if lines else ""
+
+
 def download(t, name, url, sha):
     """cached download of a public test fixture; None when offline"""
     cache = os.path.join(os.path.dirname(t.work), "nsis_dl")
@@ -448,7 +460,18 @@ def run(t):
                     okp = bool(idx) and open(os.path.join(out, "%d.bin" % idx[0]), "rb").read() == plug[cs]
                 t.record(okp, "plugin + uninstallers " + name)
                 rr = t.sh([drv, "subsets", arc], check=False)
-                t.record(rr.returncode == 0, "subsets " + name, rr.stdout.decode(errors="replace")[-300:])
+                t.record(rr.returncode == 0, "subsets " + name, last_line(rr))
+                drop(t, arc)
+
+    # NSIS data without the exe stub (uninstallers become "*.nsis" data, as in 7-Zip),
+    # and installers with data appended (Authenticode signature, SFX payloads)
+    for name in ("lzma_solid_x86-unicode", "zlib_x86-ansi", "bzip2_solid_x86-unicode"):
+        b = open(built[name], "rb").read()
+        raw = write(os.path.join(wd, name + "_raw.nsis"), b[find_fh(b):])
+        t.check_vs_7z(raw, label="7z no stub " + name, expect_type="NSIS")
+        tail = write(os.path.join(wd, name + "_tail.exe"), b + blob(9000, 9, 0))
+        t.check_vs_7z(tail, label="7z trailing data " + name, expect_type="NSIS")
+        drop(t, raw, tail)
 
     # the uninstaller is an NSIS archive of its own (uninstall flag set)
     r, out = t.sevenzip_extract(built["lzma_solid_x86-unicode"])
@@ -489,7 +512,7 @@ SectionEnd
                     label="ANSI installer, CP949 names")
 
     # ---- big file, many files ----
-    big = {"big/big.bin": blob(24 << 20, 7), "big/rand.bin": blob(3 << 20, 8, 0)}
+    big = {"big/big.bin": blob(12 << 20, 7), "big/rand.bin": blob(2 << 20, 8, 0)}
     for i in range(1500):
         big["many/d%02d/f%04d.txt" % (i % 37, i)] = b"file %d\n" % i * (i % 7)
     t.write_tree(os.path.join(wd, "srcbig"), big)
@@ -512,6 +535,40 @@ SectionEnd
         t.sevenzip_extract(arc)
         d7 = time.time() - t1
         t.record(True, "speed " + name, "gzt x %.2fs, 7z x %.2fs (%d MiB)" % (dt, d7, sum(map(len, big.values())) >> 20))
+        drop(t, arc)
+        os.remove(arc)
+    shutil.rmtree(os.path.join(wd, "srcbig"), ignore_errors=True)
+
+    # ---- shared data larger than the duplicate buffer: one solid pass per copy ----
+    dup = os.path.join(wd, "srcdup")
+    os.makedirs(dup, exist_ok=True)
+    zero = os.path.join(dup, "zero.bin")
+    with open(zero, "wb") as f:
+        f.truncate((64 << 20) + 4096)
+    write(os.path.join(dup, "small.txt"), b"small\n" * 10)
+    arc = makensis(t, wd, "bigdup", r"""
+Name "dup"
+OutFile "{out}"
+RequestExecutionLevel user
+Section
+  SetOutPath "$INSTDIR\a"
+  File "srcdup/zero.bin"
+  File "srcdup/small.txt"
+  SetOutPath "$INSTDIR\b"
+  File "srcdup/zero.bin"
+  SetOutPath "$INSTDIR\c"
+  File "srcdup/zero.bin"
+  File "srcdup/small.txt"
+SectionEnd
+""", head_for("zlib", True, "x86-unicode"))
+    os.remove(zero)
+    r, typ, rows = t.listing(arc)
+    rr = t.sh([drv, "subsets", arc], check=False)
+    crcs = {int(l.split("\t")[1]): int(l.split("\t")[2], 16) for l in rr.stdout.decode().splitlines() if l.startswith("C\t")}
+    zc, sc = zlib.crc32(bytes((64 << 20) + 4096)), zlib.crc32(b"small\n" * 10)
+    want = {x["name"]: (zc if x["name"].endswith("zero.bin") else sc) for x in rows}
+    ok = rr.returncode == 0 and len(rows) == 5 and all(crcs.get(x["idx"]) == want[x["name"]] for x in rows)
+    t.record(ok, "solid duplicates > 64 MiB (multi-pass)", last_line(rr))
 
     # ---- NSIS 2 (synthesised) ----
     for cs in ("x86-ansi",):
@@ -524,7 +581,7 @@ SectionEnd
                 t.check_vs_7z(arc, label="7z " + name, expect_type="NSIS")
                 check_props(t, drv, arc, "props " + name)
                 rr = t.sh([drv, "subsets", arc], check=False)
-                t.record(rr.returncode == 0, "subsets " + name, rr.stdout.decode(errors="replace")[-300:])
+                t.record(rr.returncode == 0, "subsets " + name, last_line(rr))
     # NSIS 3 solid zlib is standard Deflate: stored blocks with NLEN in the data (7-Zip
     # agrees) and in the header too (7-Zip reads headers as NSIS-2 Deflate; we retry)
     r, ref = t.sevenzip_extract(built["off_x86-unicode"])
@@ -572,6 +629,17 @@ SectionEnd
     # ---- hostile ----
     hostile(t, drv, wd, built)
 
+    # extraction outputs are large and not needed afterwards
+    for d in os.listdir(t.work):
+        if d.startswith(("out_", "ref7z_")):
+            shutil.rmtree(os.path.join(t.work, d), ignore_errors=True)
+
+
+def hcheck(t, path):
+    """check_hostile; keep the file only when it failed (for debugging)"""
+    if t.check_hostile(path):
+        os.remove(path)
+
 
 def hostile(t, drv, wd, built):
     hd = t.path("hostile")
@@ -585,7 +653,7 @@ def hostile(t, drv, wd, built):
                        (o + len(b)) // 2, len(b) * 3 // 4})
         for k, cut in enumerate(cuts):
             p = write(os.path.join(hd, "trunc_%s_%d.exe" % (name, k)), b[:cut])
-            t.check_hostile(p)
+            hcheck(t, p)
     # firstheader fields
     b = open(built["lzma_solid_x86-unicode"], "rb").read()
     o = find_fh(b)
@@ -593,7 +661,7 @@ def hostile(t, drv, wd, built):
                                     (24, 29), (24, 0xFFFFFFFF), (24, 28), (28, 0x80000000), (28, 0x7FFFFFFF))):
         x = bytearray(b)
         struct.pack_into("<I", x, o + off, val)
-        t.check_hostile(write(os.path.join(hd, "fh_%d.exe" % k), bytes(x)))
+        hcheck(t, write(os.path.join(hd, "fh_%d.exe" % k), bytes(x)))
     # header structures of stored-header installers (ANSI and Unicode)
     for cs in ("x86-ansi", "x86-unicode"):
         b = open(built["off_" + cs], "rb").read()
@@ -619,7 +687,7 @@ def hostile(t, drv, wd, built):
         for k, (off, val) in enumerate(muts):
             x = bytearray(b)
             struct.pack_into("<I", x, hs + off, val)
-            t.check_hostile(write(os.path.join(hd, "hdr_%s_%d.exe" % (cs, k)), bytes(x)))
+            hcheck(t, write(os.path.join(hd, "hdr_%s_%d.exe" % (cs, k)), bytes(x)))
         # string table: codes at the very end, bad shell / variable numbers
         so, lo = bl[3][0], bl[4][0]
         for k in range(40):
@@ -628,7 +696,7 @@ def hostile(t, drv, wd, built):
             x[pos] = rnd.choice([1, 2, 3, 4, 0xFF, 0x80, 0])
             if pos + 1 < hs + lo:
                 x[pos + 1] = rnd.choice([0x80, 0xFF, 0x7F, 1])
-            t.check_hostile(write(os.path.join(hd, "str_%s_%d.exe" % (cs, k)), bytes(x)))
+            hcheck(t, write(os.path.join(hd, "str_%s_%d.exe" % (cs, k)), bytes(x)))
         # data block size words
         for k in range(12):
             x = bytearray(b)
@@ -639,7 +707,7 @@ def hostile(t, drv, wd, built):
                     off = 0
             struct.pack_into("<I", x, hs + len(h) + off, rnd.choice([0xFFFFFFFF, 0x7FFFFFFF, 0x80000000, 0x80000010,
                                                                      len(data), 0x80000000 | len(data)]))
-            t.check_hostile(write(os.path.join(hd, "blk_%s_%d.exe" % (cs, k)), bytes(x)))
+            hcheck(t, write(os.path.join(hd, "blk_%s_%d.exe" % (cs, k)), bytes(x)))
     # solid streams with broken size words / overlapping positions / bad patches (recompressed)
     stub, flags, h, data = split_copy(open(built["off_x86-unicode"], "rb").read())
     for k in range(10):
@@ -662,7 +730,7 @@ def hostile(t, drv, wd, built):
                         struct.pack_into("<II", db, p + 4, 0x10000, 0x7FFFFF00)      # patch out of range
         body = zlib.compress(struct.pack("<I", len(h)) + bytes(hb) + bytes(db), 1)[2:-4]
         fh = struct.pack("<I", 4) + SIG + struct.pack("<II", len(h), 28 + len(body))
-        t.check_hostile(write(os.path.join(hd, "solid_%d.exe" % k), stub + fh + body))
+        hcheck(t, write(os.path.join(hd, "solid_%d.exe" % k), stub + fh + body))
     # long SetOutPath $OUTDIR chain (prefix capped), thousands of files in one folder
     body = "\n".join("  SetOutPath \"$OUTDIR\\abcdefghij\"" for _ in range(4000))
     arc = makensis(t, hd, "chain", r'''

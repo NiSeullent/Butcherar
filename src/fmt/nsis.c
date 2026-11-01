@@ -43,7 +43,7 @@
 #define CMD_SIZE    28u
 #define MAX_CMDS    (1u << 25)
 #define COMP_FLAG   0x80000000u
-#define MAX_PASSES  4
+#define MAX_PASSES  16                  /* solid: big shared data needs a pass per entry */
 
 static const u8 ns_sig[16] = { 0xEF, 0xBE, 0xAD, 0xDE, 'N', 'u', 'l', 'l', 's', 'o', 'f', 't', 'I', 'n', 's', 't' };
 
@@ -1341,6 +1341,7 @@ static int sx_end_block(ns_sx *x)
     }
     x->done[x->gi] = 1;
     if (x->opened) {
+        if (x->st == GZ_E_SKIP) x->st = GZ_OK;         /* the sink had enough */
         int r = x->out->close(x->out, idx, x->st);
         sx_status(x, idx, x->st);
         x->opened = 0;
@@ -1356,6 +1357,7 @@ static int sx_end_block(ns_sx *x)
             if (r == GZ_E_SKIP) continue;
             if (r) return r;
             int st = x->mb.n ? x->out->write(x->out, x->mb.p, x->mb.n) : GZ_OK;
+            if (st == GZ_E_SKIP) st = GZ_OK;
             r = x->out->close(x->out, di, st);
             sx_status(x, di, st);
             if (r == GZ_E_CANCEL || st == GZ_E_CANCEL) return GZ_E_CANCEL;

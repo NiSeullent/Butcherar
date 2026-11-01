@@ -8,9 +8,9 @@
  *       decode a raw Deflate stream (nsis 1: stored blocks without NLEN) into <out>;
  *       prints "ok <bytes>" or "err <code>"
  *   nsis_drv subsets <archive>
- *       CRC of every entry from a full pass, then from single-entry extraction and
- *       from extract_solid with several selections (incl. skipped and cancelled
- *       entries): all must agree; prints "ok <entries>"
+ *       CRC of every entry from a full pass ("C <TAB> idx <TAB> crc" lines), then from
+ *       single-entry extraction and from extract_solid with several selections (incl.
+ *       skipped and cancelled entries): all must agree; prints "ok <entries>"
  *   nsis_drv fuzz <archive> <iterations> <seed>
  *       mutation fuzzer (bit flips, smashed 32-bit fields, truncation) over open +
  *       extraction (solid pass, single entries); prints "ok <iterations> opened=<n>"
@@ -171,8 +171,10 @@ static int cmd_subsets(const char *path)
     crc_out k = { { k_open, k_write, k_close, 0 }, ref, st, 0, 0, 0, 0, 0 };
     memset(sel, 1, a->n);
     int r = gz_arc_extract_solid(a, s, sel, &k.o, c);
-    for (u32 i = 0; i < a->n; i++)
+    for (u32 i = 0; i < a->n; i++) {
         if (st[i] != 100) { printf("full pass: entry %u status %d (r=%d)\n", i, st[i], r); bad++; }
+        printf("C\t%u\t%08x\n", i, ref[i]);
+    }
     /* single entries, in reverse order */
     for (u32 i = a->n; i-- > 0;) {
         crc_out k1 = { { k_open, k_write, k_close, 0 }, crc, 0, 0, 0, 0, 0, 0 };
