@@ -5,6 +5,15 @@ on:
     branches: ["**"]
     tags: ["v*"]
   pull_request:
+  # a release published in the GitHub UI under any tag name ("release", "1.0", ...)
+  release:
+    types: [published]
+  # attach binaries to an existing release by hand: Actions > build > Run workflow
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag of the release to build and attach binaries to (e.g. release, v1.0.0)"
+        required: true
 
 permissions:
   contents: write
@@ -12,8 +21,18 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    env:
+      # tag whose release gets the binaries; empty = ordinary CI build, nothing published
+      RELEASE_TAG: >-
+        ${{ github.event_name == 'workflow_dispatch' && inputs.tag
+         || (github.event_name == 'release' && !startsWith(github.event.release.tag_name, 'v')) && github.event.release.tag_name
+         || startsWith(github.ref, 'refs/tags/v') && github.ref_name
+         || '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # a manual run builds exactly the tagged source
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || '' }}
 
       - name: Install MinGW-w64 and test tools
         run: |
@@ -39,7 +58,7 @@ jobs:
           path: build/*.exe
 
       - name: Prepare release notes and checksums
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         run: |
           (cd build && sha256sum GogitZip.exe GogitZip64.exe) > build/SHA256SUMS.txt
           {
@@ -53,10 +72,12 @@ jobs:
           } > build/release-body.md
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
         with:
-          name: 고깃ZIP ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          # keep the title of a release made in the UI; name new tag-push releases
+          name: ${{ github.event_name == 'push' && format('고깃ZIP {0}', github.ref_name) || '' }}
           body_path: build/release-body.md
           files: |
             build/GogitZip.exe
