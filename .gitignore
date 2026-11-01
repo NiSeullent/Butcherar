@@ -2,3 +2,4 @@ build/
 tools/preview.png
 __pycache__/
 *.o
+.claude/

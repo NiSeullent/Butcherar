@@ -277,5 +277,6 @@ int gz_plat_mb_valid(int cp, const u8 *s, int n);              /* 1 if s is vali
 int gz_plat_oemcp(void);
 int gz_plat_cp_valid(int cp);
 int gz_plat_case_fold(void);                                   /* file system is case-insensitive */
+int gz_plat_random(void *buf, size_t n);                       /* cryptographic random bytes, GZ_OK or GZ_E_IO */
 
 #endif

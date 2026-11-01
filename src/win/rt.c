@@ -7,6 +7,7 @@
  * point and the allocation / code-page hooks used by the portable core.
  */
 #include "app.h"
+#include <wincrypt.h>
 
 /* ---------------- compiler support ---------------- */
 
@@ -110,6 +111,16 @@ int gz_plat_wc2mb(int cp, const gzch *s, int n, u8 *out, int cap)
 }
 
 int gz_plat_case_fold(void) { return 1; }
+
+/* CryptoAPI is available from Windows 2000 on (RtlGenRandom only from XP). */
+int gz_plat_random(void *buf, size_t n)
+{
+    HCRYPTPROV prov;
+    if (!CryptAcquireContextW(&prov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT | CRYPT_SILENT)) return GZ_E_IO;
+    BOOL ok = CryptGenRandom(prov, (DWORD)n, (BYTE *)buf);
+    CryptReleaseContext(prov, 0);
+    return ok ? GZ_OK : GZ_E_IO;
+}
 
 int gz_plat_acp(void)
 {

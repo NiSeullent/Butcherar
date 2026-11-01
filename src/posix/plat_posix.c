@@ -148,6 +148,24 @@ int gz_plat_mb_valid(int cp, const u8 *s, int n)
     return r >= 0;
 }
 
+/* ---------------- random ---------------- */
+
+int gz_plat_random(void *buf, size_t n)
+{
+    u8 *p = (u8 *)buf;
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return GZ_E_IO;
+    while (n) {
+        ssize_t r = read(fd, p, n);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) { close(fd); return GZ_E_IO; }
+        p += r;
+        n -= (size_t)r;
+    }
+    close(fd);
+    return GZ_OK;
+}
+
 /* ---------------- file sources ---------------- */
 
 static int fd_read_at(gz_src *s, u64 off, void *buf, u32 n, u32 *got)
