@@ -5,7 +5,17 @@
  * names up to 103 units like genisoimage -joliet-long), Rock Ridge (SUSP SP/CE/ER,
  * RRIP_1991A PX/TF/NM/SL), L and M path tables for both trees. The whole layout
  * is computed from the announced item sizes before the first byte is written,
- * so output is append-only and the same input always gives the same image:
+ * so output is append-only and the same input always gives the same image.
+ *
+ * Three name spaces, each made collision-free on its own (clashes get "~N"):
+ *   primary   d-characters, up to 30 + ".;1" for files / 31 for directories
+ *   Joliet    up to 103 UTF-16 units, distinct without regard to case and trailing
+ *             dots/spaces (Windows and Linux look Joliet names up that way); no
+ *             symlinks (Windows cannot use them)
+ *   RR        the POSIX name in UTF-8, at most 253 bytes (Linux drops longer ones),
+ *             extension kept when shortened; symlink targets up to 1023 bytes
+ *
+ * Layout:
  *
  *   0-15   system area (zeros)
  *   16     primary volume descriptor
@@ -28,7 +38,7 @@
 #define NONE    0xFFFFFFFFu
 #define JMAX    103u            /* Joliet name units (genisoimage -joliet-long)   */
 #define JEXT    16u             /* extension units kept when a name is shortened   */
-#define RRMAX   255u            /* Rock Ridge name bytes (NAME_MAX of Linux/macOS) */
+#define RRMAX   253u            /* Rock Ridge name bytes (Linux isofs drops longer ones) */
 #define REXT    32u
 #define LINKMAX 1023u           /* symlink target bytes (libisofs rejects longer)  */
 #define EXTMAX  0xFFFFF800u     /* bytes per extent of a multi-extent file         */
@@ -95,6 +105,16 @@ typedef struct {
 static void both16(u8 *p, u32 v) { wr16(p, (u16)v); wr16be(p + 2, (u16)v); }
 static void both32(u8 *p, u32 v) { wr32(p, v); wr32be(p + 4, v); }
 static int is_hi(gzch c) { return c >= 0xD800 && c < 0xDC00; }
+static int is_lo(gzch c) { return c >= 0xDC00 && c < 0xE000; }
+
+/* unit i of s[0..n) with lone surrogate halves replaced by U+FFFD (UCS-2 readers) */
+static gzch unit(const gzch *s, u32 n, u32 i)
+{
+    gzch c = s[i];
+    if (is_hi(c)) return i + 1 < n && is_lo(s[i + 1]) ? c : 0xFFFD;
+    if (is_lo(c)) return i && is_hi(s[i - 1]) ? c : 0xFFFD;
+    return c;
+}
 
 static int cancelled(const iso_w *w)
 {
@@ -389,8 +409,10 @@ static u8 dchar(gzch c)
     return '_';
 }
 
-static gzch jchar(gzch c)
+/* Joliet unit: characters Joliet forbids become '_', lone surrogates U+FFFD */
+static gzch junit(const gzch *s, u32 n, u32 i)
 {
+    gzch c = unit(s, n, i);
     return (c < 0x20 || c == '*' || c == '/' || c == ':' || c == ';' || c == '?' || c == '\\') ? '_' : c;
 }
 
@@ -429,13 +451,13 @@ static int jol_name(iso_w *w, inode *n)
         dot = n->is_dir ? NONE : ext_dot(s, len, JEXT);
         u32 el = dot == NONE ? 0 : len - dot;
         bl = JMAX - el;
-        if (is_hi(s[bl - 1])) bl--;
+        if (is_hi(junit(s, len, bl - 1))) bl--;   /* do not split a pair */
     }
     u32 tot = bl + (dot == NONE ? 0 : len - dot);
     gzch *d = (gzch *)gz_arena_alloc(&w->ar, tot * sizeof(gzch));
     if (!d) return GZ_E_NOMEM;
-    for (u32 i = 0; i < bl; i++) d[i] = jchar(s[i]);
-    for (u32 i = bl; i < tot; i++) d[i] = jchar(s[dot + i - bl]);
+    for (u32 i = 0; i < bl; i++) d[i] = junit(s, len, i);
+    for (u32 i = bl; i < tot; i++) d[i] = junit(s, len, dot + i - bl);
     n->jname = d;
     n->jlen = (u16)tot;
     return GZ_OK;
@@ -471,21 +493,75 @@ static const u8 *ns_key(const inode *n, int ns, u32 *len)
     return n->rname;
 }
 
-static u32 hash_bytes(u32 parent, const u8 *p, u32 n)
+/* Joliet readers (Windows, Linux) look names up case-insensitively and ignore
+ * trailing dots (Windows also spaces), so Joliet names are compared that way.
+ * Simple upper-casing of the Latin, Greek, Cyrillic and Armenian letters. */
+static u32 jfold(u32 c)
+{
+    if (c < 0x80) return c >= 'a' && c <= 'z' ? c - 32 : c;
+    if (c < 0x100) return c == 0xFF ? 0x178 : c == 0xB5 ? 0x39C : (c >= 0xE0 && c != 0xF7) ? c - 32 : c;
+    if (c < 0x180) {                               /* Latin Extended-A: case pairs */
+        if (c == 0x130 || c == 0x131 || c == 0x138 || c == 0x149 || c == 0x178) return c;
+        if (c == 0x17F) return 'S';
+        u32 odd_up = (c >= 0x139 && c <= 0x148) || c >= 0x179;
+        return (c & 1) != odd_up ? c - 1 : c;
+    }
+    if (c >= 0x386 && c < 0x400) {                 /* Greek */
+        if (c >= 0x3B1 && c <= 0x3CB) return c == 0x3C2 ? 0x3A3 : c - 32;
+        if (c == 0x3AC) return 0x386;
+        if (c >= 0x3AD && c <= 0x3AF) return c - 37;
+        if (c == 0x3CC) return 0x38C;
+        if (c == 0x3CD || c == 0x3CE) return c - 63;
+        return c;
+    }
+    if (c >= 0x400 && c < 0x530) {                 /* Cyrillic */
+        if (c >= 0x430 && c <= 0x44F) return c - 32;
+        if (c >= 0x450 && c <= 0x45F) return c - 80;
+        if ((c >= 0x460 && c <= 0x481) || (c >= 0x48A && c <= 0x4BF) || c >= 0x4D0) return c & ~1u;
+        if (c >= 0x4C1 && c <= 0x4CE) return (c & 1) ? c : c - 1;
+        return c == 0x4CF ? 0x4C0 : c;
+    }
+    if (c >= 0x561 && c <= 0x586) return c - 48;   /* Armenian */
+    if (c >= 0x1E00 && c <= 0x1EFF && (c < 0x1E96 || c > 0x1E9F)) return c & ~1u;   /* Latin Ext. Additional */
+    if (c >= 0xFF41 && c <= 0xFF5A) return c - 32; /* full-width Latin */
+    return c;
+}
+
+static u32 jtrim(const u8 *p, u32 kl)              /* units without trailing dots / spaces */
+{
+    u32 n = kl / 2;
+    while (n && (rd16(p + 2 * n - 2) == '.' || rd16(p + 2 * n - 2) == ' ')) n--;
+    return n;
+}
+
+static u32 key_hash(int ns, u32 parent, const u8 *p, u32 n)
 {
     u32 h = 2166136261u ^ (parent * 0x9E3779B1u);
-    for (u32 i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
+    if (ns == 1)
+        for (u32 i = 0, m = jtrim(p, n); i < m; i++) h = (h ^ jfold(rd16(p + 2 * i))) * 16777619u;
+    else
+        for (u32 i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
     return h ^ (h >> 15);
+}
+
+static int key_eq(int ns, const u8 *a, u32 al, const u8 *b, u32 bl)
+{
+    if (ns != 1) return al == bl && !__builtin_memcmp(a, b, al);
+    u32 n = jtrim(a, al);
+    if (n != jtrim(b, bl)) return 0;
+    for (u32 i = 0; i < n; i++)
+        if (jfold(rd16(a + 2 * i)) != jfold(rd16(b + 2 * i))) return 0;
+    return 1;
 }
 
 /* free slot for the key, or NULL when taken (*owner = the node holding it) */
 static u32 *set_slot(iso_w *w, int ns, u32 parent, const u8 *k, u32 kl, u32 *owner)
 {
-    u32 h = hash_bytes(parent, k, kl) & (w->hcap - 1);
+    u32 h = key_hash(ns, parent, k, kl) & (w->hcap - 1);
     for (u32 v; (v = w->ht[h]) != NONE; h = (h + 1) & (w->hcap - 1)) {
         u32 l;
         const u8 *q = ns_key(&w->nd[v], ns, &l);
-        if (w->nd[v].parent == parent && l == kl && !__builtin_memcmp(q, k, kl)) { *owner = v; return 0; }
+        if (w->nd[v].parent == parent && key_eq(ns, q, l, k, kl)) { *owner = v; return 0; }
     }
     return &w->ht[h];
 }
@@ -750,15 +826,14 @@ static void volume_label(iso_w *w)
         alnum += c != '_';
         w->vol_p[o++] = c;
     }
-    if (!alnum) {
+    if (!alnum) {                                  /* nothing left of it in d-characters */
         static const char def[] = "GOGITZIP";
         for (o = 0; def[o]; o++) w->vol_p[o] = (u8)def[o];
-        if (!n) { l = 0; }
     }
     while (o < 32) w->vol_p[o++] = ' ';
     u32 j = 0;
     if (l && n) {
-        for (; j < n && j < 16; j++) w->vol_j[j] = l[j] < 0x20 ? '_' : l[j];
+        for (; j < n && j < 16; j++) w->vol_j[j] = l[j] < 0x20 ? '_' : unit(l, n, j);
         if (j == 16 && n > 16 && is_hi(w->vol_j[15])) j--;
     } else {
         for (; j < 8; j++) w->vol_j[j] = w->vol_p[j];
@@ -813,10 +888,13 @@ static void sl_comp(iso_w *w, sl_state *st, u8 flags, const u8 *s, u32 n)
     sl_raw(w, st, flags, s, n);
 }
 
+/* Components of a target. Repeated '/' collapse; a trailing '/' is kept as an empty
+ * last component ("dir/" is stored as "dir" + "", which Linux, BSD and libarchive
+ * read back as "dir/"). */
 static void sl_build(iso_w *w, const u8 *t, u32 n)
 {
     sl_state st = { 0, 0 };
-    u32 i = 0;
+    u32 i = 0, comps = 0;
     if (n && t[0] == '/') sl_comp(w, &st, 8, 0, 0);
     while (i < n) {
         while (i < n && t[i] == '/') i++;
@@ -831,8 +909,10 @@ static void sl_build(iso_w *w, const u8 *t, u32 n)
                 sl_comp(w, &st, k + m < j ? 1 : 0, t + k, m);
                 k += m;
             }
+        comps++;
         i = j;
     }
+    if (comps && t[n - 1] == '/') sl_comp(w, &st, 0, 0, 0);
 }
 
 static const char er_id[] = "RRIP_1991A";
@@ -1245,15 +1325,28 @@ static int write_file(iso_w *w, inode *n)
     return r ? r : flush(w);
 }
 
+/* Empty regular files are opened and closed too, like the other writers do (the
+ * engine counts opened items and reports unreadable ones); nothing is read. */
+static int touch_file(iso_w *w, const inode *n)
+{
+    const gz_witem *it = &w->it[n->item];
+    u32 type = it->unix_mode & 0170000;
+    if (it->is_link || (type && type != 0100000) || !w->o->open_item) return GZ_OK;
+    gz_wsrc *src = 0;
+    int err = w->o->open_item(w->o->user, it, &src);
+    if (!err && src && w->o->close_item) w->o->close_item(w->o->user, it, src);
+    return err ? report(w, n->item, err) : GZ_OK;
+}
+
 static int write_data(iso_w *w)
 {
     progress(w);
     for (u32 i = 1; i < w->nn; i++) {
         inode *n = &w->nd[i];
-        if (n->is_dir || n->is_link || !n->size) continue;
+        if (n->is_dir || n->is_link) continue;
         if (cancelled(w)) return GZ_E_CANCEL;
-        int r = at_lba(w, n->lba);
-        if (r || (r = write_file(w, n))) return r;
+        int r = n->size ? at_lba(w, n->lba) : touch_file(w, n);
+        if (r || (n->size && (r = write_file(w, n)))) return r;
     }
     return at_lba(w, w->total);
 }

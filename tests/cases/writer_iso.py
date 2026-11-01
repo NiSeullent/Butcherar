@@ -3,17 +3,27 @@
 Images are made with `gzt c iso` and with the iso_wdrv driver (symlinks, failing
 items, cancel, labels, weird names, sparse multi-extent files), then checked by a
 structural validator written here (volume descriptors, path tables, record
-placement and order, identifiers, SUSP/CE, extents) and by the reference tools:
-xorriso (RR listing), isoinfo -R / -J / -l, 7z (Joliet names) and bsdtar (Rock
-Ridge names, modes, symlinks, mtimes). Contents are compared byte for byte.
+placement and order, identifiers, Joliet case-insensitive uniqueness, SUSP/CE,
+extents) and by the reference tools: xorriso (RR listing), isoinfo -R / -J / -l,
+isovfy, 7z x / l (Joliet names), bsdtar -x / -t (Rock Ridge names, modes, symlinks,
+mtimes), pycdlib when installed, and 고깃ZIP's own ISO reader. Contents are compared
+byte for byte.
+
+When qemu-system-x86_64, busybox, cpio and a distro kernel (/boot/vmlinuz-*, isofs and
+nls_utf8 modules) are installed, the images are also mounted by the real Linux isofs
+driver (Rock Ridge, Joliet and plain primary tree) in a throw-away VM; GZ_ISO_KERNEL=0
+turns that off.
 
 GZ_TEST_BIG=1 adds a 4.1 GiB multi-extent image (sparse, a few MB on disk).
+GZ_ISO_FUZZ=<n> sets the number of random item lists (default 30).
 """
-import os, re, sys, mmap, stat, time, struct, random, shutil, subprocess
+import os, re, sys, mmap, stat, time, struct, random, shutil, hashlib, subprocess
+from gztest import normalize
 
 SECT = 2048
 JMAX = 103
 EXT = 0xFFFFF800
+RRMAX = 253         # Linux isofs drops Rock Ridge names of 254 bytes and more
 JBAD = set('*/:;?\\')
 
 # ---------------------------------------------------------------- helpers
@@ -58,7 +68,7 @@ def jname(name, is_dir):
 
 def rrname(name, is_dir):
     b = name.encode("utf-8", "surrogatepass")
-    if len(b) <= 255:
+    if len(b) <= RRMAX:
         return name
     ext = ""
     if not is_dir:
@@ -69,14 +79,22 @@ def rrname(name, is_dir):
     eb = ext.encode()
     out = ""
     for ch in base:
-        if len((out + ch).encode()) + len(eb) > 255:
+        if len((out + ch).encode()) + len(eb) > RRMAX:
             break
         out += ch
     return out + ext
 
+def jfold_key(name):
+    """Joliet clash key: ASCII + Latin-1 case folded, trailing dots/spaces dropped
+    (a subset of the writer's folding, so every clash found here is a writer bug)"""
+    s = name.rstrip(". ")
+    return "".join(chr(ord(c) - 32) if "a" <= c <= "z" or ("\xe0" <= c <= "\xfe" and c != "\xf7") else c for c in s)
+
 def norm_link(t):
+    """symlink target as stored: repeated '/' collapse, a trailing '/' stays"""
     parts = [p for p in t.split("/") if p]
-    return ("/" if t.startswith("/") else "") + "/".join(parts)
+    s = ("/" if t.startswith("/") else "") + "/".join(parts)
+    return s + "/" if parts and t.endswith("/") else s
 
 def view(files, joliet):
     """files: {rel: bytes | None | ('link', target)} -> expected {path: same} in one name space"""
@@ -252,6 +270,8 @@ class Iso:
                         self.bad("records not sorted in %r: %r !< %r" % (path, prev, key))
                     prev = key
                     uk = (tuple(key[0]), tuple(key[1]))
+                    if jol:                       # what Windows / Linux Joliet lookups compare
+                        uk = jfold_key(r["id"].decode("utf-16-be", "surrogatepass"))
                     if uk in names:
                         self.bad("duplicate identifier %r in %r" % (r["id"], path))
                     names[uk] = 1
@@ -370,7 +390,7 @@ class Iso:
             area = self.m[loc * SECT + off:loc * SECT + off + ln]
 
     def rr_info(self, group, dir_end):
-        name, info, sl, cont = b"", {}, [], False
+        name, info, sl = b"", {}, []
         for k, g in enumerate(group):
             ents = self.susp(g["sua"], dir_end)
             if k:
@@ -397,7 +417,7 @@ class Iso:
         except UnicodeDecodeError:
             self.bad("NM is not UTF-8: %r" % name)
             nm = name.decode("utf-8", "replace")
-        if len(name) > 255 or "/" in nm or nm in (".", ".."):
+        if len(name) > RRMAX or "/" in nm or nm in (".", ".."):
             self.bad("bad RR name %r" % nm)
         if sl:
             info["target"] = self.sl_decode(sl)
@@ -609,6 +629,21 @@ def check_7z(t, arc, jol, label):
         probs.append("7z rc=%d/%d %s" % (r.returncode, rt.returncode, r.stdout.decode(errors="replace")[-300:]))
     probs += cmp_tree(read_full_tree(out) if os.path.isdir(out) else {}, jol)
     shutil.rmtree(out, ignore_errors=True)
+    # 7z l -slt: same names, folder flags and sizes
+    rl = t.sh(["7z", "l", "-slt", "-sccUTF-8", arc], check=False)
+    got, cur = {}, {}
+    for line in rl.stdout.decode("utf-8", "replace").split("----------", 1)[-1].splitlines() + [""]:
+        if not line.strip():
+            if "Path" in cur:
+                got[cur["Path"]] = (cur.get("Folder") == "+", int(cur.get("Size") or 0))
+            cur = {}
+        elif " = " in line:
+            k, v = line.split(" = ", 1)
+            cur[k] = v
+    want = {p: (v is None, len(v) if isinstance(v, bytes) else 0) for p, v in jol.items()}
+    if rl.returncode or got != want:
+        probs.append("7z l: rc=%d missing %r extra %r" % (rl.returncode, sorted(set(want) - set(got))[:2],
+                                                         sorted(set(got) - set(want))[:2]))
     return t.record(not probs, label + " 7z (Joliet)", "; ".join(probs[:5]) or "%d entries" % len(jol))
 
 def check_bsdtar(t, arc, rr, label, modes=None, mtimes=None):
@@ -620,6 +655,12 @@ def check_bsdtar(t, arc, rr, label, modes=None, mtimes=None):
     if r.returncode:
         probs.append("bsdtar rc=%d %s" % (r.returncode, r.stderr.decode(errors="replace")[-300:]))
     probs += cmp_tree(read_full_tree(out), rr)
+    rl = t.sh(["bsdtar", "-tf", arc], check=False, env=dict(os.environ, LC_ALL="C.UTF-8"))   # listing: same names
+    unesc = lambda m: b"\\" if m.group(1) == b"\\" else bytes([int(m.group(1), 8)])   # bsdtar escapes \ and \ooo
+    names = {re.sub(rb"\\(\\|[0-7]{3})", unesc, l).decode("utf-8", "surrogateescape")
+             for l in rl.stdout.splitlines()} - {"."}
+    if rl.returncode or names != set(rr):
+        probs.append("bsdtar -t: missing %r extra %r" % (sorted(set(rr) - names)[:2], sorted(names - set(rr))[:2]))
     for p, m in (modes or {}).items():
         fp = os.path.join(out, p)
         if os.path.lexists(fp) and not os.path.islink(fp) and (os.lstat(fp).st_mode & 0o7777) != (m & 0o7777):
@@ -631,7 +672,7 @@ def check_bsdtar(t, arc, rr, label, modes=None, mtimes=None):
     shutil.rmtree(out, ignore_errors=True)
     return t.record(not probs, label + " bsdtar (RR)", "; ".join(probs[:5]) or "%d entries" % len(rr))
 
-def check_all(t, arc, files, label, modes=None, mtimes=None, rr=None, jol=None, tools=True):
+def check_all(t, arc, files, label, modes=None, mtimes=None, rr=None, jol=None, tools=True, isovfy=True):
     rr = view(files, False) if rr is None else rr
     jol = view(files, True) if jol is None else jol
     iso = iso_check(t, arc, label)
@@ -640,38 +681,253 @@ def check_all(t, arc, files, label, modes=None, mtimes=None, rr=None, jol=None, 
         check_isoinfo(t, arc, rr, files, label, modes)
         check_7z(t, arc, jol, label)
         check_bsdtar(t, arc, rr, label, modes, mtimes)
-    own_reader(t, arc, rr, jol, label)
+        if isovfy:                                  # isovfy overflows on targets > ~600 bytes
+            check_isovfy(t, arc, label)
+        check_pycdlib(t, arc, rr, jol, label)
+        KERNEL.append((label, arc, rr, jol, modes, mtimes))
+    own_reader(t, arc, rr, label)
     return iso
 
-def own_reader(t, arc, rr, jol, label):
-    """Once 고깃ZIP has an ISO reader, its extraction must agree (RR or Joliet names)."""
+# ---------------------------------------------------------------- Linux kernel (isofs)
+
+KERNEL = []         # images checked with the real Linux driver: (label, arc, rr, jol, modes, mtimes)
+
+class Digest(str):
+    """expected file content as "size:md5" (for files too big to hold)"""
+
+KINIT = r"""#!/bin/busybox sh
+/bin/busybox mkdir -p /proc /dev /mnt
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t devtmpfs dev /dev
+insmod /isofs.ko
+insmod /nls_utf8.ko
+dump() {
+  cd /mnt
+  find . -exec stat -c 'S|%f|%Y|%s|%n' {} +
+  find . -type f -exec md5sum {} + | sed 's/^/M|/'
+  find . -type l | while IFS= read -r f; do echo "L|$(readlink "$f")|$f"; done
+  cd /
+}
+for d in /dev/vd?; do
+  for m in rr:ro joliet:ro,norock,iocharset=utf8 plain:ro,norock,nojoliet; do
+    echo "@@BEGIN ${d#/dev/} ${m%%:*}"
+    if mount -t iso9660 -o ${m#*:} $d /mnt; then dump; umount /mnt; else echo "@@MOUNTFAIL"; fi
+    echo "@@END"
+  done
+done
+dmesg | grep -i -E "isofs|rock|iso9660|joliet" | sed 's/^/@@DMESG /'
+echo "@@DONE"
+poweroff -f
+"""
+
+def kernel_env(t):
+    """(vmlinuz, isofs.ko.*, nls_utf8.ko.*) of an installed x86-64 distro kernel, or None"""
+    if not sys.platform.startswith("linux") or os.uname().machine != "x86_64":
+        return None
+    if not (shutil.which("qemu-system-x86_64") and shutil.which("busybox") and shutil.which("cpio")):
+        return None
+    for ver in sorted(os.listdir("/lib/modules"), reverse=True) if os.path.isdir("/lib/modules") else []:
+        kern = "/boot/vmlinuz-" + ver
+        mods = []
+        for sub, name in (("fs/isofs", "isofs.ko"), ("fs/nls", "nls_utf8.ko")):
+            d = os.path.join("/lib/modules", ver, "kernel", sub)
+            hit = [os.path.join(d, f) for f in (os.listdir(d) if os.path.isdir(d) else []) if f.startswith(name)]
+            mods += hit[:1]
+        if os.access(kern, os.R_OK) and len(mods) == 2:
+            return kern, mods[0], mods[1]
+    return None
+
+def kernel_mount(t, env, isos):
+    """Boot the kernel under QEMU with each image as a virtio disk; parse the dumps
+    {(disk index, mode): {path: (kind, perm, mtime, info)}} (None: mount failed)."""
+    kern, isofs, nls = env
+    root = t.path("kinit")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(os.path.join(root, "bin"))
+    shutil.copy(shutil.which("busybox"), os.path.join(root, "bin", "busybox"))
+    for src, dst in ((isofs, "isofs.ko"), (nls, "nls_utf8.ko")):
+        data = open(src, "rb").read()
+        if src.endswith(".zst"):
+            data = t.sh(["zstd", "-dc", src]).stdout
+        elif src.endswith(".xz"):
+            data = t.sh(["xz", "-dc", src]).stdout
+        open(os.path.join(root, dst), "wb").write(data)
+    with open(os.path.join(root, "init"), "w") as f:
+        f.write(KINIT)
+    os.chmod(os.path.join(root, "init"), 0o755)
+    names = subprocess.run(["find", "."], cwd=root, capture_output=True).stdout
+    initrd = t.path("kinit.cpio")
+    with open(initrd, "wb") as f:
+        subprocess.run(["cpio", "-o", "-H", "newc", "--quiet"], cwd=root, input=names, stdout=f, check=True)
+    cmd = ["qemu-system-x86_64", "-m", "768", "-nographic", "-no-reboot", "-net", "none", "-kernel", kern, "-initrd", initrd,
+           "-append", "console=ttyS0 quiet loglevel=1 panic=-1 rdinit=/init"]
+    for arc in isos:
+        cmd += ["-drive", "file=%s,format=raw,if=virtio,readonly=on" % arc]
+    r = subprocess.run(cmd, capture_output=True, timeout=900, stdin=subprocess.DEVNULL)
+    out, cur, res, dm = r.stdout.decode("utf-8", "surrogateescape").replace("\r", ""), None, {}, []
+    for line in out.split("\n"):
+        if line[:2] not in ("S|", "M|", "L|") and "@@" in line:
+            line = line[line.index("@@"):]          # console reset sequences before the first line
+        if line.startswith("@@BEGIN "):
+            _, disk, mode = line.split()
+            cur = res.setdefault((ord(disk[2]) - ord("a"), mode), {})
+        elif line == "@@MOUNTFAIL" and cur is not None:
+            res[[k for k, v in res.items() if v is cur][0]] = None
+            cur = None
+        elif line == "@@END":
+            cur = None
+        elif line.startswith("@@DMESG "):
+            dm.append(line[8:])
+        elif cur is not None and line.startswith("S|"):
+            _, mode, mt, size, path = line.split("|", 4)
+            m = int(mode, 16)
+            kind = "D" if stat.S_ISDIR(m) else "L" if stat.S_ISLNK(m) else "F"
+            if path != ".":
+                cur[path[2:]] = [kind, stat.S_IMODE(m), int(mt), size + ":" if kind == "F" else ""]
+        elif cur is not None and line.startswith("M|") and line[34:38] == "  ./" and line[38:] in cur:
+            cur[line[38:]][3] += line[2:34]
+        elif cur is not None and line.startswith("L|"):
+            tgt, path = line[2:].rsplit("|./", 1)
+            if path in cur:
+                cur[path][3] = tgt
+    return res, "@@DONE" in out, dm
+
+def case_kernel(t):
+    """Mount every image checked above with the Linux isofs driver: Rock Ridge (names,
+    modes, mtimes, symlinks, contents), Joliet (norock) and the plain primary tree."""
+    env = kernel_env(t) if os.environ.get("GZ_ISO_KERNEL", "1") != "0" else None
+    if not env:
+        return t.record(True, "linux isofs", "skipped: qemu-system-x86_64 / busybox / cpio / kernel modules "
+                        "not available (or GZ_ISO_KERNEL=0)")
+    imgs = list(KERNEL)
+    t0 = time.time()
+    try:
+        res, done, dm = kernel_mount(t, env, [arc for _, arc, *_ in imgs])
+    except subprocess.TimeoutExpired:
+        return t.record(False, "linux isofs", "QEMU timed out")
+    if not res:                     # no virtio disk seen (e.g. virtio_blk is a module there): no verdict
+        return t.record(True, "linux isofs", "skipped: %s did not reach the disks" % os.path.basename(env[0]))
+    if not t.record(done, "linux isofs boot", "%s, %d images, %.0fs" % (os.path.basename(env[0]), len(imgs), time.time() - t0)):
+        return
+    md5 = lambda b: b if isinstance(b, Digest) else "%d:%s" % (len(b), hashlib.md5(b).hexdigest())
+    for i, (label, arc, rr, jol, modes, mtimes) in enumerate(imgs):
+        for mode, exp in (("rr", rr), ("joliet", jol)):
+            if exp is None:
+                continue
+            got, probs = res.get((i, mode)), []
+            if got is None:
+                t.record(False, "%s linux %s" % (label, mode), "mount failed")
+                continue
+            if mode == "joliet":         # Linux drops trailing dots of Joliet names
+                exp = {"/".join(c.rstrip(".") or c for c in p.split("/")): v for p, v in exp.items()}
+            for p, v in exp.items():
+                g = got.get(p)
+                if g is None:
+                    probs.append("missing %r" % p[:50])
+                elif v is None:
+                    if g[0] != "D":
+                        probs.append("not a dir %r" % p[:50])
+                elif isinstance(v, tuple):
+                    if g[0] != "L" or g[3] != norm_link(v[1]):
+                        probs.append("link %r -> %r" % (p[:40], g[3][:40]))
+                elif g[0] != "F" or g[3] != md5(v):
+                    probs.append("data %r" % p[:50])
+                if g and mode == "rr" and modes and p in modes and not isinstance(v, tuple) and \
+                        g[1] != stat.S_IMODE(modes[p]):
+                    probs.append("mode %r %o" % (p[:40], g[1]))
+                if g and mtimes and p in mtimes and g[2] != mtimes[p]:
+                    probs.append("mtime %r %d != %d" % (p[:40], g[2], mtimes[p]))
+            extra = set(got) - set(exp)
+            if extra:
+                probs.append("extra %r" % sorted(extra)[:3])
+            t.record(not probs, "%s linux %s" % (label, mode), "; ".join(probs[:4]) or "%d entries" % len(got))
+        plain = res.get((i, "plain"))          # 8.3-ish names: same entries and file contents
+        want = sorted(md5(v) for v in rr.values() if isinstance(v, (bytes, Digest)) and not md5(v).startswith("0:"))
+        have = sorted(g[3] for g in (plain or {}).values() if g[0] == "F" and not g[3].startswith("0:"))
+        t.record(plain is not None and len(plain) == len(rr) and have == want, "%s linux primary" % label,
+                 "%d entries (want %d)" % (len(plain or {}), len(rr)))
+    t.record(not [l for l in dm if re.search(r"(?i)corrupt|error|bad|warn", l)], "linux isofs dmesg", "; ".join(dm[:3]))
+
+def own_reader(t, arc, rr, label):
+    """고깃ZIP's own ISO reader (src/fmt/iso.c) must show the Rock Ridge tree (names as
+    the core normalizes them: '\\' is a separator there), link targets, and the same bytes."""
     r, typ, rows = t.listing(arc)
     if r.returncode or not typ or "ISO" not in typ.upper():
-        return
-    want = {}
-    for space in (rr, jol):
-        for p, v in space.items():
-            if isinstance(v, bytes):
-                want.setdefault(p, v)
+        return t.record(False, label + " own reader", "not opened as ISO: rc=%d type=%r" % (r.returncode, typ))
+    lst = {}
+    for row in rows:
+        nm, tgt = row["name"], None
+        if stat.S_ISLNK(row["mode"]) and " -> " in nm:
+            nm, tgt = nm.split(" -> ", 1)
+        lst[nm] = (row, tgt)
     r2, rows2, out = t.extract(arc)
-    probs = []
-    got = {}
+    data = {}
     for i, (st, isdir, size, name) in rows2.items():
-        if not isdir and st == 0 and os.path.exists(os.path.join(out, "%d.bin" % i)):
-            got[name] = open(os.path.join(out, "%d.bin" % i), "rb").read()
-    for p, v in rr.items():
-        if isinstance(v, bytes):
-            alt = [k for k in (p,) if k in got] + [k for k, jv in jol.items() if jv == v and k in got]
-            if not any(got[k] == v for k in alt):
-                probs.append("own reader: %s" % p[:60])
-    t.record(not probs, label + " own reader", "; ".join(probs[:4]))
+        fp = os.path.join(out, "%d.bin" % i)
+        if not isdir and st == 0 and os.path.exists(fp):
+            data[name] = open(fp, "rb").read()
+    probs = [] if r2.returncode == 0 else ["gzt x rc=%d" % r2.returncode]
+    exp = {normalize(p): v for p, v in rr.items()}
+    for p, v in exp.items():
+        if p not in lst:
+            probs.append("missing %r" % p[:60])
+            continue
+        row, tgt = lst[p]
+        if v is None:
+            if not row["is_dir"]:
+                probs.append("not a dir %r" % p[:60])
+        elif isinstance(v, tuple):
+            if tgt != norm_link(v[1]):
+                probs.append("link %r -> %r" % (p[:40], (tgt or "")[:40]))
+        elif data.get(p) != v:
+            probs.append("data %r" % p[:60])
+    extra = set(lst) - set(exp)
+    if extra:
+        probs.append("extra %r" % sorted(extra)[:3])
+    shutil.rmtree(out, ignore_errors=True)
+    return t.record(not probs, label + " own reader", "; ".join(probs[:4]) or "%d entries" % len(lst))
+
+def check_isovfy(t, arc, label):
+    """isovfy (genisoimage): path tables, directory records, RR fields of the primary tree"""
+    r = t.sh(["isovfy", "-i", arc], check=False)
+    out = (r.stdout + r.stderr).decode("utf-8", "replace").strip()
+    ok = r.returncode == 0 and out.endswith("No errors found")
+    return t.record(ok, label + " isovfy", "" if ok else out[-300:])
+
+def check_pycdlib(t, arc, rr, jol, label):
+    """pycdlib (strict pure-Python ISO parser) when installed: all three trees load and
+    hold the expected names."""
+    try:
+        import pycdlib
+    except ImportError:
+        return True
+    probs = []
+    iso = pycdlib.PyCdlib()
+    try:
+        iso.open(arc)
+        for facade, exp in (("rr_path", rr), ("joliet_path", jol)):
+            got = set()
+            for root, dirs, files in iso.walk(**{facade: "/"}):
+                for nm in dirs + files:
+                    got.add((root.rstrip("/") + "/" + nm).lstrip("/"))
+            if got != set(exp):
+                probs.append("%s: missing %r extra %r" % (facade, sorted(set(exp) - got)[:2], sorted(got - set(exp))[:2]))
+        n = sum(len(d) + len(f) for _, d, f in iso.walk(iso_path="/"))
+        if n != len(rr):
+            probs.append("iso9660 tree has %d entries, want %d" % (n, len(rr)))
+        iso.close()
+    except Exception as e:
+        probs.append("exception %r" % e)
+    return t.record(not probs, label + " pycdlib", "; ".join(probs[:3]))
+
+# tests/gzt.c does not free its item list: keep LeakSanitizer for the driver runs only
+NOLEAK = {"ASAN_OPTIONS": (os.environ.get("ASAN_OPTIONS", "") + ":detect_leaks=0").lstrip(":")}
 
 def gzt_create(t, arc, src, rels, label):
     if os.path.exists(arc):
         os.remove(arc)
-    # tests/gzt.c does not free its item list: keep LeakSanitizer for the driver runs only
-    asan = (os.environ.get("ASAN_OPTIONS", "") + ":detect_leaks=0").lstrip(":")
-    r = t.run_gzt(["c", "iso", arc, "0", "-", src] + rels, {"ASAN_OPTIONS": asan}, timeout=600)
+    r = t.run_gzt(["c", "iso", arc, "0", "-", src] + rels, NOLEAK, timeout=600)
     ok = r.returncode == 0 and b"CREATE 0" in r.stdout and b"Sanitizer" not in r.stderr
     t.record(ok, label + " create", "" if ok else (r.stdout + r.stderr).decode(errors="replace")[-300:])
     return ok
@@ -687,9 +943,11 @@ def drv_run(t, drv, arc, lines, timeout=900):
     errs = [tuple(map(int, l.split()[1:3])) for l in out.splitlines() if l.startswith("ERR ")]
     m = re.search(r"CREATE (-?\d+) (\d+)", out)
     pm = re.search(r"PROG (\d+) (\d+) (\d+) (\d)", out)
+    om = re.search(r"OPENS (\d+) CLOSES (\d+)", out)
     san = b"Sanitizer" in r.stderr or b"runtime error" in r.stderr
     res = dict(rc=(int(m.group(1)) if m else None) if not san else "sanitizer", written=int(m.group(2)) if m else 0, errs=errs,
-               prog=tuple(map(int, pm.groups())) if pm else None, out=out, stderr=r.stderr.decode(errors="replace"))
+               prog=tuple(map(int, pm.groups())) if pm else None, out=out, stderr=r.stderr.decode(errors="replace"),
+               opens=tuple(map(int, om.groups())) if om else None)
     return res
 
 def vline(name, size, mode="0644", mtime=1600000000, attr=0):
@@ -760,8 +1018,10 @@ def case_main_tree(t):
     full["D" * 200] = None
     modes = {rel: os.lstat(os.path.join(src, rel)).st_mode for rel in files}
     mtimes = {rel: int(os.lstat(os.path.join(src, rel)).st_mtime) for rel in files if files[rel] is not None}
+    # Joliet lookups ignore case: items come sorted, so UPPER.TXT keeps its name
+    jol = {{"Upper.txt": "Upper~1.txt", "upper.txt": "upper~2.txt"}.get(k, k): v for k, v in view(full, True).items()}
     iso = check_all(t, arc, full, "main", modes={view({k: 1}, False).popitem()[0]: m for k, m in modes.items()},
-                    mtimes={view({k: 1}, False).popitem()[0]: m for k, m in mtimes.items()})
+                    mtimes={view({k: 1}, False).popitem()[0]: m for k, m in mtimes.items()}, jol=jol)
     if iso:
         t.record(iso.label_p == "GOGITZIP" and iso.label_j == "GOGITZIP", "main default label",
                  "%r %r" % (iso.label_p, iso.label_j))
@@ -830,7 +1090,7 @@ def case_symlinks(t, drv):
     rr = view(files, False)
     rr["links/verylong"] = ("link", long_t[:1023])       # libisofs refuses >= 1024
     rr["links/big4k"] = ("link", links["big4k"][:1023])
-    iso = check_all(t, arc, files, "symlinks", rr=rr)
+    iso = check_all(t, arc, files, "symlinks", rr=rr, isovfy=False)
     if iso:
         bad = [p for p, v in rr.items() if isinstance(v, tuple) and iso.rr.get(p, {}).get("target") != norm_link(v[1])]
         t.record(not bad, "symlinks SL decode", "%r" % bad[:3])
@@ -884,6 +1144,11 @@ def case_names(t, drv):
     add("t3000.txt", 26, mtime=32503680000)
     add("setuid", 27, mode="04755")
     add("derive_mode", 28, mode="0")
+    # Joliet lookups (Windows, Linux) ignore case and trailing dots/spaces; Rock Ridge does not
+    ci = ["Readme.TXT", "README.txt", "readme.txt", "ÄÖÜ.txt", "äöü.txt", "Привет.txt", "привет.txt",
+          "trail.", "trail", "sp ", "sp", "ΣΊΣΥΦΟΣ", "σίσυφος"]
+    for i, nm in enumerate(ci):
+        add("ci/" + nm, 40 + i)
     arc = t.path("names.iso")
     t0 = time.time()
     res = drv_run(t, drv, arc, lines)
@@ -909,7 +1174,13 @@ def case_names(t, drv):
              "names modes")
     t.record("hidden.txt" in iso.hidden and len(iso.hidden) == 1, "names hidden flag (Joliet)", "%r" % iso.hidden)
     t.record(len([k for k in rr if k.startswith("모음/")]) == 1500, "names 1500 same-primary files")
+    jci = [k[3:] for k in iso.jol if k.startswith("ci/")]
+    t.record(all("ci/" + nm in rr for nm in ci) and len(jci) == len(ci) and
+             len({jfold_key(k).upper() for k in jci}) == len(ci), "names Joliet case-insensitive", "%r" % sorted(jci))
     d1850 = rr["t1850.txt"]["date"]                          # libarchive clamps < 1901 itself
+    kexp = lambda tree: {k: None if v["dir"] else pat_data(v["size"]) for k, v in tree.items()}
+    KERNEL.append(("names", arc, kexp(rr), kexp(iso.jol), {k: v["mode"] for k, v in rr.items()},
+                   {"t1969.txt": -100, "t2100.txt": 4102444800, "t3000.txt": 5869583999, "setuid": 1600000000}))
     iso.close()
     # contents through both readers (names as stored)
     out = t.path("names_bsdtar")
@@ -937,13 +1208,14 @@ def case_names(t, drv):
     shutil.rmtree(out, ignore_errors=True)
     rx = t.sh(["xorriso", "-indev", arc, "-find", "/", "-exec", "lsdl"], check=False)
     t.record(rx.returncode == 0 and not re.search(rb"WARNING|FAILURE|SORRY", rx.stderr), "names xorriso")
+    check_isovfy(t, arc, "names")
     t.record(True, "names timing", "%.2fs for %d items" % (dt, len(lines)))
 
 def case_rr_long(t, drv):
-    """Names over 255 UTF-8 bytes: Rock Ridge shortens them (keeping the extension)
+    """Names over 253 UTF-8 bytes: Rock Ridge shortens them (keeping the extension)
     and numbers the clashes. Their Joliet names (103 Hangul = 309 bytes) cannot be
     created on Linux, so 7z is not used here."""
-    lines, names = [], []
+    lines = []
     for i in range(4):
         nm = "rr/" + "한" * 100 + "%d.txt" % i
         lines.append(vline(nm, 300 + i))
@@ -957,19 +1229,21 @@ def case_rr_long(t, drv):
     if not iso:
         return
     rl = sorted(k for k in iso.rr if k.startswith("rr/") and not iso.rr[k]["dir"])
-    t.record(len(rl) == 5 and all(len(k[3:].encode()) <= 255 for k in rl), "rr long truncation",
+    t.record(len(rl) == 5 and all(len(k[3:].encode()) <= RRMAX for k in rl), "rr long truncation",
              "%r" % [len(k[3:].encode()) for k in rl])
     t.record(sum(k.endswith(".txt") for k in rl) == 4 and sum("~" in k for k in rl) == 3, "rr long clashes numbered")
     t.record(any(k.endswith(".verylongextension_kept_whole") for k in rl), "rr long extension kept")
     rs = sorted(v["size"] for k, v in iso.rr.items() if k.startswith("rr/") and not v["dir"])
     t.record(rs == [300, 301, 302, 303, 400], "rr long sizes", "%r" % rs)
     rd = [k for k in iso.rr if iso.rr[k]["dir"] and k.startswith("rr/")]
-    t.record(len(rd) == 1 and len(rd[0][3:].encode()) == 255, "rr long directory name", "%r" % [len(k) for k in rd])
+    t.record(len(rd) == 1 and len(rd[0][3:].encode()) == RRMAX // 3 * 3, "rr long directory name",
+             "%r" % [len(k[3:].encode()) for k in rd])
     exp = {k: pat_data(iso.rr[k]["size"]) for k in rl}
     exp.update({"rr": None, rd[0]: None} if rd else {})
     iso.close()
     check_bsdtar(t, arc, exp, "rr long")
     check_xorriso(t, arc, exp, "rr long")
+    KERNEL.append(("rr long", arc, exp, None, None, None))
 
 def case_errors(t, drv):
     base = [vline("ok1.bin", 5000),
@@ -983,6 +1257,7 @@ def case_errors(t, drv):
     ok = res["rc"] == 0 and res["errs"] == [(1, 1), (2, 9), (3, 1)]
     t.record(ok, "errors skip: reported", "rc=%r errs=%r" % (res["rc"], res["errs"]))
     t.record(res["prog"] is not None and res["prog"][1:] == (total, total, 1), "errors progress", "%r" % (res["prog"],))
+    t.record(res["opens"] == (5, 4), "errors open/close pairs", "%r" % (res["opens"],))   # fail_open is not closed
     exp = {"ok1.bin": pat_data(5000), "ok2.bin": pat_data(7000), "fail_open.bin": bytes(10000),
            "short.bin": pat_data(300000)[:1000] + bytes(299000),
            "readerr.bin": pat_data(2000000)[:1100000] + bytes(900000)}
@@ -998,6 +1273,12 @@ def case_errors(t, drv):
     res = drv_run(t, drv, arc, ["opt\tcancel\t%d" % (2 << 20), vline("big.bin", 8 << 20), vline("after.bin", 10)])
     t.record(res["rc"] == 8 and res["written"] < (5 << 20), "cancel", "rc=%r written=%d" % (res["rc"], res["written"]))
 
+def case_roundtrip(t):
+    """the shared helper: gzt c iso, 7z extraction (Joliet) and 고깃ZIP's own extraction"""
+    files = {"a.txt": b"alpha\n", "dir": None, "dir/b.bin": blob(5000, 11), "dir/빈 파일": b"",
+             "한글 폴더": None, "한글 폴더/문서.hwp": blob(40000, 12)}
+    t.check_roundtrip("iso", files, level=0, label="roundtrip gzt c iso", env=NOLEAK)
+
 def case_empty(t, drv):
     arc = t.path("empty.iso")
     res = drv_run(t, drv, arc, ["opt\tlabel\tEMPTY"])
@@ -1005,6 +1286,7 @@ def case_empty(t, drv):
         check_all(t, arc, {}, "empty image")
     arc = t.path("emptydirs.iso")
     res = drv_run(t, drv, arc, [dline("a"), dline("a/b"), dline("c"), vline("c/zero", 0)])
+    t.record(res["opens"] == (1, 1), "empty file opened and closed", "%r" % (res["opens"],))
     if t.record(res["rc"] == 0, "empty dirs create", "" if res["rc"] == 0 else res["out"][-200:] + res["stderr"][-300:]):
         check_all(t, arc, {"a": None, "a/b": None, "c": None, "c/zero": b""}, "empty dirs")
 
@@ -1068,7 +1350,15 @@ def case_big(t, drv):
     stream_check(t, ["bsdtar", "-xOf", arc, "big.bin"], size, "big bsdtar data")
     r = t.sh(["bsdtar", "-xOf", arc, "d/after.bin"], check=False)
     t.record(r.stdout == pat_data(3000), "big file after multi-extent")
-    os.remove(arc)
+    if kernel_env(t):                                        # the Linux driver reads it in run()
+        h = hashlib.md5()
+        for a in range(0, size, 1 << 24):
+            h.update(pat_chunk(a, min(size, a + (1 << 24)), size))
+        exp = {"big.bin": Digest("%d:%s" % (size, h.hexdigest())), "small.txt": pat_data(1000), "d": None,
+               "d/after.bin": pat_data(3000)}
+        KERNEL.append(("big", arc, exp, exp, None, None))
+    else:
+        os.remove(arc)
 
 def rand_units(rnd, n):
     out = []
@@ -1152,6 +1442,7 @@ def run(t):
     t.need("xorriso", "isoinfo", "7z", "bsdtar")
     drv = t.build_driver("tests/drivers/iso_wdrv.c")
     case_main_tree(t)
+    case_roundtrip(t)
     case_label(t, drv)
     case_symlinks(t, drv)
     case_names(t, drv)
@@ -1163,3 +1454,6 @@ def run(t):
     case_fuzz(t, drv, int(os.environ.get("GZ_ISO_FUZZ", "30")))
     if os.environ.get("GZ_TEST_BIG"):
         case_big(t, drv)
+    case_kernel(t)
+    if os.path.exists(t.path("big.iso")):
+        os.remove(t.path("big.iso"))

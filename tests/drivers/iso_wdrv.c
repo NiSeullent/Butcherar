@@ -17,8 +17,8 @@
  *   e <mode> <mtime> <attr> <size> <name>              open_item fails (GZ_E_IO)
  *   r <mode> <mtime> <attr> <size> <failat> <name>     read fails after failat bytes
  * mode is octal (0 = derive), mtime Unix seconds (-1 = unknown).
- * Prints "ERR <idx> <code>" per on_error call, "PROG <calls> <done> <total> <monotonic>"
- * and "CREATE <rc>".
+ * Prints "ERR <idx> <code>" per on_error call, "PROG <calls> <done> <total> <monotonic>",
+ * "OPENS <open_item calls> CLOSES <close_item calls>" and "CREATE <rc> <bytes>".
  */
 #include "arc.h"
 #include "cpu.h"
@@ -86,10 +86,12 @@ static int src_read(gz_wsrc *w, u8 *buf, u32 cap, u32 *got)
     return GZ_OK;
 }
 
+static int g_opens, g_closes;
 static int open_item(void *user, const gz_witem *it, gz_wsrc **src)
 {
     (void)user;
     spec_item *s = (spec_item *)it->user;
+    g_opens++;
     if (s->kind == 'e') return GZ_E_IO;
     drv_src *d = (drv_src *)calloc(1, sizeof *d);
     d->s = s;
@@ -102,7 +104,6 @@ static int open_item(void *user, const gz_witem *it, gz_wsrc **src)
     return GZ_OK;
 }
 
-static int g_closes;
 static void close_item(void *user, const gz_witem *it, gz_wsrc *src)
 {
     (void)user; (void)it;
@@ -268,6 +269,7 @@ int main(int argc, char **argv)
     if (ftruncate(ot.fd, (off_t)ot.end)) r = r ? r : GZ_E_IO;
     close(ot.fd);
     printf("PROG %ld %llu %llu %d\n", g_prog_calls, g_last_done, g_total, g_monotonic);
+    printf("OPENS %d CLOSES %d\n", g_opens, g_closes);
     printf("CREATE %d %llu\n", r, (unsigned long long)k.pos);
     for (u32 i = 0; i < n; i++) {                  /* leak-free, so LeakSanitizer checks the writer */
         spec_item *s = (spec_item *)it[i].user;
