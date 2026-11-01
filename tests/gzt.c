@@ -93,7 +93,7 @@ static int open_arc(const char *path, int cp, gz_src **ps, gz_archive **pa, gz_c
     if (getenv("GZ_NO_DESCEND")) oo.flags |= GZ_OPEN_NO_DESCEND;
     int r = gz_arc_open(pa, src, &oo, c);
     free(wname);
-    if (r) { printf("OPEN_ERROR %d\n", r); gz_src_free(src); return 1; }
+    if (r) { printf("OPEN_ERROR %d\n", r); gz_src_free(src); gz_ctx_free(c); return 1; }
     *ps = src;
     return 0;
 }
