@@ -10,7 +10,7 @@ create fixtures in its own work directory and check the native driver (gzt):
     t.check_roundtrip("zip", files)        # gzt c, then 7z t + our own extraction
     t.skip("reason")                       # nothing to test (tool missing)
 """
-import os, shutil, subprocess, unicodedata, hashlib
+import os, sys, shutil, subprocess, unicodedata, hashlib
 
 def normalize(name):
     """What 고깃ZIP shows for a raw entry name."""
@@ -120,6 +120,24 @@ class T:
                                  csize=int(parts[3]), method=parts[4], mode=int(parts[5], 8),
                                  name=parts[6]))
         return r, typ, rows
+
+    def build_driver(self, src, name=None, extra=()):
+        """Compile a C test driver (e.g. tests/drivers/foo.c) against the host core objects
+        (build/host/**/*.o, built by `make build/gzt` with the same HOST_CFLAGS). Returns its path."""
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        bdir = os.path.dirname(self.gzt)
+        objs = []
+        for dp, dns, fns in os.walk(os.path.join(bdir, "host")):
+            objs += [os.path.join(dp, f) for f in fns if f.endswith(".o")]
+        out = os.path.join(self.work, name or os.path.splitext(os.path.basename(src))[0])
+        flags = os.environ.get("HOST_CFLAGS", "-O2 -g").split()
+        inc = ["-I" + os.path.join(root, d) for d in ("src/core", "src/codec", "src/fmt", "src/posix", "src/app")]
+        cmd = [os.environ.get("HOSTCC", "cc"), "-std=gnu11", "-pthread"] + flags + inc + \
+              ["-o", out, os.path.join(root, src)] + sorted(objs) + list(extra) + ["-pthread"]
+        if sys.platform == "darwin":
+            cmd.append("-liconv")
+        self.sh(cmd)
+        return out
 
     # ---------- checks ----------
     def check_extract(self, arc, expected, pw=None, cp=None, acp=None, label=None, tier=None,

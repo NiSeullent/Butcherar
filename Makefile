@@ -127,7 +127,11 @@ $(B)/test_inflate: tests/test_inflate.c $(ICORE) $(HDRS)
 
 test: $(B)/test_inflate $(B)/gzt
 	$(B)/test_inflate
-	python3 tests/run_tests.py --gzt $(B)/gzt --work $(B)/testwork
+	HOST_CFLAGS="$(HOST_CFLAGS)" HOSTCC="$(HOSTCC)" python3 tests/run_tests.py --gzt $(B)/gzt --work $(B)/testwork $(TESTARGS)
+
+# rebuild host objects (e.g. after switching HOST_CFLAGS to sanitizers)
+clean-host:
+	rm -rf $(B)/host $(B)/gzt $(B)/test_inflate
 
 assets:
 	python3 tools/gen_assets.py
@@ -135,4 +139,4 @@ assets:
 clean:
 	rm -rf $(B)
 
-.PHONY: all win test assets clean
+.PHONY: all win test assets clean clean-host

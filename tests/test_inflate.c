@@ -5,9 +5,9 @@
  *   - corrupt / truncated streams must fail cleanly (run under ASan)
  *   - decodes raw Deflate64 streams given on the command line
  */
-#include "../src/core/inflate.h"
-#include "../src/core/crc32.h"
-#include "../src/core/cpu.h"
+#include "inflate.h"
+#include "crc32.h"
+#include "cpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
