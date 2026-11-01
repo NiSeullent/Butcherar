@@ -245,7 +245,7 @@ struct gz_job {
     volatile LONG wait_ms;    /* time spent waiting for the user */
     int finished, result;
     HANDLE thread;
-    u8 zone[1024];            /* archive's Zone.Identifier (Mark-of-the-Web) */
+    u8 *zone;                 /* archive's Zone.Identifier (Mark-of-the-Web), heap */
     DWORD zone_n;
 };
 

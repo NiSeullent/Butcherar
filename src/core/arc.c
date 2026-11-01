@@ -202,12 +202,29 @@ static int utf8_max_seq(const u8 *s, size_t n)
     return m;
 }
 
+/* Signs that a name made of 2-byte UTF-8 sequences really is UTF-8: a sequence
+ * touching an ASCII letter ("Résumé", "café") or a combining mark (U+0300-U+036F,
+ * as in macOS NFD Latin names). Legacy CJK names like "캡처" (C4 B8 C3 B3) show neither. */
+static int utf8_looks_latin(const u8 *s, size_t n)
+{
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (s[i] < 0xC2 || s[i] > 0xDF) continue;
+        if (s[i] == 0xCC || (s[i] == 0xCD && s[i + 1] <= 0xAF)) return 1;
+        u8 b = i ? (u8)(s[i - 1] | 0x20) : 0, f = i + 2 < n ? (u8)(s[i + 2] | 0x20) : 0;
+        if ((b >= 'a' && b <= 'z') || (f >= 'a' && f <= 'z')) return 1;
+        i++;
+    }
+    return 0;
+}
+
 static int choose_codepage(gz_archive *a)
 {
     if (a->codepage != GZ_CP_AUTO) return a->codepage;
     int acp = gz_plat_acp();
-    int dbcs = acp == 932 || acp == 936 || acp == 949 || acp == 950;
-    int legacy = 0, all_utf8 = 1, wide = 0;
+    /* Only ZIP files made on Korean/Japanese/Chinese Windows carry DBCS names that are
+     * accidentally valid UTF-8; TAR names are UTF-8 almost always. */
+    int dbcs = a->type == GZ_ARC_ZIP && (acp == 932 || acp == 936 || acp == 949 || acp == 950);
+    int legacy = 0, all_utf8 = 1, sure = 0;
     for (u32 i = 0; i < a->n; i++) {
         gz_entry *e = &a->e[i];
         if (e->uni_len || e->utf8) continue;
@@ -215,12 +232,10 @@ static int choose_codepage(gz_archive *a)
         if (name_is_ascii(r, e->raw_len)) continue;
         legacy = 1;
         if (!gz_utf8_valid(r, e->raw_len)) { all_utf8 = 0; break; }
-        if (utf8_max_seq(r, e->raw_len) >= 3) wide = 1;
+        /* real Hangul/CJK UTF-8 always has 3-byte sequences */
+        if (utf8_max_seq(r, e->raw_len) >= 3 || utf8_looks_latin(r, e->raw_len)) sure = 1;
     }
-    /* Many CP949/GBK/Big5 names are accidentally valid UTF-8 made of 2-byte
-     * sequences only ("캡처" = C4 B8 C3 B3). Real Hangul/CJK UTF-8 always uses
-     * 3-byte sequences, so on a DBCS system require one before choosing UTF-8. */
-    if (legacy && all_utf8 && (wide || !dbcs)) return GZ_CP_UTF8;
+    if (legacy && all_utf8 && (sure || !dbcs)) return GZ_CP_UTF8;
     return acp;
 }
 

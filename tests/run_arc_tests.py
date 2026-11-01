@@ -99,6 +99,19 @@ with zipfile.ZipFile(p, "w") as z:
         z.writestr(RawInfo(k.encode("cp949")), k.encode())
 add_zip_case(p, names=amb)
 
+# 2c) genuine UTF-8 names without the flag that use only 2-byte sequences must stay UTF-8
+p = os.path.join(WORK, "latin_utf8.zip")
+lat = ["Résumé.pdf", "café/menu.txt", unicodedata.normalize("NFD", "été.txt")]
+with zipfile.ZipFile(p, "w") as z:
+    for k in lat:
+        z.writestr(RawInfo(k.encode("utf-8")), k.encode())
+add_zip_case(p, names=lat)
+p = os.path.join(WORK, "cyrillic_utf8.tar")       # GNU tar: raw UTF-8, no pax path
+with tarfile.open(p, "w", format=tarfile.GNU_FORMAT, encoding="utf-8") as t:
+    ti = tarfile.TarInfo("Отчёт.txt"); ti.size = 3; t.addfile(ti, io.BytesIO(b"abc"))
+with tarfile.open(p, encoding="utf-8") as t:
+    cases.append((p, None, {i: (m.name, t.extractfile(m).read()) for i, m in enumerate(t.getmembers())}))
+
 # 3) macOS style: decomposed Hangul (NFD) UTF-8 without flag, plus backslashes
 p = os.path.join(WORK, "macnfd.zip")
 nfd_names = []

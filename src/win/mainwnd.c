@@ -1023,6 +1023,41 @@ static void delete_tree(const wchar_t *dir)
     RemoveDirectoryW(dir);
 }
 
+/* Remove %TEMP%\GogitZIP\<pid> folders left by copies that are no longer running
+ * (crash, logoff, or a viewer that kept a file open when GogitZIP closed). */
+static void sweep_stale_temp(void)
+{
+    wchar_t root[MAX_PATH], pat[MAX_PATH + 8];
+    if (!temp_root(root)) return;
+    wchar_t *b = (wchar_t *)path_base(root);
+    if (b <= root) return;
+    b[-1] = 0;                                         /* root = %TEMP%\GogitZIP */
+    path_join(pat, root, L"*", GZ_COUNTOF(pat));
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD self = GetCurrentProcessId();
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            continue;
+        const wchar_t *c = fd.cFileName;
+        DWORD pid = 0;
+        if (*c < '0' || *c > '9') continue;
+        while (*c >= '0' && *c <= '9') pid = pid * 10 + (DWORD)(*c++ - '0');
+        if (*c || pid == self) continue;
+        int dead;
+        HANDLE ph = OpenProcess(SYNCHRONIZE, FALSE, pid);
+        if (ph) { dead = WaitForSingleObject(ph, 0) == WAIT_OBJECT_0; CloseHandle(ph); }
+        else dead = GetLastError() == ERROR_INVALID_PARAMETER;   /* no such process */
+        if (dead) {
+            wchar_t p[MAX_PATH * 2];
+            path_join(p, root, fd.cFileName, GZ_COUNTOF(p));
+            delete_tree(p);
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
 static void activate_row(int i)
 {
     if (i < 0 || (u32)i >= M.nrows) return;
@@ -1410,6 +1445,7 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         wchar_t t[MAX_PATH];
         if (temp_root(t)) {
             delete_tree(t);
+            sweep_stale_temp();
             wchar_t *b = (wchar_t *)path_base(t);   /* also drop %TEMP%\GogitZIP if now empty */
             if (b > t) { b[-1] = 0; RemoveDirectoryW(t); }
         }
@@ -1460,6 +1496,7 @@ static ACCEL k_acc[] = {
 
 HWND mainwnd_create(const wchar_t *open_path, int show)
 {
+    sweep_stale_temp();
     HMODULE shl = LoadLibraryW(L"shlwapi.dll");
     if (shl) s_logical = (StrCmpLogicalW_t)(void *)GetProcAddress(shl, "StrCmpLogicalW");
     init_sysicons();

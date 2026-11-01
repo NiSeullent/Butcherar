@@ -193,6 +193,15 @@ static void unique_name(wchar_t *path, size_t cap)
     }
 }
 
+/* "<path>:Zone.Identifier", with \\?\ added when the full string needs it */
+static void zone_path(wchar_t *o, size_t cap, const wchar_t *path)
+{
+    wchar_t t[MAX_PATH * 4 + 24];
+    wcopy(t, path, GZ_COUNTOF(t));
+    wcat(t, L":Zone.Identifier", GZ_COUNTOF(t));
+    path_long(o, t, cap);
+}
+
 /* ---------------- worker ---------------- */
 
 typedef struct {
@@ -284,11 +293,11 @@ static int w_open(gz_out *o, u32 idx)
     wcopy(j->current, e->name, MAX_PATH);
     LeaveCriticalSection(&j->lock);
 
+    if (j->test_only) return GZ_OK;          /* links are fine in a test: nothing is written */
     if (e->is_link) {
         add_error(j, e->name, GZ_E_SKIP);
         return GZ_E_SKIP;
     }
-    if (j->test_only) return GZ_OK;
     {
         int b = build_out_path(j, e, w->path, GZ_COUNTOF(w->path));
         if (b < 0) { add_error(j, e->name, GZ_E_CREATE); return GZ_E_CREATE; }
@@ -368,6 +377,18 @@ static int w_close(gz_out *o, u32 idx, int st)
     const gz_entry *e = &j->oa->arc->e[idx];
     flush_progress(w);
     if (w->h != INVALID_HANDLE_VALUE) {
+        if (st == GZ_OK && j->zone_n) {
+            /* carry the archive's Mark-of-the-Web. Done while the file is still open and
+             * before SetFileTime: writing a named stream updates the file's mtime. */
+            wchar_t zp[MAX_PATH * 4 + 40];
+            zone_path(zp, GZ_COUNTOF(zp), w->path);
+            HANDLE z = CreateFileW(zp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (z != INVALID_HANDLE_VALUE) {
+                DWORD wr;
+                WriteFile(z, j->zone, j->zone_n, &wr, NULL);
+                CloseHandle(z);
+            }
+        }
         if (st == GZ_OK) {
             u64 ft = entry_filetime(e);
             if (ft) {
@@ -382,21 +403,7 @@ static int w_close(gz_out *o, u32 idx, int st)
         wchar_t lp[MAX_PATH * 4];
         path_long(lp, w->path, GZ_COUNTOF(lp));
         if (st != GZ_OK) DeleteFileW(lp);
-        else {
-            if (j->zone_n) {
-                /* carry the archive's Mark-of-the-Web (Zone.Identifier stream) */
-                wchar_t zp[MAX_PATH * 4 + 24];
-                wcopy(zp, lp, GZ_COUNTOF(zp));
-                wcat(zp, L":Zone.Identifier", GZ_COUNTOF(zp));
-                HANDLE z = CreateFileW(zp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-                if (z != INVALID_HANDLE_VALUE) {
-                    DWORD wr;
-                    WriteFile(z, j->zone, j->zone_n, &wr, NULL);
-                    CloseHandle(z);
-                }
-            }
-            if (e->attr & 7) SetFileAttributesW(lp, e->attr & 7);
-        }
+        else if (e->attr & 7) SetFileAttributesW(lp, e->attr & 7);
     }
     EnterCriticalSection(&j->lock);
     if (!e->is_dir) j->done_files++;
@@ -508,7 +515,7 @@ static DWORD WINAPI worker_main(void *arg)
         size_t pwn = 0;
         if (e->enc && !e->is_dir) {
             if (ensure_password(w, idx)) break;
-            pw = w->pwn ? w->pw : 0;
+            pw = w->pw;
             pwn = w->pwn;
         }
         w->opened = 0;
@@ -625,13 +632,25 @@ gz_job *job_new(gz_open_arc *oa)
     InitializeCriticalSection(&j->ask_lock);
     j->run_event = CreateEventW(NULL, TRUE, TRUE, NULL);
     {
-        wchar_t zp[MAX_PATH * 4 + 24];
-        path_long(zp, oa->path, MAX_PATH * 4);
-        wcat(zp, L":Zone.Identifier", GZ_COUNTOF(zp));
+        wchar_t zp[MAX_PATH * 4 + 40];
+        zone_path(zp, GZ_COUNTOF(zp), oa->path);
         HANDLE z = CreateFileW(zp, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
         if (z != INVALID_HANDLE_VALUE) {
+            const DWORD cap = 16384;
+            j->zone = (u8 *)mem_alloc(cap);
             DWORD rd = 0;
-            if (ReadFile(z, j->zone, sizeof j->zone, &rd, NULL) && rd < sizeof j->zone) j->zone_n = rd;
+            if (j->zone && ReadFile(z, j->zone, cap, &rd, NULL) && rd) {
+                if (rd == cap) {
+                    /* enormous stream: keep whole lines (ZoneId comes first) */
+                    while (rd && j->zone[rd - 1] != '\n') rd--;
+                    if (!rd) {
+                        static const char mz[] = "[ZoneTransfer]\r\nZoneId=3\r\n";
+                        __builtin_memcpy(j->zone, mz, sizeof mz - 1);
+                        rd = sizeof mz - 1;
+                    }
+                }
+                j->zone_n = rd;
+            }
             CloseHandle(z);
         }
     }
@@ -645,6 +664,7 @@ void job_free(gz_job *j)
     mem_free(j->errs);
     mem_free(j->order);
     mem_free(j->sel_owned);
+    mem_free(j->zone);
     mem_free(j->pw_a);
     mem_free(j->pw_u);
     if (j->run_event) CloseHandle(j->run_event);
