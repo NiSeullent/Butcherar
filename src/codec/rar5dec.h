@@ -33,7 +33,8 @@ void gz_rar5_dec_free(gz_rar5_dec *d);
 u64 gz_rar5_window_size(u64 dict, u64 total);
 
 typedef struct {
-    u64 window;      /* from gz_rar5_window_size; the caller enforces its memory cap */
+    u64 window;      /* from gz_rar5_window_size; the caller enforces its memory cap.
+                        A larger window left from an earlier call may be reused. */
     int v7;          /* RAR 7.0 algorithm (compression version 1): 80 distance codes */
     int solid;       /* continue the previous file's stream (window, tables, distances) */
 } gz_rar5_params;

@@ -751,8 +751,10 @@ int gz_rar5_decode(gz_rar5_dec *d, const gz_stream_io *io, u64 out_size, const g
         if (w > d->wsize && (r = grow(d, (size_t)w))) return r;
         if (!pp->v7 != !d->v7) d->tables_ok = 0;
     } else {
+        /* a new stream can use any window at least as large as asked: a cached
+         * one is kept (gz_rar5_dec_trim bounds what stays allocated) */
         d->state_ok = 0;
-        if (d->wsize != w) {
+        if (d->wsize < w) {
             if (d->win) gz_free_big(d->win, d->wsize);
             d->wsize = d->wmask = 0;
             d->win = (u8 *)gz_alloc_big((size_t)w);

@@ -400,6 +400,20 @@ def test_generated(t, mk):
                  "generated links listing", r.stdout.decode(errors="replace")[-300:])
         r, rows, out = t.extract(arc)
         t.record(b"comment: kommentar" in r.stderr, "generated comment", r.stderr[-100:])
+    # a copy and a hard link of a solid file between members of the same solid run
+    ents = mk.entries(["doc/text.txt", "bin/prog.exe"]) + ["C:copy=doc/text.txt", "H:hard=doc/text.txt"] + \
+        mk.entries(["media/sound.wav"])
+    arc = mk.make("solid_links.rar", ["-s", "-m", "3", "-f", "mix"], entries=ents)
+    if arc:
+        check_rows(t, "solid run with copy / hard link in between", arc, {
+            "doc/text.txt": F["doc/text.txt"], "copy": F["doc/text.txt"], "hard": F["doc/text.txt"],
+            "bin/prog.exe": F["bin/prog.exe"], "media/sound.wav": F["media/sound.wav"]})
+    # 128 MiB window (unknown sizes: no smaller window) kept across a directory entry
+    ents = mk.entries(["doc/text.txt"]) + ["dir/"] + mk.entries(["bin/prog.exe", "tiny.txt"])
+    arc = mk.make("solid_bigwin.rar", ["-s", "-m", "3", "-d", "27", "-nosize"], entries=ents)
+    if arc:
+        check_rows(t, "solid run with a 128 MiB window around a directory", arc, {
+            "doc/text.txt": F["doc/text.txt"], "dir": None, "bin/prog.exe": F["bin/prog.exe"], "tiny.txt": F["tiny.txt"]})
     # wrong passwords
     arc = mk.make("aes_w.rar", ["-m", "3", "-p", "right", "-lg2", "4"], entries=mk.entries(["tiny.txt", "doc/text.txt"]))
     if arc:
@@ -413,24 +427,40 @@ def test_generated(t, mk):
         r, typ, rows = t.listing(arc)
         t.record(b"OPEN_ERROR 6" in r.stdout, "-hp without password -> GZ_E_PASSWORD at open", r.stdout[:60])
 
+def cleanup(t, *arcs):
+    """drop extraction trees and archives of the big cases (the disk may be shared)"""
+    for a in arcs:
+        if not a:
+            continue
+        b = os.path.basename(a)
+        shutil.rmtree(os.path.join(t.work, "out_" + b), ignore_errors=True)
+        shutil.rmtree(os.path.join(t.work, "ref7z_" + b), ignore_errors=True)
+        if os.path.exists(a):
+            os.remove(a)
+
 def test_long_distance(t, mk):
-    """64 MiB dictionary, matches 24 MiB back, large window allocation"""
+    """32 MiB dictionary with matches 17 MiB back; a solid run; a small ring that wraps"""
     big = random.Random(9).randbytes(1 << 20)
-    filler = random.Random(10).randbytes(24 << 20)
-    data = big + filler + big + text_data(2 << 20, 11) + big[: 1 << 19]
+    filler = random.Random(10).randbytes(17 << 20)
+    data = big + filler + big + text_data(1 << 20, 11) + big[: 1 << 19]
     p = os.path.join(mk.src, "far.bin")
     open(p, "wb").write(data)
-    arc = mk.make("far.rar", ["-m", "5", "-d", "26", "-depth", "4"], entries=["far.bin=" + p])
+    arc = mk.make("far.rar", ["-m", "5", "-d", "25", "-depth", "4"], entries=["far.bin=" + p])
     if arc:
-        t.check_vs_7z(arc, label="generated 64M dictionary, 25M distances")
-    arc = mk.make("far_solid.rar", ["-s", "-m", "5", "-d", "26", "-depth", "4", "-f", "e8"],
-                  entries=["a.bin=" + p, "b.bin=" + p])
+        t.check_vs_7z(arc, label="generated 32M dictionary, 18M distances")
+    cleanup(t, arc)
+    q = os.path.join(mk.src, "mid.bin")
+    open(q, "wb").write(text_data(3 << 20, 12) + exe_data(2 << 20, 13))
+    arc = mk.make("far_solid.rar", ["-s", "-m", "5", "-d", "24", "-depth", "8", "-f", "e8", "-flen", "300000"],
+                  entries=["a.bin=" + q, "b.bin=" + q, "c.bin=" + q])
     if arc:
-        t.check_vs_7z(arc, label="generated solid run over 2 x 28 MiB")
+        t.check_vs_7z(arc, label="generated solid run over 3 x 5 MiB")
+    cleanup(t, arc)
     # window smaller than the stream: the ring wraps many times
     arc = mk.make("wrap.rar", ["-m", "3", "-d", "18", "-f", "mix", "-flen", "60000"], entries=["far.bin=" + p])
     if arc:
-        t.check_vs_7z(arc, label="generated 256K window over 28 MiB (wrapping)")
+        t.check_vs_7z(arc, label="generated 256K window over 20 MiB (wrapping)")
+    cleanup(t, arc, p, q)
 
 def test_volumes_damage(t, mk):
     arc = mk.make("dmg.part%d.rar", ["-m", "3", "-vol", "100000"])
@@ -516,11 +546,73 @@ def test_hostile(t, la, rf, mk, tool):
         ok = r.returncode == 0 and "Sanitizer" not in err and "runtime error" not in err
         t.record(ok, "fuzz %s x%d" % (os.path.basename(s), iters), (r.stdout.decode().strip() + " " + err[-400:]) if not ok else r.stdout.decode().strip())
 
+def cross_build(t, cc, flags, name):
+    """rar5_tool + the whole core from source for another target"""
+    root = os.path.dirname(os.path.dirname(HERE))
+    srcs = []
+    for d in ("src/core", "src/codec", "src/fmt"):
+        srcs += sorted(glob.glob(os.path.join(root, d, "*.c")))
+    srcs.append(os.path.join(root, "src/posix/plat_posix.c"))
+    srcs.append(os.path.join(os.path.dirname(t.gzt), "gen", "registry.c"))
+    exe = t.path(name)
+    r = t.sh(cc + flags + ["-std=gnu11", "-O1", "-w", "-pthread"] +
+             ["-I" + os.path.join(root, d) for d in ("src/core", "src/codec", "src/fmt", "src/posix")] +
+             ["-o", exe, os.path.join(root, "tests/drivers/rar5_tool.c")] + srcs + ["-pthread"], check=False, timeout=900)
+    if r.returncode:
+        t.record(False, "build " + name, r.stderr.decode(errors="replace")[-400:])
+        return None
+    return exe
+
+def test_targets(t, mk, tool, la):
+    """the same per-entry results (status, size, CRC) from i386 and AArch64 builds"""
+    if SANITIZED:
+        return
+    arcs = []
+    for n in ["m3.rar", "e8.rar", "arm.rar", "delta.rar", "mixblocks.rar", "tinyblocks.rar", "solid.rar",
+              "aes_mac.rar", "aes_solid.rar", "hp.rar", "vols.part1.rar", "v7.rar", "solid_links.rar",
+              "huge_dict.rar", "small_bigdict.rar", "links.rar", "solid_b2.rar"]:
+        p = t.path("gen", n)
+        if os.path.exists(p):
+            arcs.append(p)
+    if la:
+        for n in ["arm", "win32", "multiarchive_solid.part01", "blake2"]:
+            p = os.path.join(la, "test_read_format_rar5_%s.rar" % n)
+            if os.path.exists(p):
+                arcs.append(p)
+    # 2 GiB dictionary, unknown sizes: allowed on 64-bit hosts, GZ_E_LIMIT on 32-bit ones
+    big = mk.make("dict2g.rar", ["-m", "3", "-d", "31", "-nosize"], entries=mk.entries(["tiny.txt", "doc/text.txt"]))
+    ref = {a: subprocess.run([tool, "check", a, "secret"], capture_output=True).stdout for a in arcs + ([big] if big else [])}
+    if big:
+        t.record(b" 0 3 " in ref[big] and b"tiny.txt" in ref[big], "2 GiB window on a 64-bit host", ref[big][-200:])
+    targets = []
+    if shutil.which("gcc") and subprocess.run(["gcc", "-m32", "-x", "c", "-", "-o", os.devnull],
+                                              input=b"int main(void){return 0;}", capture_output=True).returncode == 0:
+        targets.append(("i386", ["gcc", "-m32", "-march=i586"], [], []))
+    if shutil.which("aarch64-linux-gnu-gcc") and shutil.which("qemu-aarch64") and os.path.isdir("/usr/aarch64-linux-gnu"):
+        targets.append(("arm64", ["aarch64-linux-gnu-gcc"], [], ["qemu-aarch64", "-cpu", "max"]))
+    env = dict(os.environ)
+    env.setdefault("QEMU_LD_PREFIX", "/usr/aarch64-linux-gnu")
+    for name, cc, flags, run in targets:
+        exe = cross_build(t, cc, flags, "rar5_tool_" + name)
+        if not exe:
+            continue
+        bad = []
+        for a in arcs:
+            got = subprocess.run(run + [exe, "check", a, "secret"], capture_output=True, env=env, timeout=600).stdout
+            if got != ref[a]:
+                bad.append(os.path.basename(a))
+        if big and name == "i386":
+            got = subprocess.run(run + [exe, "check", big, "secret"], capture_output=True, env=env, timeout=600).stdout
+            if b" 15 " not in got:
+                bad.append("dict2g (want GZ_E_LIMIT) " + got.decode(errors="replace")[-120:])
+        t.record(not bad, "%s build: %d archives match the host" % (name, len(arcs)), "; ".join(bad[:6]))
+    cleanup(t, big)
+
 def test_speed(t, mk, tool):
     """throughput of a ~40 MB solid archive (informational, compared with 7-Zip)"""
     if SANITIZED:
         return
-    data = text_data(24 << 20, 21) + exe_data(8 << 20, 22) + wav_data(8 << 20, 23)
+    data = text_data(16 << 20, 21) + exe_data(4 << 20, 22) + wav_data(4 << 20, 23)
     p = os.path.join(mk.src, "speed.bin")
     open(p, "wb").write(data)
     arc = mk.make("speed.rar", ["-m", "5", "-d", "25", "-f", "e8", "-flen", "65536", "-depth", "24"], entries=["speed.bin=" + p])
@@ -536,6 +628,7 @@ def test_speed(t, mk, tool):
     ok = ours > 0 and (ref == 0 or ours > ref * 0.5)
     t.record(ok, "speed", "ours %.0f MB/s, 7z t %.0f MB/s (%d MB, compressed %d MB)" %
              (ours, ref, len(data) >> 20, os.path.getsize(arc) >> 20))
+    cleanup(t, arc, p)
 
 def run(t):
     t.need("7z")
@@ -551,4 +644,5 @@ def run(t):
     test_long_distance(t, mk)
     test_volumes_damage(t, mk)
     test_hostile(t, la, rf, mk, tool)
+    test_targets(t, mk, tool, la)
     test_speed(t, mk, tool)

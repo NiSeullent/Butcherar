@@ -487,7 +487,7 @@ static void parse_extra(const u8 *x, u32 n, r5_extra *e)
             u64 t[3];
             for (u32 k = 0; k < 3; k++) {
                 if (!(fl & (2u << k))) continue;
-                if (end - j < w) return;
+                if (end - j < w) { nt = 0; break; }
                 t[nt++] = unix_t ? rd32(p + j) : rd64(p + j);
                 j += w;
             }
@@ -648,8 +648,13 @@ static int add_file(r5_ost *st, const r5_hdr *h)
         it = &pv->it[pi];
         it->nseg++;
         a->e[pi].csize += h->data_len;
-        if (h->flags & HF_SPLIT_AFTER) st->pending = pi;
-        else return set_sums(pv, it, &x, ff, crc);
+        if (h->flags & HF_SPLIT_AFTER) {
+            st->pending = pi;
+        } else {
+            if ((r = set_sums(pv, it, &x, ff, crc))) return r;
+            a->e[pi].crc = it->crc;
+            a->e[pi].has_crc = it->has_crc && !(it->crypt >= 0 && pv->cr[it->crypt].mac);
+        }
         return GZ_OK;
     }
     if (st->pending >= 0 && !svc) {
@@ -764,8 +769,8 @@ static int add_file(r5_ost *st, const r5_hdr *h)
     } else if (h->flags & HF_SPLIT_AFTER) {
         it->incomplete = 1;
     }
-    if (it->crypt >= 0 && pv->cr[it->crypt].mac) a->e[idx].has_crc = 0;
-    else a->e[idx].has_crc = it->has_crc;
+    /* HMAC'd sums are not CRCs; links carry no data of their own */
+    a->e[idx].has_crc = it->has_crc && !(it->crypt >= 0 && pv->cr[it->crypt].mac) && !it->redir;
     a->e[idx].crc = it->crc;
     return GZ_OK;
 }
@@ -1283,31 +1288,35 @@ static int data_of(r5_x *x, u32 di, gz_out *out)
     return GZ_OK;
 }
 
-static int r5_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, gz_ctx *c)
+/* one entry: open, data (or nothing for directories and links), close */
+static int extract_one(r5_x *x, u32 idx, gz_out *out)
 {
-    r5_x x;
-    gz_entry *e = &a->e[idx];
-    int r = x_init(&x, a, s, c);
-    if (r) return r;
-    i32 di = data_index(x.pv, idx);
-    const r5_item *ii = &x.pv->it[idx];
+    gz_entry *e = &x->a->e[idx];
+    i32 di = data_index(x->pv, idx);
+    const r5_item *ii = &x->pv->it[idx];
+    int r;
     if (e->is_dir || (e->is_link == 1 && e->link_len) || (!ii->nseg && !ii->redir)) {
-        r = out->open(out, idx);
-        if (r) { x_done(&x); return r; }
-        x_done(&x);
+        if ((r = out->open(out, idx))) return r;
         return out->close(out, idx, GZ_OK);
     }
     if (di >= 0) {
         const r5_kdf *k;
-        int pr = item_keys(&x, &x.pv->it[di], &k);
-        if (pr == GZ_E_PASSWORD) { x_done(&x); return pr; }
+        if (item_keys(x, &x->pv->it[di], &k) == GZ_E_PASSWORD) return GZ_E_PASSWORD;
     }
-    r = out->open(out, idx);
-    if (r) { x_done(&x); return r; }
-    int st = di < 0 ? GZ_E_DATA : data_of(&x, (u32)di, out);
-    x_done(&x);
+    if ((r = out->open(out, idx))) return r;
+    int st = di < 0 ? GZ_E_DATA : data_of(x, (u32)di, out);
     r = out->close(out, idx, st);
     return st ? st : r;
+}
+
+static int r5_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, gz_ctx *c)
+{
+    r5_x x;
+    int r = x_init(&x, a, s, c);
+    if (r) return r;
+    r = extract_one(&x, idx, out);
+    x_done(&x);
+    return r;
 }
 
 static int r5_extract_solid(gz_archive *a, gz_src *s, const u8 *sel, gz_out *out, gz_ctx *c)
@@ -1324,13 +1333,19 @@ static int r5_extract_solid(gz_archive *a, gz_src *s, const u8 *sel, gz_out *out
         if (sel[i] && pv->it[i].group >= 0 && !pv->it[i].redir) upto[pv->it[i].group] = (i32)i;
     i32 cur = -1;
     int cerr = GZ_OK;
-    int ret = GZ_OK;
+    int ret = GZ_OK, later = 0;
     for (u32 i = 0; i < a->n; i++) {
         if (gz_cancelled(c)) { ret = GZ_E_CANCEL; break; }
         r5_item *it = &pv->it[i];
         if (it->group < 0 || it->redir) {
             if (!sel[i]) continue;
-            r = r5_extract(a, s, i, out, c);
+            /* entries that need the decoder on their own (hard links and copies of
+             * solid files, compressed streams) wait until the solid runs are done */
+            if (it->redir == RD_HARD || it->redir == RD_COPY || (it->nseg && ((it->comp >> 7) & 7))) {
+                later = 1;
+                continue;
+            }
+            r = extract_one(&x, i, out);
             if (r == GZ_E_CANCEL) { ret = r; break; }
             continue;
         }
@@ -1357,11 +1372,20 @@ static int r5_extract_solid(gz_archive *a, gz_src *s, const u8 *sel, gz_out *out
         if (cerr) continue;
         int st = item_data(&x, it, a->e[i].usize, opened ? out : 0, (u32)g != i, opened);
         if (st == GZ_E_CANCEL) { if (opened) out->close(out, i, st); ret = st; break; }
-        if (st) cerr = st;
+        /* a checksum mismatch leaves the stream intact; anything else ends the run */
+        if (st && st != GZ_E_CRC) cerr = st;
         if (opened) {
             r = out->close(out, i, st);
             if (r == GZ_E_CANCEL) { ret = r; break; }
         }
+    }
+    for (u32 i = 0; later && !ret && i < a->n; i++) {
+        r5_item *it = &pv->it[i];
+        if (!sel[i] || !(it->group < 0 || it->redir)) continue;
+        if (!(it->redir == RD_HARD || it->redir == RD_COPY || (it->nseg && ((it->comp >> 7) & 7)))) continue;
+        if (gz_cancelled(c)) { ret = GZ_E_CANCEL; break; }
+        r = extract_one(&x, i, out);
+        if (r == GZ_E_CANCEL) ret = r;
     }
     gz_free(upto);
     x_done(&x);

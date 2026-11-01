@@ -21,6 +21,9 @@
  *   rar5_tool fuzz <archive> <iterations> <seed> [password]
  *       mutates the archive in memory (bit flips, smashed vints / sizes,
  *       truncation) and extracts it; must not crash, hang or leak
+ *   rar5_tool check <archive> [password]
+ *       prints status, size and CRC-32 of every extracted entry (the test
+ *       compares i386 / AArch64 builds with the host build)
  */
 #include "arc.h"
 #include "cpu.h"
@@ -1125,12 +1128,84 @@ static int cmd_fuzz(int argc, char **argv)
     return 0;
 }
 
+/* check: per-entry status, size and CRC-32 of the extracted data (to compare builds) */
+typedef struct { gz_out o; u32 n, cur; u32 *crc; u64 *size; int *st; } chk_out;
+static int k_open(gz_out *o, u32 idx)
+{
+    chk_out *k = (chk_out *)o;
+    k->cur = idx;
+    if (idx < k->n) { k->crc[idx] = 0; k->size[idx] = 0; }
+    return 0;
+}
+static int k_write(gz_out *o, const u8 *p, size_t n)
+{
+    chk_out *k = (chk_out *)o;
+    if (k->cur < k->n) { k->crc[k->cur] = gz_crc32(k->crc[k->cur], p, n); k->size[k->cur] += n; }
+    return 0;
+}
+static int k_close(gz_out *o, u32 idx, int st)
+{
+    chk_out *k = (chk_out *)o;
+    if (idx < k->n) k->st[idx] = st ? st : 100;
+    return 0;
+}
+
+static int cmd_check(int argc, char **argv)
+{
+    if (argc > 3) { gzch *w = gz_posix_wide(argv[3]); memcpy(g_pw, w, (gz_wcslen(w) + 1) * 2); free(w); }
+    gz_src *s = gz_posix_open_src(argv[2]);
+    if (!s) die("cannot open");
+    gzch *fn = gz_posix_wide(argv[2]);
+    gz_open_opts oo;
+    memset(&oo, 0, sizeof oo);
+    oo.file_name = fn;
+    oo.password = g_pw[0] ? g_pw : 0;
+    oo.ask_password = ask_pw;
+    oo.open_volume = gz_posix_open_volume;
+    gz_ctx *c = gz_ctx_new();
+    gz_archive *a = 0;
+    int r = gz_arc_open(&a, s, &oo, c);
+    if (r) { printf("open %d\n", r); return 0; }
+    c->password = g_pw[0] ? g_pw : a->password;
+    chk_out k;
+    memset(&k, 0, sizeof k);
+    k.o.open = k_open; k.o.write = k_write; k.o.close = k_close;
+    k.n = a->n;
+    k.crc = (u32 *)calloc(a->n + 1, 4);
+    k.size = (u64 *)calloc(a->n + 1, 8);
+    k.st = (int *)calloc(a->n + 1, sizeof(int));
+    if (a->solid) {
+        u8 *sel = (u8 *)malloc(a->n + 1);
+        memset(sel, 1, a->n + 1);
+        gz_arc_extract_solid(a, s, sel, &k.o, c);
+        free(sel);
+    } else {
+        for (u32 i = 0; i < a->n; i++) {
+            int e = gz_arc_extract(a, s, i, &k.o, c);
+            if (e && !k.st[i]) k.st[i] = e;
+        }
+    }
+    printf("type %s n %u solid %d\n", gz_arc_type_name(a), a->n, a->solid);
+    for (u32 i = 0; i < a->n; i++) {
+        char *nm = gz_posix_utf8(a->e[i].name);
+        printf("%u %d %llu %08x %s\n", i, k.st[i] == 100 ? 0 : k.st[i], (unsigned long long)k.size[i], k.crc[i], nm);
+        free(nm);
+    }
+    free(k.crc); free(k.size); free(k.st);
+    gz_arc_close(a);
+    gz_ctx_free(c);
+    gz_src_free(s);
+    free(fn);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     init_core();
     if (argc >= 4 && !strcmp(argv[1], "make")) return cmd_make(argc, argv);
     if (argc >= 4 && !strcmp(argv[1], "bench")) return cmd_bench(argc, argv);
     if (argc >= 5 && !strcmp(argv[1], "fuzz")) return cmd_fuzz(argc, argv);
-    fprintf(stderr, "usage: rar5_tool make|bench|fuzz ...\n");
+    if (argc >= 3 && !strcmp(argv[1], "check")) return cmd_check(argc, argv);
+    fprintf(stderr, "usage: rar5_tool make|bench|fuzz|check ...\n");
     return 2;
 }
