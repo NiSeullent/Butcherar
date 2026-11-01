@@ -13,6 +13,9 @@
 #include "crc32.h"
 #include "inflate.h"
 #include "crypto.h"
+#include "crc64.h"
+#include "blake2.h"
+#include "sha256.h"
 
 #if defined(__i386__) || defined(__x86_64__)
 #include <cpuid.h>
@@ -196,6 +199,24 @@ const char *gz_tier_name(int tier)
 static const char *s_inf_name = "x86";
 static const char *s_crc_name = "Slice-by-8";
 static const char *s_aes_name = "AES (T-table)";
+static const char *s_sha_name = "SHA (C)";
+static const char *s_crc64_name = "Slice-by-8";
+static const char *s_b2_name = "BLAKE2sp (C)";
+
+/* portable kernels everywhere first; the faster ones replace them below */
+static void dispatch_portable(void)
+{
+    gz_crc32_kernel = gz_crc32_slice8;         s_crc_name = "Slice-by-8";
+    gz_crc64_kernel = gz_crc64_slice8;         s_crc64_name = "Slice-by-8";
+    gz_sha1_kernel = gz_sha1_blocks_c;
+    gz_sha256_kernel = gz_sha256_blocks_c;     s_sha_name = "SHA (C)";
+    gz_aes_ctr_kernel = gz_aes_ctr_soft;
+    gz_aes_ecb_enc_kernel = gz_aes_ecb_enc_soft;
+    gz_aes_ecb_dec_kernel = gz_aes_ecb_dec_soft;
+    gz_aes_cbc_enc_kernel = gz_aes_cbc_enc_soft;
+    gz_aes_cbc_dec_kernel = gz_aes_cbc_dec_soft; s_aes_name = "AES (T-table)";
+    gz_blake2sp_kernel = gz_blake2sp_c;        s_b2_name = "BLAKE2sp (C)";
+}
 
 int gz_dispatch_init(int force)
 {
@@ -206,13 +227,32 @@ int gz_dispatch_init(int force)
 #endif
     g_cpu.active = t;
     u32 f = g_cpu.features;
+    dispatch_portable();
 #if defined(__aarch64__)
-    (void)f;
+    /* AArch64: one tier; the CPUF_ARM_* bits pick the kernels (tests may clear
+     * bits in g_cpu.features to force the portable paths). */
     gz_inflate_kernel = gz_inflate_neon; s_inf_name = "NEON";
-    gz_crc32_kernel = gz_crc32_slice8; s_crc_name = "Slice-by-8";
-    gz_aes_ctr_kernel = gz_aes_ctr_soft; s_aes_name = "AES (T-table)";
+    gz_blake2sp_kernel = gz_blake2sp_neon; s_b2_name = "BLAKE2sp (NEON)";
+    if (f & CPUF_ARM_CRC32) {
+        gz_crc32_kernel = gz_crc32_arm; s_crc_name = "ARMv8 CRC32";
+        if (f & CPUF_ARM_PMULL) { gz_crc32_kernel = gz_crc32_pmull; s_crc_name = "PMULL+CRC32"; }
+    }
+    if (f & CPUF_ARM_PMULL) { gz_crc64_kernel = gz_crc64_pmull; s_crc64_name = "PMULL"; }
+    if (f & CPUF_ARM_SHA1) gz_sha1_kernel = gz_sha1_blocks_arm;
+    if (f & CPUF_ARM_SHA2) gz_sha256_kernel = gz_sha256_blocks_arm;
+    if (f & (CPUF_ARM_SHA1 | CPUF_ARM_SHA2))
+        s_sha_name = (f & CPUF_ARM_SHA1) && (f & CPUF_ARM_SHA2) ? "ARMv8 SHA" :
+                     (f & CPUF_ARM_SHA2) ? "ARMv8 SHA2" : "ARMv8 SHA1";
+    if (f & CPUF_ARM_AES) {
+        gz_aes_ctr_kernel = gz_aes_ctr_arm;
+        gz_aes_ecb_enc_kernel = gz_aes_ecb_enc_arm;
+        gz_aes_ecb_dec_kernel = gz_aes_ecb_dec_arm;
+        gz_aes_cbc_enc_kernel = gz_aes_cbc_enc_arm;
+        gz_aes_cbc_dec_kernel = gz_aes_cbc_dec_arm;
+        s_aes_name = "ARMv8 AES";
+    }
     return 0;
-#endif
+#else
 
     /* Inflate kernel */
     switch (t) {
@@ -227,29 +267,60 @@ int gz_dispatch_init(int force)
     default:            gz_inflate_kernel = gz_inflate_avx2; s_inf_name = "AVX2+BMI2"; break;
     }
 
-    /* CRC-32 kernel */
-    gz_crc32_kernel = gz_crc32_slice8; s_crc_name = "Slice-by-8";
+    /* CRC-32 / CRC-64 */
     if (t >= GZ_TIER_SSE41 && (f & CPUF_PCLMUL)) {
         gz_crc32_kernel = gz_crc32_pclmul; s_crc_name = "PCLMULQDQ";
+        gz_crc64_kernel = gz_crc64_pclmul; s_crc64_name = "PCLMULQDQ";
     }
     if (t >= GZ_TIER_AVX && (f & CPUF_PCLMUL)) {
         gz_crc32_kernel = gz_crc32_avx; s_crc_name = "AVX+PCLMULQDQ";
     }
-    if (t >= GZ_TIER_AVX2 && (f & CPUF_VPCLMUL)) {
+    if (t >= GZ_TIER_AVX2 && (f & CPUF_VPCLMUL) && (f & CPUF_PCLMUL)) {
         gz_crc32_kernel = gz_crc32_vpclmul; s_crc_name = "VPCLMULQDQ";
+        gz_crc64_kernel = gz_crc64_vpclmul; s_crc64_name = "VPCLMULQDQ";
     }
 
-    /* AES kernel (WinZip AES archives) */
-    gz_aes_ctr_kernel = gz_aes_ctr_soft; s_aes_name = "AES (T-table)";
+    /* SHA-1 / SHA-256 */
+    if (t >= GZ_TIER_SSE41 && (f & CPUF_SHA)) {
+        gz_sha1_kernel = gz_sha1_blocks_shani;
+        gz_sha256_kernel = gz_sha256_blocks_shani;
+        s_sha_name = "SHA-NI";
+    }
+
+    /* AES (WinZip CTR, 7z/RAR CBC) */
     if (t >= GZ_TIER_SSE41 && (f & CPUF_AESNI)) {
-        gz_aes_ctr_kernel = gz_aes_ctr_aesni; s_aes_name = "AES-NI";
+        gz_aes_ctr_kernel = gz_aes_ctr_aesni;
+        gz_aes_ecb_enc_kernel = gz_aes_ecb_enc_aesni;
+        gz_aes_ecb_dec_kernel = gz_aes_ecb_dec_aesni;
+        gz_aes_cbc_enc_kernel = gz_aes_cbc_enc_aesni;
+        gz_aes_cbc_dec_kernel = gz_aes_cbc_dec_aesni;
+        s_aes_name = "AES-NI";
     }
     if (t >= GZ_TIER_AVX && (f & CPUF_AESNI)) {
-        gz_aes_ctr_kernel = gz_aes_ctr_aesni_avx; s_aes_name = "AES-NI (AVX)";
+        gz_aes_ctr_kernel = gz_aes_ctr_aesni_avx;
+        gz_aes_ecb_enc_kernel = gz_aes_ecb_enc_avx;
+        gz_aes_ecb_dec_kernel = gz_aes_ecb_dec_avx;
+        gz_aes_cbc_enc_kernel = gz_aes_cbc_enc_avx;
+        gz_aes_cbc_dec_kernel = gz_aes_cbc_dec_avx;
+        s_aes_name = "AES-NI (AVX)";
     }
+    if (t >= GZ_TIER_AVX2 && (f & CPUF_AESNI) && (f & CPUF_VAES)) {
+        gz_aes_ctr_kernel = gz_aes_ctr_vaes;
+        gz_aes_cbc_dec_kernel = gz_aes_cbc_dec_vaes;
+        s_aes_name = "VAES";
+    }
+
+    /* BLAKE2sp (RAR 5.0 checksums) */
+    if (t >= GZ_TIER_SSE2) { gz_blake2sp_kernel = gz_blake2sp_sse2; s_b2_name = "BLAKE2sp (SSE2)"; }
+    if (t >= GZ_TIER_SSE41) { gz_blake2sp_kernel = gz_blake2sp_ssse3; s_b2_name = "BLAKE2sp (SSSE3)"; }
+    if (t >= GZ_TIER_AVX2) { gz_blake2sp_kernel = gz_blake2sp_avx2; s_b2_name = "BLAKE2sp (AVX2)"; }
     return t;
+#endif
 }
 
 const char *gz_dispatch_inflate_name(void) { return s_inf_name; }
 const char *gz_dispatch_crc_name(void) { return s_crc_name; }
 const char *gz_dispatch_aes_name(void) { return s_aes_name; }
+const char *gz_dispatch_sha_name(void) { return s_sha_name; }
+const char *gz_dispatch_crc64_name(void) { return s_crc64_name; }
+const char *gz_dispatch_blake2_name(void) { return s_b2_name; }

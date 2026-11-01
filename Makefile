@@ -127,7 +127,8 @@ $(B)/gogitzip: src/app/cli.c $(HOSTOBJ) $(APPOBJ)
 	$(HOSTCC) $(HOSTFLAGS) -o $@ src/app/cli.c $(HOSTOBJ) $(APPOBJ) $(HOST_LIBS)
 cli: $(B)/gogitzip
 
-ICORE := src/core/cpu.c src/core/crc32.c src/codec/inflate.c src/core/crypto.c src/core/stream.c
+ICORE := src/core/cpu.c src/core/crc32.c src/codec/inflate.c src/core/crypto.c src/core/stream.c \
+         src/core/crc64.c src/core/sha1.c src/core/sha256.c src/core/aes.c src/core/blake2.c
 $(B)/test_inflate: tests/test_inflate.c $(ICORE) $(HDRS)
 	@mkdir -p $(B)
 	$(HOSTCC) -O2 -g $(INC) -o $@ tests/test_inflate.c $(ICORE) -lz

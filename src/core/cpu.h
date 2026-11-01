@@ -69,9 +69,13 @@ const char *gz_tier_name(int tier);     /* "AVX2", "SSE2", ... */
 /* Select implementations for a tier (<= g_cpu.tier). Returns tier applied. */
 int gz_dispatch_init(int force_tier);   /* force_tier < 0 = automatic */
 
-/* Human readable description of selected kernels, e.g. "AVX2+BMI2 / VPCLMULQDQ / AES-NI". */
+/* Human readable names of the selected kernels for UIs and benchmarks, e.g.
+ * "AVX2+BMI2", "VPCLMULQDQ", "AES-NI (AVX)", "SHA-NI", "BLAKE2sp (AVX2)". */
 const char *gz_dispatch_inflate_name(void);
-const char *gz_dispatch_crc_name(void);
-const char *gz_dispatch_aes_name(void);
+const char *gz_dispatch_crc_name(void);     /* CRC-32                         */
+const char *gz_dispatch_aes_name(void);     /* AES ECB/CBC/CTR                */
+const char *gz_dispatch_sha_name(void);     /* SHA-1 and SHA-256              */
+const char *gz_dispatch_crc64_name(void);   /* CRC-64/XZ                      */
+const char *gz_dispatch_blake2_name(void);  /* BLAKE2sp                       */
 
 #endif
