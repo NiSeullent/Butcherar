@@ -31,20 +31,24 @@
  *     2      2 MiB   fast    HC4  273    24       xz -2
  *     3      4 MiB   fast    HC4  273    48       xz -3
  *     4      4 MiB   normal  BT4   16   auto(24)  xz -4
- *     5      8 MiB   normal  BT4   32   auto(32)  xz -5, 7z -mx5
+ *     5      8 MiB   normal  BT4   32   auto(32)  xz -5 (7z -mx5: same, 16 MiB)
  *     6      8 MiB   normal  BT4   64   auto(48)  xz -6
  *     7     16 MiB   normal  BT4   64   auto(48)  xz -7
  *     8     32 MiB   normal  BT4   96     64      between xz -8 and -8e
- *     9     64 MiB   normal  BT4  128    128      7z -mx9 / approaching xz -9e
+ *     9     64 MiB   normal  BT4  128    128      7z -mx9 (nice 64) .. xz -9e, at xz -9 speed
  *   GZ_LZMA_EXTREME: normal BT4, nice 273, depth 512 (levels 3 and 5: nice 192,
  *   depth auto), like xz -e.
  *   All levels: lc 3, lp 0, pb 2.
  *
  * Limits: dict 4 KiB .. GZ_LZMA_DICT_MAX (1.5 GiB on 64-bit builds, 128 MiB on
- * 32-bit builds, where the total memory is also capped at 1.5 GiB);
- * lc 0..8, lp 0..4, pb 0..4 (LZMA2: lc + lp <= 4); nice_len 5..273.
- * Memory: about dict * 1.5 + (BT4: 8, HC4: 4) * dict + hash (<= 64 MiB) + 0.4 MiB,
- * e.g. level 6 (8 MiB BT4) ~ 94 MiB, level 9 (64 MiB BT4) ~ 678 MiB.
+ * 32-bit builds, where the whole encoder is also capped at GZ_LZMA_MEM_MAX = 1 GiB);
+ * lc 0..8, lp 0..4, pb 0..4 (LZMA2: lc + lp <= 4); nice_len 5..273; depth <= 2^30.
+ * Memory (gz_lzma_enc_memusage): window dict + max(dict / 2, 1 MiB) (LZMA2: at least
+ * 2 MiB + 1 MiB, an uncompressed chunk is copied from it), links dict * 4 (HC4) or
+ * dict * 8 (BT4), hash heads ~dict * 2 (above 32 MiB: ~dict), ~0.3 MiB of coder
+ * state, e.g. 16.3 GiB for a 1.5 GiB BT4 dictionary. Levels 0..9:
+ * 3.4, 8.6, 16, 31, 47, 93, 93, 185, 369, 673 MiB (xz -0..-9: 3, 9, 17, 32, 48, 94,
+ * 94, 186, 370, 674 MiB).
  */
 #ifndef GZ_LZMA_ENC_H
 #define GZ_LZMA_ENC_H
@@ -58,8 +62,10 @@ enum { GZ_LZMA_FAST = 0, GZ_LZMA_NORMAL = 1 };
 
 #if UINTPTR_MAX > 0xFFFFFFFFu
 #define GZ_LZMA_DICT_MAX (1536u << 20)
+#define GZ_LZMA_MEM_MAX  (~(u64)0)        /* no cap beyond what the allocator gives  */
 #else
 #define GZ_LZMA_DICT_MAX (128u << 20)
+#define GZ_LZMA_MEM_MAX  ((u64)1 << 30)   /* 32-bit: total encoder memory            */
 #endif
 
 typedef struct gz_lzma_enc_opts {
@@ -80,7 +86,7 @@ typedef struct gz_lzma_enc_opts {
 
 typedef struct gz_lzma_enc gz_lzma_enc;
 
-/* Defaults of a level 0..9 (clamped), optionally | GZ_LZMA_EXTREME. */
+/* Defaults of a level 0..9 (larger: 9, negative: 5), optionally | GZ_LZMA_EXTREME. */
 void gz_lzma_enc_opts_init(gz_lzma_enc_opts *o, int level);
 /* GZ_OK, GZ_E_METHOD (invalid parameter) or GZ_E_LIMIT (dictionary / memory too
  * large for this build). lzma2 != 0 also checks lc + lp <= 4. */

@@ -1135,8 +1135,8 @@ void gz_lzma_enc_opts_init(gz_lzma_enc_opts *o, int level)
     static const u8 dict_log[10] = { 18, 20, 21, 22, 22, 23, 23, 24, 25, 26 };
     static const u16 nice[10] = { 128, 128, 273, 273, 16, 32, 64, 64, 96, 128 };
     static const u8 depth[10] = { 4, 8, 24, 48, 0, 0, 0, 0, 64, 128 };
-    int extreme = (level & GZ_LZMA_EXTREME) != 0;
-    level &= 0xFF;
+    int extreme = level >= 0 && (level & GZ_LZMA_EXTREME) != 0;
+    level = level < 0 ? 5 : level & 0xFF;      /* negative: the default level */
     if (level > 9) level = 9;
     __builtin_memset(o, 0, sizeof(*o));
     o->level = level;
@@ -1177,9 +1177,7 @@ int gz_lzma_enc_check(const gz_lzma_enc_opts *o, int lzma2)
     if (o->nice_len < 5 || o->nice_len > LEN_MAX) return GZ_E_METHOD;
     if (o->dict_size < GZ_MF_DICT_MIN) return GZ_E_METHOD;
     if (o->dict_size > GZ_LZMA_DICT_MAX || o->depth > (1u << 30)) return GZ_E_LIMIT;
-#if UINTPTR_MAX <= 0xFFFFFFFFu
-    if (gz_lzma_enc_memusage(o, lzma2) > (1536u << 20)) return GZ_E_LIMIT;
-#endif
+    if (gz_lzma_enc_memusage(o, lzma2) > GZ_LZMA_MEM_MAX) return GZ_E_LIMIT;
     return GZ_OK;
 }
 
@@ -1289,7 +1287,7 @@ int gz_lzma2_encode(gz_lzma_enc *e, const gz_stream_io *io, u8 *dict_prop)
 {
     int r, need_dict = 1, need_props = 1;
     u8 props = (u8)((e->pb * 5 + e->lp) * 9 + e->lc);
-    if (e->lc + e->lp > 4) return GZ_E_METHOD;
+    if ((r = gz_lzma_enc_check(&e->o, 1)) != GZ_OK) return r;     /* lc + lp <= 4, memory cap */
     if (dict_prop) *dict_prop = gz_lzma2_enc_dict_prop(e);
     if (!e->lit_saved && !(e->lit_saved = (prob *)gz_alloc(e->lit_n * sizeof(prob)))) return GZ_E_NOMEM;
     if ((r = enc_start(e, 1, io)) != GZ_OK) return r;

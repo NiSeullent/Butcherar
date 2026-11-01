@@ -4,10 +4,12 @@ Corpora (English and Korean text, source tar, binaries, random, zeros, mixed), e
 raw LZMA / raw LZMA2 / .lzma / .xz (wrapped here), LZMA2 chunk structure at the 64 KiB and
 2 MiB boundaries, options (lc/lp/pb, dictionary, nice, depth, finders, parsers, size hints),
 streaming (tiny reads, stdin, 100 MB with bounded memory), renormalisation, determinism,
-error propagation, random option fuzzing, ratio against xz.
+error propagation, random option fuzzing, identical output on i586 (-m32) and AArch64 (QEMU),
+ratio against xz.
 
-GZ_LZMAENC_BENCH=1 prints a ratio/speed table against xz -0..-9e and 7z -mx1..9;
-GZ_LZMAENC_SLOW=1 adds a 100 MB level 6 run."""
+GZ_LZMAENC_BENCH=1 adds a ratio/speed table against xz -0..-9e and 7z -mx1..9 (=only: just
+the table, see bench()); GZ_LZMAENC_SLOW=1 adds a 100 MB level 6 run; GZ_LZMAENC_TIMES=1
+prints the seconds spent per section."""
 import os, sys, random, subprocess, hashlib, struct, zlib, tarfile, io, time, shutil
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -282,6 +284,8 @@ def run(t):
         "mixed": gen("mixed", sz(4 * MiB), 7),
     }
     files = {k: write("c_%s.bin" % k, v) for k, v in corp.items()}
+    if os.environ.get("GZ_LZMAENC_BENCH") == "only":
+        return bench(t, drv, files, have7z)
     sizes = {}
     both = ("xz", "7z") if have7z else ("xz",)
     for name in ("en", "mixed"):
@@ -397,7 +401,12 @@ def run(t):
     t.record(st["rc"] == 3 and st["stdout"] == "err=5", "lzma2 lc+lp>4 rejected", str(st.get("stdout")))
 
     lap(8)
-    # 8) random option fuzzing on small inputs
+    # 8) random option fuzzing: in-process stress (chunk structure, read-size independence,
+    #    reuse; memory errors under ASan), then small inputs decoded by xz
+    for seed in (1, 2) if not asan else (3,):
+        r = subprocess.run([drv, "stress", "400" if not asan else "150", str(seed)], capture_output=True, timeout=900)
+        err = r.stderr.decode(errors="replace")
+        t.record(r.returncode == 0 and "runtime error" not in err, "stress seed %d" % seed, err[-400:])
     rnd = random.Random(2024)
     for i in range(30 if not asan else 12):
         n = rnd.choice([rnd.randrange(1, 5000), rnd.randrange(5000, 300000)])
@@ -419,7 +428,52 @@ def run(t):
         roundtrip("fuzz #%d %s %d B %s" % (i, fmt, len(data), " ".join(opts)), data, fmt, rnd.randrange(10), opts)
 
     lap(9)
-    # 9) 100 MB stream through a pipe: bounded memory
+    # 9) other architectures give the same bytes: i586 (-m32: 32-bit sizes, 4-byte match
+    #    compares, 1 GiB memory cap) and AArch64 under QEMU. The driver is built from the
+    #    encoder sources alone there (no host core objects for those targets).
+    cross = []
+    srcs = [os.path.join(ROOT, p) for p in ("tests/drivers/lzmaenc_test.c", "src/codec/lzma_enc.c",
+                                             "src/codec/lz_mf.c")]
+    cflags = ["-std=gnu11", "-O2", "-DLZMAENC_STANDALONE", "-Wall", "-Wextra", "-Wno-unused-parameter",
+              "-Wno-missing-field-initializers"] + ["-I" + os.path.join(ROOT, d) for d in ("src/core", "src/codec")]
+    for name, cc, extra, runner, env in (
+            ("i586", "cc", ["-m32", "-march=i586"], [], None),
+            ("aarch64", "aarch64-linux-gnu-gcc", [], ["qemu-aarch64", "-cpu", "max"],
+             dict(os.environ, QEMU_LD_PREFIX="/usr/aarch64-linux-gnu"))):
+        if not shutil.which(cc) or (runner and not shutil.which(runner[0])):
+            continue
+        exe = os.path.join(W, "lzmaenc_" + name)
+        r = subprocess.run([cc] + extra + cflags + ["-o", exe] + srcs, capture_output=True)
+        if r.returncode or b"warning" in r.stderr:
+            if name == "i586" and b"warning" not in r.stderr:
+                continue                   # no 32-bit multilib on this machine
+            t.record(False, "%s build" % name, r.stderr.decode(errors="replace")[-400:])
+            continue
+        if subprocess.run(runner + [exe, "gen", "text", "10", "1"], capture_output=True, env=env).returncode:
+            continue                       # cannot execute (no QEMU / no loader)
+        cross.append((name, runner + [exe], env))
+    xsamp = write("xsamp.bin", samp[:sz(500000)])
+    for name, cmd, env in cross:
+        if name == "i586":
+            r = subprocess.run(cmd + ["selftest"], capture_output=True, timeout=600, env=env)
+            t.record(r.returncode == 0, "%s selftest" % name, r.stderr.decode(errors="replace")[-600:])
+        r = subprocess.run(cmd + ["stress", "200" if name == "i586" else "60", "5"], capture_output=True,
+                           timeout=900, env=env)
+        t.record(r.returncode == 0, "%s stress" % name, r.stderr.decode(errors="replace")[-400:])
+        for fmt, lv, opts in (("raw2", 1, []), ("raw2", 6, []), ("raw1", 9, ["lc=1", "lp=2", "pb=0"]),
+                              ("alone", 3, ["mf=bt4", "mode=normal", "dict=65536"]),
+                              ("raw2", 2, ["mf=hc4", "dict=4096", "norm=40000"]),
+                              ("raw2", 7, ["extreme=1", "rchunk=777"])):
+            a = enc(fmt, lv, xsamp, os.path.join(W, "x_native"), opts)
+            r = subprocess.run(cmd + ["enc", fmt, str(lv), xsamp, os.path.join(W, "x_cross")] + opts,
+                               capture_output=True, timeout=900, env=env)
+            ok = a["rc"] == 0 and r.returncode == 0 and \
+                open(os.path.join(W, "x_native"), "rb").read() == open(os.path.join(W, "x_cross"), "rb").read()
+            t.record(ok, "%s same bytes L%d %s %s" % (name, lv, fmt, " ".join(opts)),
+                     "rc %d/%d %s" % (a["rc"], r.returncode, r.stderr.decode(errors="replace")[-200:]))
+
+    lap(10)
+    # 10) 100 MB stream through a pipe: bounded memory
     big = 100 * MiB if not asan else 24 * MiB
     for lv, limit_mb in ((1, 48), (6, 160)) if os.environ.get("GZ_LZMAENC_SLOW") else ((1, 48),):
         gp = subprocess.Popen([drv, "gen", "mixed", str(big), "9"], stdout=subprocess.PIPE)
@@ -445,8 +499,8 @@ def run(t):
             st.get("in"), os.path.getsize(out), float(st.get("sec", 0)), rss))
         os.remove(out)
 
-    lap(10)
-    # 10) ratio against xz (same parameters: level 6 / 9 must be close)
+    lap(11)
+    # 11) ratio against xz (same parameters: level 6 / 9 must be close)
     if not asan:
         for name in ("en", "mixed"):
             for lv, tol in ((1, 1.02), (6, 1.02), (9, 1.01)):
@@ -457,42 +511,54 @@ def run(t):
                 t.record(ok, "ratio %s L%d vs xz -%d" % (name, lv, lv), "ours %s xz %d (%+.2f%%)" % (
                     ours, len(r.stdout), (ours - len(r.stdout)) * 100.0 / len(r.stdout) if ours else 0))
 
-    lap(11)
+    lap(12)
     if os.environ.get("GZ_LZMAENC_BENCH"):
         bench(t, drv, files, have7z)
 
 
 def bench(t, drv, files, have7z):
-    """Ratio / single-thread speed table: ours (raw LZMA2) vs xz -0..-9e (raw) vs 7z .xz LZMA2."""
+    """Ratio / single-thread speed table: ours (raw LZMA2) vs xz -T1 -0..-9e (raw LZMA2) vs
+    7z -txz -m0=LZMA2 -mx1..9 -mmt=1 (the .xz container's ~60 bytes subtracted). Speeds are
+    input MB per CPU second (user + sys), so a busy machine distorts them less.
+    GZ_LZMAENC_BENCH_FILES=a:b:... adds external files (e.g. the Silesia corpus);
+    GZ_LZMAENC_BENCH_LEVELS=1,6,9e limits the levels."""
+    import resource
     W = t.work
     out = os.path.join(W, "bench.out")
-    lines = ["%-7s %-5s %12s %8s | %12s %8s %7s | %12s %8s" % (
-        "corpus", "level", "ours", "MB/s", "xz", "MB/s", "diff", "7z", "MB/s")]
-    for name in ("en", "ko", "src", "bin", "mixed"):
-        f = files[name]
+
+    def child_cpu():
+        r = resource.getrusage(resource.RUSAGE_CHILDREN)
+        return r.ru_utime + r.ru_stime
+
+    todo = [(k, files[k]) for k in ("en", "ko", "src", "bin", "mixed")]
+    for f in filter(None, os.environ.get("GZ_LZMAENC_BENCH_FILES", "").split(":")):
+        todo.append((os.path.basename(f)[:9], f))
+    levels = os.environ.get("GZ_LZMAENC_BENCH_LEVELS", "0,1,2,3,4,5,6,7,8,9,9e").split(",")
+    lines = ["%-9s %-3s %11s %7s | %11s %7s %7s | %11s %7s %7s" % (
+        "corpus", "lvl", "ours", "MB/s", "xz", "MB/s", "vs xz", "7z", "MB/s", "vs 7z")]
+    for name, f in todo:
         n = os.path.getsize(f)
-        for lv in [str(i) for i in range(10)] + ["9e"]:
+        for lv in levels:
             ext = lv.endswith("e")
             l = lv.rstrip("e")
             r = subprocess.run([drv, "enc", "raw2", l, f, out] + (["extreme=1"] if ext else []),
                                capture_output=True)
             st = dict(kv.split("=", 1) for kv in r.stderr.decode().split() if "=" in kv)
-            ours, osec = os.path.getsize(out), float(st["sec"])
-            t0 = time.time()
-            x = subprocess.run(["xz", "-T1", "-" + l + ("e" if ext else ""), "--format=raw", "-c", f],
-                               capture_output=True).stdout
-            xsec = time.time() - t0
-            s7 = s7sec = 0
+            ours, ocpu = os.path.getsize(out), max(float(st["cpu"]), 1e-6)
+            c0 = child_cpu()
+            xs = len(subprocess.run(["xz", "-T1", "-" + lv, "--format=raw", "-c", f], capture_output=True).stdout)
+            xcpu = max(child_cpu() - c0, 1e-6)
+            s7 = "-"
             if have7z and l != "0" and not ext:
                 p7 = os.path.join(W, "bench.xz")
                 if os.path.exists(p7):
                     os.remove(p7)
-                t0 = time.time()
+                c0 = child_cpu()
                 subprocess.run(["7z", "a", "-txz", "-m0=LZMA2", "-mx=" + l, "-mmt=1", p7, f], capture_output=True)
-                s7sec = time.time() - t0
-                s7 = os.path.getsize(p7)
-            lines.append("%-7s %-5s %12d %8.2f | %12d %8.2f %+6.2f%% | %12s %8s" % (
-                name, lv, ours, n / osec / 1e6, len(x), n / xsec / 1e6, (ours - len(x)) * 100.0 / len(x),
-                s7 or "-", "%.2f" % (n / s7sec / 1e6) if s7 else "-"))
-    print("\n".join(lines))
+                c7 = max(child_cpu() - c0, 1e-6)
+                z = os.path.getsize(p7) - 60
+                s7 = "%11d %7.2f %+6.2f%%" % (z, n / c7 / 1e6, (ours - z) * 100.0 / z)
+            lines.append("%-9s %-3s %11d %7.2f | %11d %7.2f %+6.2f%% | %s" % (
+                name, lv, ours, n / ocpu / 1e6, xs, n / xcpu / 1e6, (ours - xs) * 100.0 / xs, s7))
+            print(lines[-1], file=sys.stderr, flush=True)
     t.record(True, "benchmark", "\n" + "\n".join(lines))

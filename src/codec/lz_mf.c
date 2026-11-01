@@ -22,23 +22,24 @@ static u32 hash_mask_for(u32 dict)
     hs |= hs >> 16;
     hs >>= 1;
     hs |= 0xFFFF;
-    if (hs > (1u << 24)) hs >>= 1;     /* at most 16 Mi heads (64 MiB) */
+    if (hs > (1u << 24)) hs >>= 1;     /* above 32 MiB: dict/4 heads (xz, 7-Zip) */
     return hs;
 }
 
-static void sizes_for(const gz_lz_mf_cfg *c, size_t *hash_bytes, size_t *son_bytes, size_t *buf_size)
+/* Table and window sizes in u64 (no size_t overflow on 32-bit builds). */
+static void sizes_for(const gz_lz_mf_cfg *c, u64 *hash_bytes, u64 *son_bytes, u64 *buf_size)
 {
-    u32 cyc = c->dict_size + 1;
-    *hash_bytes = ((size_t)FIX4 + hash_mask_for(c->dict_size) + 1) * 4;
-    *son_bytes = (size_t)cyc * (c->type == GZ_MF_BT4 ? 8 : 4);
-    *buf_size = c->keep_before + c->keep_after + c->block;
+    u64 cyc = (u64)c->dict_size + 1;
+    *hash_bytes = ((u64)FIX4 + hash_mask_for(c->dict_size) + 1) * 4;
+    *son_bytes = cyc * (c->type == GZ_MF_BT4 ? 8 : 4);
+    *buf_size = (u64)c->keep_before + c->keep_after + c->block;
 }
 
 u64 gz_lz_mf_memusage(const gz_lz_mf_cfg *c)
 {
-    size_t h, s, b;
+    u64 h, s, b;
     sizes_for(c, &h, &s, &b);
-    return (u64)h + s + b;
+    return h + s + b;
 }
 
 void gz_lz_mf_release(gz_lz_mf *m)
@@ -350,11 +351,16 @@ static void bt4_skip(gz_lz_mf *m, u32 num)
 
 int gz_lz_mf_alloc(gz_lz_mf *m, const gz_lz_mf_cfg *c)
 {
+    u64 h64, s64, b64;
     size_t hb, sb, bs;
     if (c->dict_size < GZ_MF_DICT_MIN || c->dict_size > 0x7FFFFFF0u ||
         c->keep_before <= c->dict_size || c->keep_after <= GZ_MF_LEN_MAX || !c->block)
         return GZ_E_METHOD;
-    sizes_for(c, &hb, &sb, &bs);
+    sizes_for(c, &h64, &s64, &b64);
+    if (h64 + s64 + b64 > (u64)(~(size_t)0 >> 1)) return GZ_E_LIMIT;   /* 32-bit address space */
+    hb = (size_t)h64;
+    sb = (size_t)s64;
+    bs = (size_t)b64;
     if (hb != m->hash_bytes || !m->hash_mem) {
         if (m->hash_mem) gz_free_big(m->hash_mem, m->hash_bytes);
         m->hash_bytes = hb;

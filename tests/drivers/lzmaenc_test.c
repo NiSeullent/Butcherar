@@ -15,6 +15,8 @@
  *       exit: 0 ok, 3 encode error (code printed), 4 reuse mismatch, 1 usage / io
  *   lzmaenc_test gen <text|random|zeros|mixed|binary> <size> <seed>    synthetic data to stdout
  *   lzmaenc_test selftest                                                 API checks
+ *   lzmaenc_test stress <iterations> <seed>   random data + options in-process: LZMA2 chunk
+ *                                             structure, read-size independence, reuse
  */
 #include "lzma_enc.h"
 #include <stdio.h>
@@ -23,6 +25,16 @@
 #include <time.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+
+#ifdef LZMAENC_STANDALONE
+/* Built from the encoder sources alone (cross-architecture runs: -m32, AArch64 under
+ * QEMU) instead of the host core objects: plain libc allocator. */
+void *gz_alloc(size_t n) { return calloc(1, n ? n : 1); }
+void *gz_realloc(void *p, size_t n) { return realloc(p, n); }
+void gz_free(void *p) { free(p); }
+void *gz_alloc_big(size_t n) { return calloc(1, n); }
+void gz_free_big(void *p, size_t n) { (void)n; free(p); }
+#endif
 
 typedef struct {
     FILE *in, *out;
@@ -291,6 +303,14 @@ static int selftest(void)
         CHECK(gz_lzma_enc_check(&o, 1) == GZ_OK, "level %d defaults rejected", lv);
         CHECK(gz_lzma_enc_memusage(&o, 0) > o.dict_size, "memusage level %d", lv);
     }
+    gz_lzma_enc_opts_init(&o, -1);
+    CHECK(o.level == 5 && o.dict_size == 8u << 20 && o.nice_len == 32, "negative level -> 5");
+    gz_lzma_enc_opts_init(&o, 100);
+    CHECK(o.level == 9 && o.dict_size == 64u << 20, "level 100 -> 9");
+    gz_lzma_enc_opts_init(&o, 9 | GZ_LZMA_EXTREME);
+    CHECK(o.nice_len == 273 && o.depth == 512 && o.mf == GZ_MF_BT4, "9e");
+    gz_lzma_enc_opts_init(&o, 1 | GZ_LZMA_EXTREME);
+    CHECK(o.mode == GZ_LZMA_NORMAL && o.mf == GZ_MF_BT4 && o.dict_size == 1u << 20, "1e");
     gz_lzma_enc_opts_init(&o, 6);
     gz_lzma_enc_opts b = o; b.lc = 9; CHECK(gz_lzma_enc_check(&b, 0) == GZ_E_METHOD, "lc 9");
     b = o; b.lp = 5; CHECK(gz_lzma_enc_check(&b, 0) == GZ_E_METHOD, "lp 5");
@@ -301,6 +321,19 @@ static int selftest(void)
     b = o; b.dict_size = GZ_LZMA_DICT_MAX + 1; CHECK(gz_lzma_enc_check(&b, 0) == GZ_E_LIMIT, "dict max");
     b = o; b.mode = 7; CHECK(gz_lzma_enc_check(&b, 0) == GZ_E_METHOD, "mode");
     b = o; b.mf = 9; CHECK(gz_lzma_enc_check(&b, 0) == GZ_E_METHOD, "mf");
+    b = o; b.depth = (1u << 30) + 1; CHECK(gz_lzma_enc_check(&b, 0) == GZ_E_LIMIT, "depth");
+#if UINTPTR_MAX <= 0xFFFFFFFFu
+    /* 32-bit: 128 MiB BT4 needs ~1.3 GiB (over the cap), HC4 fits */
+    b = o; b.dict_size = 128u << 20;
+    CHECK(gz_lzma_enc_check(&b, 1) == GZ_E_LIMIT && gz_lzma_enc_new(&b) == NULL, "32-bit memory cap");
+    b.mf = GZ_MF_HC4; b.mode = GZ_LZMA_FAST;
+    CHECK(gz_lzma_enc_check(&b, 1) == GZ_OK, "32-bit HC4 128 MiB");
+    CHECK(GZ_LZMA_DICT_MAX == 128u << 20, "32-bit dict max");
+#else
+    b = o; b.dict_size = GZ_LZMA_DICT_MAX;
+    CHECK(gz_lzma_enc_check(&b, 1) == GZ_OK && gz_lzma_enc_memusage(&b, 1) > (u64)GZ_LZMA_DICT_MAX * 9,
+          "64-bit 1.5 GiB dictionary");
+#endif
     b = o; b.lc = 4; b.lp = 1;
     CHECK(gz_lzma_enc_check(&b, 0) == GZ_OK && gz_lzma_enc_check(&b, 1) == GZ_E_METHOD, "lc+lp lzma2");
     CHECK(gz_lzma_enc_new(&(gz_lzma_enc_opts){ 0 }) == NULL, "zeroed opts accepted");
@@ -393,6 +426,134 @@ static int selftest(void)
     return fails ? 2 : 0;
 }
 
+/* ---------------- in-process stress (run under ASan/UBSan) ---------------- */
+
+/* LZMA2 chunk structure: limits, reset/property flags, the range coder's leading 0,
+ * the encoder's "LZMA chunks shrink" rule and the total unpacked size. */
+static const char *check_lzma2(const u8 *p, size_t n, u64 want, u8 props)
+{
+    size_t pos = 0;
+    u64 total = 0;
+    int first = 1, need_props = 1;
+    for (;;) {
+        if (pos >= n) return "no end byte";
+        u32 c = p[pos];
+        if (c == 0) return pos + 1 == n ? (total == want ? NULL : "unpacked total") : "data after end";
+        if (c == 1 || c == 2) {
+            if (first && c != 1) return "first chunk without dictionary reset";
+            if (pos + 3 > n) return "truncated copy header";
+            u32 u = ((u32)p[pos + 1] << 8 | p[pos + 2]) + 1;
+            pos += 3 + (size_t)u;
+            total += u;
+            if (c == 1) need_props = 1;
+        } else if (c >= 0x80) {
+            if (first && c < 0xE0) return "first LZMA chunk without dictionary reset";
+            if (need_props && c < 0xC0) return "LZMA chunk without properties";
+            if (pos + 6 > n) return "truncated LZMA header";
+            u32 u = ((c & 0x1F) << 16 | (u32)p[pos + 1] << 8 | p[pos + 2]) + 1;
+            u32 pk = ((u32)p[pos + 3] << 8 | p[pos + 4]) + 1;
+            size_t hl = c >= 0xC0 ? 6 : 5;
+            if (hl == 6 && p[pos + 5] != props) return "properties byte";
+            if (pk + 2 >= u) return "LZMA chunk does not shrink";
+            if (pos + hl + pk > n || p[pos + hl] != 0) return "range coder start";
+            pos += hl + pk;
+            total += u;
+            need_props = 0;
+        } else return "bad control byte";
+        first = 0;
+    }
+}
+
+/* Test data: random bytes, runs, a small alphabet, counters and copies of earlier
+ * pieces (near and far, long and short) so every match kind and rep shows up. */
+static void stress_data(u8 *d, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        size_t k = 1 + rnd() % (rnd() % 8 ? 300 : 5000);
+        if (k > n - i) k = n - i;
+        u32 kind = rnd() % 6, a = rnd();
+        if (kind == 0) for (size_t j = 0; j < k; j++) d[i + j] = (u8)rnd();
+        else if (kind == 1) memset(d + i, (int)(a & 0xFF), k);
+        else if (kind == 2) for (size_t j = 0; j < k; j++) d[i + j] = (u8)("ab\nc "[rnd() % 5]);
+        else if (kind == 3) for (size_t j = 0; j < k; j++) d[i + j] = (u8)(a + j * (a >> 24 & 3));
+        else if (i) {                                 /* copy, maybe overlapping, maybe edited */
+            size_t dist = 1 + (kind == 4 ? rnd() % (i < 64 ? i : 64) : rnd() % i);
+            for (size_t j = 0; j < k; j++) d[i + j] = d[i + j - dist];
+            if (rnd() % 3 == 0) d[i + rnd() % k] ^= (u8)(1 + rnd() % 255);
+        } else d[i] = (u8)a, k = 1;
+        i += k;
+    }
+}
+
+static int stress(int iters, u64 seed)
+{
+    static const u32 dicts[] = { 4096, 4097, 6000, 65536, 1u << 20, 3u << 20 };
+    static const u32 nices[] = { 5, 6, 17, 32, 64, 128, 200, 272, 273 };
+    static const u32 depths[] = { 0, 1, 2, 7, 48, 1000 };
+    rng_s = seed * 0x9E3779B97F4A7C15ull + 1;
+    for (int it = 0; it < iters; it++) {
+        gz_lzma_enc_opts o;
+        gz_lzma_enc_opts_init(&o, (int)(rnd() % 10) | (rnd() % 8 == 0 ? GZ_LZMA_EXTREME : 0));
+        int lz2 = rnd() & 1;
+        o.lc = (u8)(rnd() % 5);
+        o.lp = (u8)(rnd() % (5 - o.lc));
+        if (!lz2 && rnd() % 6 == 0) { o.lc = (u8)(rnd() % 9); o.lp = (u8)(rnd() % 5); }
+        o.pb = (u8)(rnd() % 5);
+        if (rnd() & 1) o.dict_size = dicts[rnd() % 6];
+        if (rnd() & 1) o.nice_len = nices[rnd() % 9];
+        if (rnd() & 1) o.depth = depths[rnd() % 6];
+        if (rnd() % 4 == 0) o.mf = (u8)(rnd() & 1);
+        if (rnd() % 4 == 0) o.mode = (u8)(rnd() & 1);
+        size_t n = rnd() % 40 == 0 && o.mode == GZ_LZMA_FAST ? (2u << 20) + rnd() % 300000
+                                                             : rnd() % (1u << (rnd() % 18));
+        if (rnd() % 5 == 0) o.size_hint = (u64[]){ n, n / 3 + 1, n * 5 + 1, 1 }[rnd() % 4];
+        if (rnd() % 5 == 0) o.test_norm_step = 1000 + rnd() % 70000;
+        u8 *d = malloc(n + 1);
+        stress_data(d, n);
+        gz_lzma_enc *e = gz_lzma_enc_new(&o);
+        if (!e) {
+            fprintf(stderr, "stress #%d: new failed (check %d)\n", it, gz_lzma_enc_check(&o, 0));
+            return 2;
+        }
+        u8 props[5] = { 0 }, dp = 0;
+        int eos = (int)(rnd() & 1);
+        u8 *out[2] = { 0 };
+        size_t on[2] = { 0 };
+        for (int pass = 0; pass < 2; pass++) {    /* same encoder, other read sizes: same bytes */
+            io_ctx x;
+            memset(&x, 0, sizeof x);
+            x.mem = d; x.mem_n = n;
+            x.rchunk = rnd() % 3 ? 0 : 1 + rnd() % (rnd() & 1 ? 7 : 70000);
+            gz_stream_io io = { rd, wr, &x };
+            int r = lz2 ? gz_lzma2_encode(e, &io, &dp) : gz_lzma_encode(e, &io, props, eos);
+            if (r || (lz2 && gz_lzma_enc_in_size(e) != n) || gz_lzma_enc_out_size(e) != x.on) {
+                fprintf(stderr, "stress #%d pass %d: r=%d in=%llu out=%llu/%zu\n", it, pass, r,
+                        (unsigned long long)gz_lzma_enc_in_size(e), (unsigned long long)gz_lzma_enc_out_size(e), x.on);
+                return 2;
+            }
+            out[pass] = x.obuf;
+            on[pass] = x.on;
+        }
+        const char *why = NULL;
+        if (lz2) why = check_lzma2(out[0], on[0], n, (u8)((o.pb * 5 + o.lp) * 9 + o.lc));
+        else if (on[0] < 5 || out[0][0] != 0) why = "range coder start";
+        if (!why && (on[0] != on[1] || memcmp(out[0], out[1], on[0]))) why = "not deterministic";
+        if (why) {
+            fprintf(stderr, "stress #%d (%s, %zu B, lc%u lp%u pb%u dict %u nice %u depth %u mf %u mode %u): %s\n",
+                    it, lz2 ? "lzma2" : "lzma", n, o.lc, o.lp, o.pb, o.dict_size, o.nice_len, o.depth, o.mf,
+                    o.mode, why);
+            return 2;
+        }
+        free(out[0]);
+        free(out[1]);
+        free(d);
+        gz_lzma_enc_free(e);
+    }
+    fprintf(stderr, "stress: %d runs ok\n", iters);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && !strcmp(argv[1], "enc")) return cmd_enc(argc - 2, argv + 2);
@@ -401,6 +562,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc >= 2 && !strcmp(argv[1], "selftest")) return selftest();
-    fprintf(stderr, "usage: lzmaenc_test enc|gen|selftest ...\n");
+    if (argc >= 4 && !strcmp(argv[1], "stress")) return stress(atoi(argv[2]), strtoull(argv[3], 0, 0));
+    fprintf(stderr, "usage: lzmaenc_test enc|gen|selftest|stress ...\n");
     return 1;
 }
