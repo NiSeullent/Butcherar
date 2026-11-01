@@ -93,7 +93,7 @@ add_zip_case(p, names=cp_names)
 
 # 2b) CP949 names that happen to be valid UTF-8 ("캡처" = C4 B8 C3 B3) must stay CP949
 p = os.path.join(WORK, "cp949_ambiguous.zip")
-amb = ["캡처.png", "캡처v2.png", "Win캡처.png", "Img캡처.jpg", "캡처_v2.png", "readme.txt"]
+amb = ["캡처.png", "캡처v2.png", "Win캡처.png", "Img캡처.jpg", "캡처_v2.png", "짤.png", "readme.txt"]
 with zipfile.ZipFile(p, "w") as z:
     for k in amb:
         z.writestr(RawInfo(k.encode("cp949")), k.encode())
@@ -103,7 +103,16 @@ add_zip_case(p, names=amb)
 p = os.path.join(WORK, "latin_utf8.zip")
 lat = ["Résumé.pdf", "café/menu.txt", unicodedata.normalize("NFD", "été.txt"), "Ångström.txt",
        "Отчёт.txt", "Αθήνα.txt", "Größe.txt", "Documentos/Apresentação.pptx", "Příloha.pdf",
-       "Müşteri.xlsx", unicodedata.normalize("NFD", "Việt Nam.txt"), unicodedata.normalize("NFD", "Füße.jpg")]
+       "Müşteri.xlsx", unicodedata.normalize("NFD", "Việt Nam.txt"), unicodedata.normalize("NFD", "Füße.jpg"),
+       "Wartość.xlsx", "Účetnictví.xlsx", "Öğrenci listesi.xlsx", "Hóa đơn.pdf", "Facture à payer.pdf",
+       "1º Trimestre.xlsx", "Licenţă.pdf", "видео.mp4"]
+# decisive names must win even when outnumbered by ambiguous ones
+p_dec = os.path.join(WORK, "decisive_utf8.zip")
+dec = ["Rapport – mars.pdf", "Lettre à Marie.docx", "Facture à payer.pdf", "Ølstue.txt"]
+with zipfile.ZipFile(p_dec, "w") as z:
+    for k in dec:
+        z.writestr(RawInfo(k.encode("utf-8")), k.encode())
+add_zip_case(p_dec, names=dec)
 with zipfile.ZipFile(p, "w") as z:
     for k in lat:
         z.writestr(RawInfo(k.encode("utf-8")), k.encode())
@@ -126,7 +135,7 @@ cases.append((p2, None, cases[-1][2]))
 
 # 2d) GBK names on Chinese Windows (ACP 936) must stay GBK ("通" = CD A8 looks like UTF-8)
 p = os.path.join(WORK, "gbk.zip")
-gbk = ["通知.doc", "通讯录.xls", "v通知.doc", "Re通知.txt", "readme.txt"]
+gbk = ["通知.doc", "通讯录.xls", "v通知.doc", "Re通知.txt", "討論.txt", "負責人.xlsx", "readme.txt"]
 with zipfile.ZipFile(p, "w") as z:
     for k in gbk:
         z.writestr(RawInfo(k.encode("gbk")), k.encode())

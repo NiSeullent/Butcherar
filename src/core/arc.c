@@ -202,35 +202,55 @@ static int utf8_max_seq(const u8 *s, size_t n)
     return m;
 }
 
-/* Weigh one name that is valid UTF-8 using only 2-byte sequences, so it could
- * also be a legacy DBCS name (CP949 "캡처" = C4 B8 C3 B3, GBK "通知" = CD A8 D6 AA).
- *   UTF-8 evidence : the bytes are invalid in the ANSI code page (decisive), or
- *                    accented letters sitting inside a Latin word (see below).
- *   legacy evidence: the ANSI decoding is Hangul syllables / CJK ideographs / kana. */
-static void score_ambiguous(const u8 *s, size_t n, int acp, int *u, int *l)
+/* Vote on one name that is valid UTF-8 built only from 2-byte sequences and also
+ * valid in the ANSI code page, e.g. CP949 "캡처" = C4 B8 C3 B3 or GBK "通知" =
+ * CD A8 D6 AA. Returns 1 for UTF-8, 0 for the ANSI code page.
+ *
+ * On 949/936/950 the 2-byte UTF-8 pairs line up with the DBCS pairs. Names typed on
+ * Korean/Chinese Windows use the common sets (KS X 1001, GB2312, Big5), whose trail
+ * bytes are always >= A1; an accented Latin letter or NFD mark with trail 80-A0
+ * ("ś" C5 9B, "à" C3 A0, "ß" C3 9F, CC 81) would be a rare extension character, so
+ * it counts for UTF-8. On CP949, pairs with lead >= CA would be Hanja (rare in
+ * Korean file names) but are Greek/Cyrillic/Hebrew/Arabic in UTF-8.
+ * Pairs that are common in both readings count for the ANSI code page unless they
+ * sit inside Latin text: a lone pair next to an ASCII letter ("Résumé", "café"), or
+ * a run with ASCII letters on both sides ("Größe", NFD "Việt"). A lone Hangul
+ * syllable like "짤.png" (C2 A9, also "©") stays CP949. */
+static int vote_ambiguous(const u8 *s, size_t n, int acp)
 {
-    if (!gz_plat_mb_valid(acp, s, (int)n)) { *u += 100; return; }
-    /* Score each run of consecutive 2-byte sequences: one sequence touching an ASCII
-     * letter ("Résumé", NFD "e+◌́"), or a longer run with letters on BOTH sides
-     * ("Größe", "Situação", NFD "Việt"). "캡처v2", "Win캡처", "v通知" touch a letter on
-     * one side only and stay legacy. */
+    int euc = acp == 949 || acp == 936 || acp == 950;
+    int u = 0, l = 0;
     for (size_t i = 0; i + 1 < n;) {
         if (s[i] < 0xC2 || s[i] > 0xDF) { i++; continue; }
         size_t j = i;
         while (j + 1 < n && s[j] >= 0xC2 && s[j] <= 0xDF) j += 2;
-        u8 b = i ? (u8)(s[i - 1] | 0x20) : 0, f = j < n ? (u8)(s[j] | 0x20) : 0;
+        int pairs = (int)((j - i) / 2);
+        for (size_t k = i; k < j; k += 2) {
+            u8 ld = s[k], tr = s[k + 1];
+            if (euc && tr < 0xA1 && ((ld >= 0xC3 && ld <= 0xC9) || ld == 0xCC))
+                u += 3;      /* accented Latin letter / NFD mark in a rare legacy slot */
+            else if (acp == 949 && ld >= 0xCA)
+                u += 3;      /* Hanja row in CP949, Greek/Cyrillic/Hebrew/Arabic in UTF-8 */
+            else
+                l += 2;
+        }
+        int pb = i ? s[i - 1] : ' ', pf = j < n ? s[j] : ' ';
+        u8 b = (u8)(pb | 0x20), f = (u8)(pf | 0x20);
         int lb = b >= 'a' && b <= 'z', lf = f >= 'a' && f <= 'z';
-        if (j - i == 2 ? (lb || lf) : (lb && lf)) *u += 3 * (int)((j - i) / 2);
+        if (pairs == 1 ? (lb || lf) : (lb && lf)) u += 3 * pairs;
         i = j;
     }
-    wchar_t w[512];
-    int m = n < 255 ? gz_plat_mb2wc(acp, s, (int)n, w, 512) : 0;
-    for (int k = 0; k < m; k++) {
-        u32 c = (u16)w[k];
-        if (c >= 0xAC00 && c <= 0xD7A3) *l += acp == 949 ? 2 : 1;          /* Hangul */
-        else if (c >= 0x4E00 && c <= 0x9FFF) *l += acp == 949 ? 1 : 2;     /* CJK    */
-        else if (c >= 0x3040 && c <= 0x30FF) *l += acp == 932 ? 2 : 1;     /* kana   */
+    if (!euc) {
+        /* Shift-JIS does not line up with UTF-8 pairs: judge by what it decodes to */
+        wchar_t w[512];
+        int m = n < 255 ? gz_plat_mb2wc(acp, s, (int)n, w, 512) : 0;
+        l = 0;
+        for (int k = 0; k < m; k++) {
+            u32 c = (u16)w[k];
+            if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3040 && c <= 0x30FF)) l += 2;
+        }
     }
+    return u > l;
 }
 
 static int choose_codepage(gz_archive *a)
@@ -240,9 +260,7 @@ static int choose_codepage(gz_archive *a)
     /* DBCS names that happen to be valid UTF-8 come from ZIPs made on CJK Windows.
      * TAR/GZ names are raw bytes from Linux/macOS: UTF-8 whenever they are valid. */
     int dbcs = a->type == GZ_ARC_ZIP && (acp == 932 || acp == 936 || acp == 949 || acp == 950);
-    /* Each name votes on its own evidence, so a few names that both readings
-     * accept cannot outweigh many clearly-Latin ones (or the other way round). */
-    int legacy = 0, all_utf8 = 1, vu = 0, vl = 0;
+    int legacy = 0, all_utf8 = 1, sure = 0, vu = 0, vl = 0;
     for (u32 i = 0; i < a->n; i++) {
         gz_entry *e = &a->e[i];
         if (e->uni_len || e->utf8) continue;
@@ -250,13 +268,13 @@ static int choose_codepage(gz_archive *a)
         if (name_is_ascii(r, e->raw_len)) continue;
         legacy = 1;
         if (!gz_utf8_valid(r, e->raw_len)) { all_utf8 = 0; break; }
-        if (!dbcs) continue;
-        if (utf8_max_seq(r, e->raw_len) >= 3) { vu++; continue; }   /* real Hangul/CJK UTF-8 */
-        int u = 0, l = 0;
-        score_ambiguous(r, e->raw_len, acp, &u, &l);
-        if (u > l) vu++; else vl++;
+        if (!dbcs || sure) continue;
+        /* decisive: 3-byte sequences (real Hangul/CJK UTF-8, "–", "’"), or bytes the
+         * ANSI code page rejects (Cyrillic/Greek on CP949) */
+        if (utf8_max_seq(r, e->raw_len) >= 3 || !gz_plat_mb_valid(acp, r, (int)e->raw_len)) { sure = 1; continue; }
+        if (vote_ambiguous(r, e->raw_len, acp)) vu++; else vl++;
     }
-    if (legacy && all_utf8 && (!dbcs || vu > vl)) return GZ_CP_UTF8;
+    if (legacy && all_utf8 && (!dbcs || sure || vu > vl)) return GZ_CP_UTF8;
     return acp;
 }
 
