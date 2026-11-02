@@ -19,7 +19,8 @@
 #if defined(__clang__)
 #define GZ_TARGET_AES __attribute__((target("aes")))
 #else
-#define GZ_TARGET_AES __attribute__((target("+aes")))
+/* GCC 11 defines the crypto intrinsics under "+crypto" (GCC 12+ split it into +aes/+sha2) */
+#define GZ_TARGET_AES __attribute__((target("+crypto")))
 #endif
 #endif
 

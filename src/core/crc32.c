@@ -26,7 +26,7 @@
 #define GZ_TARGET_CRC_PMULL __attribute__((target("crc,aes")))
 #else
 #define GZ_TARGET_CRC __attribute__((target("+crc")))
-#define GZ_TARGET_CRC_PMULL __attribute__((target("+crc+aes")))
+#define GZ_TARGET_CRC_PMULL __attribute__((target("+crc+crypto")))
 #endif
 #endif
 

@@ -140,6 +140,16 @@ def hostile(t, drv, img, label):
 
 # ---------------------------------------------------------------- source trees
 
+def expect_owner(uid, gid, cram=False):
+    """Owner stored in an image: chown needs root, so as a normal user (CI) the files keep the
+    ids of the user running the tests. CramFS keeps 16 bits of uid and 8 bits of gid."""
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        uid, gid = os.getuid(), os.getgid()
+    if cram:
+        uid, gid = uid & 0xFFFF, gid & 0xFF
+    return uid | gid << 32
+
+
 def make_src(t, root, files, links=(), hard=(), sparse=(), modes=None, owners=None, xattrs=(), special=False):
     """files {rel: bytes|None}, links [(rel, target)], hard [(rel, existing)], sparse [(rel, size, [(off, bytes)])]"""
     shutil.rmtree(root, ignore_errors=True)
@@ -325,7 +335,7 @@ def squash_main(t, drv):
     want("suid.bin", mode=0o104755)
     want("exe/prog.bin", mode=0o100755)
     want("private", mode=0o40700, is_dir=1, attr=0x10)
-    want("owned.txt", aux=1234 | 5678 << 32)
+    want("owned.txt", aux=expect_owner(1234, 5678))
     want("고기", is_dir=1, mtime=ft_of(WHEN))
     want("sparse/holes.bin", usize=3 << 20)
     want("hard/big_hl.bin", usize=2500000)
@@ -950,7 +960,7 @@ def cram_main(t, drv, sdrv):
         row = rows.get(l)
         if not row or row["link"] != tgt or not row["is_link"]:
             bad.append("link %s" % l)
-    if rows.get("bin/data.bin", {}).get("mode") != 0o100755 or rows["bin/data.bin"]["aux"] != 321 | 77 << 32:
+    if rows.get("bin/data.bin", {}).get("mode") != 0o100755 or rows["bin/data.bin"]["aux"] != expect_owner(321, 77, cram=True):
         bad.append("data.bin mode/owner %r" % rows.get("bin/data.bin"))
     if rows.get("readme.txt", {}).get("attr") != 1 or rows["readme.txt"]["mk"] != 0:
         bad.append("readme.txt attr/time %r" % rows.get("readme.txt"))

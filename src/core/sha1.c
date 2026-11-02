@@ -12,7 +12,7 @@
 #if defined(__clang__)
 #define GZ_TARGET_SHA1 __attribute__((target("sha2")))
 #else
-#define GZ_TARGET_SHA1 __attribute__((target("+sha2")))
+#define GZ_TARGET_SHA1 __attribute__((target("+crypto")))
 #endif
 #endif
 

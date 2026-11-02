@@ -271,6 +271,18 @@ def copy_bin(src, dst, mode=0o644):
     os.chmod(dst, mode)
     return True
 
+def elf_filter(path):
+    """Branch filter 7-Zip applies to an ELF file: BCJ (x86/x64), ARM64, or None."""
+    try:
+        with open(path, "rb") as f:
+            h = f.read(20)
+    except OSError:
+        return None
+    if h[:4] != b"\x7fELF" or len(h) < 20:
+        return None
+    machine = int.from_bytes(h[18:20], "little")
+    return {3: "BCJ", 62: "BCJ", 183: "ARM64"}.get(machine)
+
 def make_tree(t, name, big=False, arm=True):
     """A tree with text, binary, empty files and dirs, Korean names and executables."""
     root = t.path(name)
@@ -299,10 +311,14 @@ def make_tree(t, name, big=False, arm=True):
         exe["bin/dplay.dll"] = "BCJ"
     if copy_bin(os.path.join(WINE64, "shfolder.dll"), os.path.join(root, "bin/pe_noext")):
         exe["bin/pe_noext"] = "BCJ"                       # PE found by its header
-    if copy_bin("/bin/ls", os.path.join(root, "bin/ls"), 0o755):
-        exe["bin/ls"] = "BCJ"
-    if copy_bin("/bin/ls", os.path.join(root, "bin/elf_noexec"), 0o644):
-        exe["bin/elf_noexec"] = "BCJ"                     # ELF without exec bit: found by header
+    # host ELF samples: x86 gets BCJ, AArch64 gets the ARM64 filter (new in 7-Zip 23; bsdtar, py7zr
+    # and unar cannot read it, so the arm=False tree leaves such samples out)
+    hostf = elf_filter("/bin/ls")
+    if hostf and (arm or hostf == "BCJ"):
+        if copy_bin("/bin/ls", os.path.join(root, "bin/ls"), 0o755):
+            exe["bin/ls"] = hostf
+        if copy_bin("/bin/ls", os.path.join(root, "bin/elf_noexec"), 0o644):
+            exe["bin/elf_noexec"] = hostf                 # ELF without exec bit: found by header
     if arm and copy_bin(os.path.join(ARM64LIB, "libgcc_s.so.1"), os.path.join(root, "lib/libgcc_s.so.1")):
         exe["lib/libgcc_s.so.1"] = "ARM64"
     if big:
@@ -439,7 +455,7 @@ def run(t):
         if not t.record(ok, label + " create", r.stdout.decode(errors="replace")[-200:]):
             continue
         if not check_7z(t, arc, files, dirs, label=label,
-                        modes={"bin/script": 0o755, "bin/ls": 0o755, "bin/zeros.dat": 0o644}):
+                        modes=dict({"bin/script": 0o755, "bin/zeros.dat": 0o644}, **({"bin/ls": 0o755} if "bin/ls" in files else {}))):
             continue
         try:
             a = parse_7z(arc)
@@ -486,7 +502,7 @@ def run(t):
         if not a["encoded"] or a["hdr_coders"] != ["LZMA"]:
             probs.append("header not LZMA-encoded: %r" % a["hdr_coders"])
         attrs = {f["name"]: f["attr"] for f in a["files"]}
-        if attrs.get("bin/ls") != (0x8000 | 0x20 | (0o100755 << 16)): probs.append("attr ls %r" % attrs.get("bin/ls"))
+        if "bin/ls" in files and attrs.get("bin/ls") != (0x8000 | 0x20 | (0o100755 << 16)): probs.append("attr ls %r" % attrs.get("bin/ls"))
         if attrs.get("빈 폴더") != (0x8000 | 0x10 | (0o40755 << 16)): probs.append("attr dir %r" % attrs.get("빈 폴더"))
         t.record(not probs, label + " header", "; ".join(probs[:6]) or "%d folders, %d bytes" % (len(a["folders"]), a["size"]))
 

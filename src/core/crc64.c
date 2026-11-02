@@ -22,7 +22,7 @@
 #if defined(__clang__)
 #define GZ_TARGET_PMULL __attribute__((target("aes")))
 #else
-#define GZ_TARGET_PMULL __attribute__((target("+aes")))
+#define GZ_TARGET_PMULL __attribute__((target("+crypto")))
 #endif
 #endif
 

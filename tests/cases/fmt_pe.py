@@ -507,7 +507,9 @@ def check_sfx(t, drv, stub, label, payload, kind, files, have):
     typ, mine = gzt_rows(t, p)
     want = {"7z": "7z", "zip": "ZIP", "rar": "RAR", "cab": "CAB"}.get(kind)
     if have:
-        ok = typ == want and all(mine.get(k, (0, None))[1] == v for k, v in files.items())
+        # a current RAR makes RAR5 archives; the legacy reader names itself "RAR"
+        ok = (typ == want or (kind == "rar" and typ in ("RAR", "RAR5"))) and \
+            all(mine.get(k, (0, None))[1] == v for k, v in files.items())
         t.record(ok, "SFX %s + %s opens as %s" % (label, kind, want), "type=%s %d entries" % (typ, len(mine)))
     else:
         ov = [k for k in mine if k.startswith("[overlay]")]

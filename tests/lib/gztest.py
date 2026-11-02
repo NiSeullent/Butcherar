@@ -85,7 +85,11 @@ class T:
                 if os.path.islink(fp):
                     continue
                 rel = nfc(os.path.relpath(fp, root).replace(os.sep, "/"))
-                out[rel] = open(fp, "rb").read()
+                try:
+                    out[rel] = open(fp, "rb").read()
+                except PermissionError:          # reference tools may restore mode 000
+                    os.chmod(fp, 0o600)
+                    out[rel] = open(fp, "rb").read()
         return out
 
     def record(self, ok, label, detail=""):
