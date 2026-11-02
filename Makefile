@@ -4,6 +4,7 @@
 #   make test       -> native core tests (Linux / macOS / MSYS2)
 #   make cli        -> build/gogitzip (portable command line tool, this machine)
 #   make linux      -> build/linux/gogitzip-gtk (GTK 3 GUI) + build/gogitzip
+#   make install    -> Linux: programs, launcher, MIME package, icons (PREFIX=/usr/local, DESTDIR=)
 #   make mac        -> build/mac/GogitZIP.app (on macOS, universal x86_64 + arm64)
 #
 # Sources: src/core (model, crypto, CPU dispatch), src/codec (compression codecs),
@@ -127,6 +128,46 @@ $(B)/gogitzip: src/app/cli.c $(HOSTOBJ) $(APPOBJ)
 	$(HOSTCC) $(HOSTFLAGS) -o $@ src/app/cli.c $(HOSTOBJ) $(APPOBJ) $(HOST_LIBS)
 cli: $(B)/gogitzip
 
+# ---- Linux GTK 3 front end: core + POSIX layer + engine + src/gtk ----
+# Objects live in build/linux/obj, not build/host (test drivers link every build/host object).
+# res/assets.bin (the icon atlas) is embedded by src/gtk/icons.c (.incbin, path from the repo root).
+GTKPKG     ?= gtk+-3.0
+GTK_CFLAGS  = $(shell pkg-config --cflags $(GTKPKG))
+GTK_LIBS    = $(shell pkg-config --libs $(GTKPKG))
+GTKSRC     := $(sort $(wildcard src/gtk/*.c))
+GTKOBJ     := $(patsubst src/gtk/%.c,$(B)/linux/obj/%.o,$(GTKSRC))
+GTKHDRS    := $(wildcard src/gtk/*.h) src/win/asset_ids.h
+$(B)/linux/obj/%.o: src/gtk/%.c $(HDRS) $(GTKHDRS) res/assets.bin
+	@mkdir -p $(dir $@)
+	$(HOSTCC) $(HOSTFLAGS) $(GTK_CFLAGS) -c $< -o $@
+$(B)/linux/gogitzip-gtk: $(GTKOBJ) $(HOSTOBJ) $(APPOBJ)
+	$(HOSTCC) $(HOSTFLAGS) -o $@ $(GTKOBJ) $(HOSTOBJ) $(APPOBJ) $(GTK_LIBS) $(HOST_LIBS)
+linux: $(B)/linux/gogitzip-gtk $(B)/gogitzip
+
+# make install [PREFIX=/usr/local] [DESTDIR=staging]: binaries, launcher, MIME package, icons
+PREFIX  ?= /usr/local
+DESTDIR ?=
+SHARE   := $(DESTDIR)$(PREFIX)/share
+ICON_SIZES := 16 22 24 32 48 64 128 256 512
+install: linux
+	install -Dm755 $(B)/linux/gogitzip-gtk $(DESTDIR)$(PREFIX)/bin/gogitzip-gtk
+	install -Dm755 $(B)/gogitzip $(DESTDIR)$(PREFIX)/bin/gogitzip
+	install -Dm644 data/linux/gogitzip.desktop $(SHARE)/applications/gogitzip.desktop
+	install -Dm644 data/linux/gogitzip-mime.xml $(SHARE)/mime/packages/gogitzip.xml
+	install -Dm644 data/linux/gogitzip.metainfo.xml $(SHARE)/metainfo/gogitzip.metainfo.xml
+	for s in $(ICON_SIZES); do \
+	  install -Dm644 data/linux/icons/hicolor/$${s}x$${s}/apps/gogitzip.png \
+	    $(SHARE)/icons/hicolor/$${s}x$${s}/apps/gogitzip.png || exit 1; done
+	@if [ -z "$(DESTDIR)" ]; then \
+	  update-mime-database $(SHARE)/mime >/dev/null 2>&1 || true; \
+	  update-desktop-database -q $(SHARE)/applications >/dev/null 2>&1 || true; \
+	  gtk-update-icon-cache -q -t $(SHARE)/icons/hicolor >/dev/null 2>&1 || true; fi
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/gogitzip-gtk $(DESTDIR)$(PREFIX)/bin/gogitzip \
+	  $(SHARE)/applications/gogitzip.desktop $(SHARE)/mime/packages/gogitzip.xml \
+	  $(SHARE)/metainfo/gogitzip.metainfo.xml
+	for s in $(ICON_SIZES); do rm -f $(SHARE)/icons/hicolor/$${s}x$${s}/apps/gogitzip.png; done
+
 ICORE := src/core/cpu.c src/core/crc32.c src/codec/inflate.c src/core/crypto.c src/core/stream.c \
          src/core/crc64.c src/core/sha1.c src/core/sha256.c src/core/aes.c src/core/blake2.c
 $(B)/test_inflate: tests/test_inflate.c $(ICORE) $(HDRS)
@@ -139,7 +180,7 @@ test: $(B)/test_inflate $(B)/gzt $(B)/gogitzip
 
 # rebuild host objects (e.g. after switching HOST_CFLAGS to sanitizers)
 clean-host:
-	rm -rf $(B)/host $(B)/gzt $(B)/gogitzip $(B)/test_inflate
+	rm -rf $(B)/host $(B)/gzt $(B)/gogitzip $(B)/test_inflate $(B)/linux
 
 assets:
 	python3 tools/gen_assets.py
@@ -147,4 +188,4 @@ assets:
 clean:
 	rm -rf $(B)
 
-.PHONY: all win cli test assets clean clean-host
+.PHONY: all win cli linux install uninstall test assets clean clean-host

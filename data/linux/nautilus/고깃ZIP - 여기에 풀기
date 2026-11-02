@@ -1,0 +1,5 @@
+#!/bin/sh
+# Nautilus script: extract the selected archives next to them.
+# Install: copy to ~/.local/share/nautilus/scripts/ and chmod +x (see data/linux/README.md).
+[ $# -gt 0 ] || exit 0
+exec gogitzip-gtk --extract-here "$@"

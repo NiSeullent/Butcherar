@@ -1,0 +1,5 @@
+#!/bin/sh
+# Nautilus script: extract each selected archive into a folder named after it
+# (skipped when the archive already holds a single top folder).
+[ $# -gt 0 ] || exit 0
+exec gogitzip-gtk --extract-smart "$@"

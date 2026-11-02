@@ -1,0 +1,4 @@
+#!/bin/sh
+# Nautilus script: create an archive from the selected files and folders.
+[ $# -gt 0 ] || exit 0
+exec gogitzip-gtk --compress "$@"
