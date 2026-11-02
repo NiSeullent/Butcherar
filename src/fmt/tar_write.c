@@ -4,9 +4,10 @@
  * and more, times before 1970 or after 2242). Sizes that need pax are also
  * stored GNU base-256 in the ustar field for readers without pax support.
  *
- * Output is strictly sequential (see tar_write.h): headers are written before the
- * data, so an input that shrinks while it is read is padded with zeros and
- * reported through o->on_error, one that grows is cut at the size in the header.
+ * The stream is generated on demand (gz_tar_reader, see tar_write.h): headers
+ * are produced before the data, so an input that shrinks while it is read is
+ * padded with zeros and reported through o->on_error, one that grows is cut at
+ * the size in the header.
  */
 #include "gz_write.h"
 #include "tar_write.h"
@@ -16,20 +17,28 @@
 #define BUF (256u << 10)
 #define OCT11 ((u64)1 << 33)        /* first value that needs more than 11 octal digits */
 
-typedef struct tw {
+enum { P_NEXT, P_HDR, P_DATA, P_ZERO, P_END, P_DONE };
+
+struct gz_tar_reader {
     const gz_wopts *o;
-    gz_sink *out;
+    const gz_witem *items;
+    u32 n, idx;                     /* items, next item to start              */
     gz_ctx *c;
-    u8 *nb; u32 ncap;               /* name bytes          */
-    u8 *lb; u32 lcap;               /* link target bytes   */
-    u8 *pax; u32 plen, pcap;        /* pax records         */
-    u8 *buf;
-    u64 total, done;
-} tw;
+    int phase, err;                 /* P_*, sticky error                      */
+    u8 *nb; u32 ncap;               /* name bytes                             */
+    u8 *lb; u32 lcap;               /* link target bytes                      */
+    u8 *pax; u32 plen, pcap;        /* pax records                            */
+    u8 *hb; u32 hlen, hpos, hcap;   /* headers of the current member          */
+    const gz_witem *it;             /* member being written                   */
+    gz_wsrc *src;                   /* its open input                         */
+    u64 left;                       /* data bytes still due                   */
+    u32 zleft;                      /* zero padding still due                 */
+    int bad;                        /* input failed: the rest is zeros        */
+    u64 pos;                        /* bytes produced                         */
+    u64 total, done;                /* progress                               */
+};
 
-static const u8 zero_blk[BLK];
-
-static int tw_cancelled(const tw *t)
+static int tw_cancelled(const gz_tar_reader *t)
 {
     return (t->o->cancel && *t->o->cancel) || gz_cancelled(t->c);
 }
@@ -47,9 +56,8 @@ static int grow(u8 **p, u32 *cap, u64 need)
     return GZ_OK;
 }
 
-/* UTF-16 -> UTF-8; lone U+DC80..U+DCFF stand for raw bytes (POSIX file names
- * that were not UTF-8) and are written back as those bytes */
-static u32 w2u(const gzch *s, size_t n, u8 *o)
+/* see tar_write.h */
+u32 gz_tar_name_utf8(const gzch *s, size_t n, u8 *o)
 {
     u32 k = 0;
     for (size_t i = 0; i < n; i++) {
@@ -81,7 +89,7 @@ static int to_utf8(const gzch *s, u8 **buf, u32 *cap, u32 *len, int dir_slash)
     if (n > (4u << 20)) return GZ_E_LIMIT;
     int r = grow(buf, cap, (u64)n * 3 + 2);
     if (r) return r;
-    *len = w2u(s, n, *buf);
+    *len = gz_tar_name_utf8(s, n, *buf);
     if (dir_slash && (!*len || (*buf)[*len - 1] != '/')) (*buf)[(*len)++] = '/';
     return GZ_OK;
 }
@@ -136,11 +144,14 @@ static int ustar_fits(const u8 *nm, u32 n)
     return 0;
 }
 
-static int write_header(tw *t, const u8 *nm, u32 nn, u8 type, u32 mode, u64 size, i64 mtime,
-                        const u8 *lk, u32 ln)
+/* append a ustar header block to the pending header bytes */
+static int put_header(gz_tar_reader *t, const u8 *nm, u32 nn, u8 type, u32 mode, u64 size, i64 mtime,
+                      const u8 *lk, u32 ln)
 {
-    u8 h[BLK];
-    __builtin_memset(h, 0, sizeof h);
+    int r = grow(&t->hb, &t->hcap, (u64)t->hlen + BLK);
+    if (r) return r;
+    u8 *h = t->hb + t->hlen;
+    __builtin_memset(h, 0, BLK);
     ustar_name(h, nm, nn);
     put_oct(h + 100, 8, mode & 07777);
     put_oct(h + 108, 8, 0);
@@ -159,7 +170,8 @@ static int write_header(tw *t, const u8 *nm, u32 nn, u8 type, u32 mode, u64 size
     u32 sum = 0;
     for (u32 i = 0; i < BLK; i++) sum += h[i];
     put_oct(h + 148, 7, sum);          /* 6 digits, NUL, then the space already there */
-    return gz_sink_write(t->out, h, BLK);
+    t->hlen += BLK;
+    return GZ_OK;
 }
 
 static u32 dec(u8 *o, u64 v)            /* decimal digits of v, returns length */
@@ -173,7 +185,7 @@ static u32 dec(u8 *o, u64 v)            /* decimal digits of v, returns length *
 
 /* append "<len> key=value\n"; the length counts its own digits */
 #define pax_add(t, key, v, vn) pax_add_(t, key, sizeof key - 1, v, vn)
-static int pax_add_(tw *t, const char *key, u32 kn, const u8 *v, u32 vn)
+static int pax_add_(gz_tar_reader *t, const char *key, u32 kn, const u8 *v, u32 vn)
 {
     u64 base = (u64)kn + vn + 3;      /* ' ' '=' '\n' */
     u8 d[24];
@@ -195,22 +207,7 @@ static int pax_add_(tw *t, const char *key, u32 kn, const u8 *v, u32 vn)
     return GZ_OK;
 }
 
-static int write_zeros(tw *t, u64 n)
-{
-    while (n) {
-        u32 k = n > BLK ? BLK : (u32)n;
-        int r = gz_sink_write(t->out, zero_blk, k);
-        if (r) return r;
-        n -= k;
-    }
-    return GZ_OK;
-}
-
-static int pad_block(tw *t, u64 size)
-{
-    u32 pad = (u32)((BLK - (size & (BLK - 1))) & (BLK - 1));
-    return pad ? gz_sink_write(t->out, zero_blk, pad) : GZ_OK;
-}
+static u32 pad_of(u64 size) { return (u32)((BLK - (size & (BLK - 1))) & (BLK - 1)); }
 
 static i64 unix_time(u64 ft)
 {
@@ -218,44 +215,13 @@ static i64 unix_time(u64 ft)
     return gz_filetime_to_unix(ft);    /* floor for positive times */
 }
 
-/* copy exactly size bytes of the file into the archive (after its header) */
-static int copy_data(tw *t, const gz_witem *it, gz_wsrc *src, u64 size)
-{
-    const gz_wopts *o = t->o;
-    u64 left = size;
-    int bad = 0;
-    while (left) {
-        if (tw_cancelled(t)) return GZ_E_CANCEL;
-        u32 want = left < BUF ? (u32)left : BUF, got = 0;
-        int r = bad ? GZ_OK : src->read(src, t->buf, want, &got);
-        if (r == GZ_E_CANCEL) return r;
-        if (!bad && (r || !got)) {
-            /* read error or the file shrank: the header is out, keep the archive valid */
-            bad = r ? r : GZ_E_TRUNC;
-            int er = o->on_error ? o->on_error(o->user, it, bad) : bad;
-            if (er) return er;
-        }
-        if (bad) {
-            int w = write_zeros(t, left);
-            if (w) return w;
-            t->done += left;
-            left = 0;
-            break;
-        }
-        if (got > want) got = want;
-        r = gz_sink_write(t->out, t->buf, got);
-        if (r) return r;
-        left -= got;
-        t->done += got;
-        if (o->progress) o->progress(o->user, t->done, t->total);
-    }
-    return pad_block(t, size);
-}
-
-static int write_item(tw *t, const gz_witem *it)
+/* Prepare the next member: open its file and build its headers into hb.
+ * GZ_OK with t->hlen == 0: nothing to write for this item (skipped). */
+static int start_item(gz_tar_reader *t, const gz_witem *it)
 {
     const gz_wopts *o = t->o;
     const gzch *name = it->name;
+    t->hlen = t->hpos = 0;
     while (*name == '/') name++;
     while (name[0] == '.' && name[1] == '/') { name += 2; while (*name == '/') name++; }
     if (!name[0]) return GZ_OK;
@@ -273,14 +239,17 @@ static int write_item(tw *t, const gz_witem *it)
     if (!r && is_link) r = to_utf8(it->link_target, &t->lb, &t->lcap, &ln, 0);
     if (r) return r;
 
-    gz_wsrc *src = 0;
     if (type == '0') {
-        r = o->open_item(o->user, it, &src);
+        r = o->open_item(o->user, it, &t->src);
         if (r) {
+            t->src = 0;
             if (r == GZ_E_CANCEL) return r;
             return o->on_error ? o->on_error(o->user, it, r) : r;    /* GZ_OK: skip the item */
         }
     }
+    t->it = it;
+    t->left = size;
+    t->bad = 0;
 
     /* pax extended header for what ustar cannot hold */
     t->plen = 0;
@@ -299,41 +268,167 @@ static int write_item(tw *t, const gz_witem *it)
     }
     if (!r && t->plen) {
         static const u8 pn[] = "././@PaxHeader";
-        r = write_header(t, pn, sizeof pn - 1, 'x', 0644, t->plen, mt, 0, 0);
-        if (!r) r = gz_sink_write(t->out, t->pax, t->plen);
-        if (!r) r = pad_block(t, t->plen);
+        u32 pl = t->plen, pp = pad_of(pl);
+        r = put_header(t, pn, sizeof pn - 1, 'x', 0644, pl, mt, 0, 0);
+        if (!r) r = grow(&t->hb, &t->hcap, (u64)t->hlen + pl + pp);
+        if (!r) {
+            __builtin_memcpy(t->hb + t->hlen, t->pax, pl);
+            __builtin_memset(t->hb + t->hlen + pl, 0, pp);
+            t->hlen += pl + pp;
+        }
     }
-    if (!r) r = write_header(t, t->nb, nn, type, mode, size, mt, t->lb, ln);
-    if (!r && src) r = copy_data(t, it, src, size);
-    if (src) o->close_item(o->user, it, src);
+    if (!r) r = put_header(t, t->nb, nn, type, mode, size, mt, t->lb, ln);
     return r;
+}
+
+static void end_item(gz_tar_reader *t)
+{
+    if (t->src) t->o->close_item(t->o->user, t->it, t->src);
+    t->src = 0;
+}
+
+int gz_tar_reader_read(void *ctx, u8 *buf, u32 cap, u32 *got)
+{
+    gz_tar_reader *t = (gz_tar_reader *)ctx;
+    const gz_wopts *o = t->o;
+    u32 n = 0;
+    int r = t->err;
+    *got = 0;
+    if (r) return r;
+    if (t->phase != P_DONE && tw_cancelled(t)) { r = GZ_E_CANCEL; goto fail; }
+    while (n < cap) {
+        u32 room = cap - n;
+        switch (t->phase) {
+        case P_NEXT:
+            end_item(t);
+            if (t->idx >= t->n) {
+                /* two zero blocks, then pad to a full record */
+                u64 rem = (t->pos + n + 2 * BLK) % RECORD;
+                t->zleft = 2 * BLK + (rem ? (u32)(RECORD - rem) : 0);
+                t->phase = P_END;
+                break;
+            }
+            if (tw_cancelled(t)) { r = GZ_E_CANCEL; goto fail; }
+            r = start_item(t, &t->items[t->idx++]);
+            if (r) goto fail;
+            if (t->hlen) t->phase = P_HDR;
+            break;
+        case P_HDR: {
+            u32 k = t->hlen - t->hpos;
+            if (k > room) k = room;
+            __builtin_memcpy(buf + n, t->hb + t->hpos, k);
+            n += k;
+            t->hpos += k;
+            if (t->hpos == t->hlen) t->phase = t->src ? P_DATA : P_NEXT;
+            break;
+        }
+        case P_DATA: {
+            if (!t->left) {
+                t->zleft = pad_of(t->it->size);
+                t->phase = P_ZERO;
+                break;
+            }
+            u32 want = t->left < room ? (u32)t->left : room, g = 0;
+            if (want > BUF) want = BUF;
+            if (!t->bad) {
+                r = t->src->read(t->src, buf + n, want, &g);
+                if (r == GZ_E_CANCEL) goto fail;
+                if (r || !g) {
+                    /* read error or the file shrank: the header is out, keep the archive valid */
+                    t->bad = r ? r : GZ_E_TRUNC;
+                    r = o->on_error ? o->on_error(o->user, t->it, t->bad) : t->bad;
+                    if (r) goto fail;
+                }
+            }
+            if (t->bad) {
+                g = want;
+                __builtin_memset(buf + n, 0, g);
+            }
+            if (g > want) g = want;
+            n += g;
+            t->left -= g;
+            t->done += g;
+            if (o->progress) o->progress(o->user, t->done, t->total);
+            break;
+        }
+        case P_ZERO:
+        case P_END: {
+            u32 k = t->zleft < room ? t->zleft : room;
+            __builtin_memset(buf + n, 0, k);
+            n += k;
+            t->zleft -= k;
+            if (!t->zleft) {
+                if (t->phase == P_ZERO) {
+                    t->phase = P_NEXT;
+                } else {
+                    t->phase = P_DONE;
+                    if (o->progress) o->progress(o->user, t->done, t->total);
+                }
+            }
+            break;
+        }
+        default:            /* P_DONE */
+            goto out;
+        }
+    }
+out:
+    t->pos += n;
+    *got = n;
+    return GZ_OK;
+fail:
+    end_item(t);
+    t->err = r;
+    return r;
+}
+
+gz_tar_reader *gz_tar_reader_new(const gz_wopts *o, const gz_witem *items, u32 n, gz_ctx *c)
+{
+    gz_tar_reader *t = (gz_tar_reader *)gz_alloc(sizeof *t);
+    if (!t) return 0;
+    t->o = o;
+    t->items = items;
+    t->n = n;
+    t->c = c;
+    t->phase = P_NEXT;
+    for (u32 i = 0; i < n; i++)
+        if (!items[i].is_dir && !items[i].is_link) t->total += items[i].size;
+    return t;
+}
+
+void gz_tar_reader_free(gz_tar_reader *t)
+{
+    if (!t) return;
+    end_item(t);
+    gz_free(t->nb);
+    gz_free(t->lb);
+    gz_free(t->pax);
+    gz_free(t->hb);
+    gz_free(t);
+}
+
+u64 gz_tar_size_estimate(const gz_witem *items, u32 n)
+{
+    u64 s = 2 * BLK + RECORD;
+    for (u32 i = 0; i < n; i++) {
+        u64 z = (items[i].is_dir || items[i].is_link) ? 0 : items[i].size;
+        s += 3 * BLK + ((z + BLK - 1) & ~(u64)(BLK - 1));
+    }
+    return s;
 }
 
 int gz_tar_write(const gz_wopts *o, const gz_witem *items, u32 n, gz_sink *out, gz_ctx *c)
 {
-    tw t;
-    __builtin_memset(&t, 0, sizeof t);
-    t.o = o;
-    t.out = out;
-    t.c = c;
-    for (u32 i = 0; i < n; i++)
-        if (!items[i].is_dir && !items[i].is_link) t.total += items[i].size;
-    t.buf = (u8 *)gz_alloc(BUF);
-    int r = t.buf ? GZ_OK : GZ_E_NOMEM;
-    for (u32 i = 0; i < n && !r; i++) {
-        if (tw_cancelled(&t)) { r = GZ_E_CANCEL; break; }
-        r = write_item(&t, &items[i]);
+    gz_tar_reader *t = gz_tar_reader_new(o, items, n, c);
+    u8 *buf = (u8 *)gz_alloc(BUF);
+    int r = t && buf ? GZ_OK : GZ_E_NOMEM;
+    while (!r) {
+        u32 got = 0;
+        r = gz_tar_reader_read(t, buf, BUF, &got);
+        if (r || !got) break;
+        r = gz_sink_write(out, buf, got);
     }
-    if (!r) r = write_zeros(&t, 2 * BLK);
-    if (!r) {
-        u64 rem = out->pos % RECORD;
-        if (rem) r = write_zeros(&t, RECORD - rem);
-    }
-    if (!r && o->progress) o->progress(o->user, t.done, t.total);
-    gz_free(t.buf);
-    gz_free(t.nb);
-    gz_free(t.lb);
-    gz_free(t.pax);
+    gz_free(buf);
+    gz_tar_reader_free(t);
     return r;
 }
 
