@@ -1057,6 +1057,10 @@ int main(int argc, char **argv)
         fputs(T(M_HELP), argc < 2 ? stderr : stdout);
         return argc < 2 ? EX_USAGE : EX_OK;
     }
+    if (!strcmp(argv[1], "--version") || !strcmp(argv[1], "-V")) {
+        printf("GogitZIP %s\n", GZ_APP_VERSION);       /* same line as gogitzip-gtk / GogitZIP.app */
+        return EX_OK;
+    }
     const char *c = argv[1];
     if (strlen(c) != 1 || !strchr("lxeati", c[0])) {
         fprintf(stderr, "%s: %s: %s\n", T(M_ERROR), T(M_UNKNOWN_CMD), c);

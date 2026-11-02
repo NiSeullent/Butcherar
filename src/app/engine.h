@@ -29,7 +29,7 @@
 #include "gz_write.h"
 #include "os.h"
 
-#define GZ_APP_VERSION "1.0.0"
+#include "version.h"     /* GZ_APP_VERSION, GZ_VER_MAJOR/MINOR/PATCH (src/core) */
 
 /* Core tables + CPU kernel dispatch (cpu_tier < 0: automatic). Call once at start-up. */
 void gz_engine_init(int cpu_tier);

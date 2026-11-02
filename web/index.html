@@ -1,19 +1,23 @@
 <!doctype html>
-<html lang="ko">
+<html lang="ko" data-version="2.0.0">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<!--page-start-->
 <title>고깃ZIP</title>
-<meta name="claude:viewport-fit-sides" content="cover">
-<meta name="description" content="고깃ZIP: C로 만든 400KB 압축 해제 프로그램. Windows 2000부터 11까지, CPU에 맞춰 AVX2·SSE·MMX 엔진을 골라 씁니다.">
+<meta name="description" content="고깃ZIP: C로 직접 짠 가볍고 빠른 압축 프로그램. Windows 2000~11, macOS, Linux에서 RAR·7z·알집(ALZ·EGG)·ISO 등 50가지가 넘는 형식을 풀고 ZIP·7z를 AES-256으로 만듭니다.">
+<meta property="og:title" content="고깃ZIP — 가볍고 빠른 압축 프로그램">
+<meta property="og:description" content="Windows · macOS · Linux. 50가지가 넘는 형식 읽기, ZIP · 7z · TAR · ISO 만들기, CPU에 맞춘 가속 엔진.">
+<meta property="og:image" content="https://niseullent.github.io/Butcherar/assets/screens/main.png">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#c8323a">
 <link rel="icon" type="image/png" href="assets/favicon-32.png">
+<link rel="apple-touch-icon" href="assets/logo-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+KR:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&amp;family=IBM+Plex+Mono:wght@400;600&amp;family=IBM+Plex+Sans+KR:wght@400;500;700&amp;display=swap">
 <style>
 /* Layout: a butcher's counter. One 68rem column; the hero pairs the headline with a
-   meat package label, then trays of content (grades, labels, specs) slide past. */
+   meat package label, then trays of content (features, grades, formats, downloads) slide past. */
 :root {
   --bg: #fffaf9;          /* white tile with a blush of red */
   --surface: #ffffff;
@@ -38,7 +42,7 @@
   --step-1: 1.2rem;
   --step-2: 1.6rem;
   --step-3: clamp(1.9rem, 4vw, 2.6rem);
-  --step-4: clamp(2.6rem, 7vw, 4.6rem);
+  --step-4: clamp(2.5rem, 7vw, 4.6rem);
   --radius: 14px;
 }
 @media (prefers-color-scheme: dark) {
@@ -73,7 +77,9 @@ body {
 }
 img { max-width: 100%; height: auto; display: block; }
 a { color: var(--accent-text); text-underline-offset: 3px; }
-a:focus-visible, button:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+a:focus-visible, button:focus-visible, summary:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+code { font-family: var(--font-mono); font-size: .9em; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 .wrap {
   max-width: 68rem;
@@ -88,7 +94,7 @@ h2 { font-size: var(--step-3); }
 h3 { font-size: var(--step-1); margin: 0; line-height: 1.4; text-wrap: balance; }
 p { margin: 0; }
 .eyebrow { font-family: var(--font-mono); font-size: var(--step--1); letter-spacing: .08em; text-transform: uppercase; color: var(--accent-text); font-weight: 600; }
-.lead { font-size: var(--step-1); color: var(--muted); max-width: 40rem; }
+.lead { font-size: var(--step-1); color: var(--muted); max-width: 42rem; }
 .section-head { display: grid; gap: .75rem; margin-bottom: 2.25rem; max-width: 46rem; }
 
 /* ---------- top bar ---------- */
@@ -107,6 +113,8 @@ p { margin: 0; }
 .hero h1 { font-size: var(--step-4); }
 .hero h1 em { font-style: normal; color: var(--accent); }
 .hero-copy { display: grid; gap: 1.4rem; min-width: 0; }
+.os-pills { display: flex; flex-wrap: wrap; gap: .4rem; }
+.os-pills span { font-family: var(--font-mono); font-size: .78rem; font-weight: 600; padding: .2rem .65rem; border-radius: 999px; background: var(--fat); color: var(--accent-text); }
 .cta { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; }
 .btn {
   display: inline-flex; flex-direction: column; gap: .1rem; padding: .8rem 1.3rem; border-radius: 12px;
@@ -117,7 +125,6 @@ p { margin: 0; }
 .btn-primary:hover { transform: translateY(-2px); }
 .btn-ghost { border: 1.5px solid var(--line); color: var(--ink); background: var(--surface); }
 .btn-ghost:hover { border-color: var(--accent); }
-.btn.recommended { outline: 3px solid var(--fat); }
 .hint { font-size: var(--step--1); color: var(--muted); }
 
 /* the meat package label */
@@ -157,9 +164,15 @@ p { margin: 0; }
 
 /* ---------- facts strip ---------- */
 .facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin-top: 2.5rem; }
-.fact { display: grid; gap: .2rem; padding-top: .9rem; border-top: 3px solid var(--accent); }
+.fact { display: grid; gap: .2rem; padding-top: .9rem; border-top: 3px solid var(--accent); align-content: start; }
 .fact b { font-family: var(--font-mono); font-size: 1.6rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .fact span { color: var(--muted); font-size: var(--step--1); }
+
+/* ---------- feature cards ---------- */
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.4rem; display: grid; gap: .8rem; align-content: start; min-width: 0; }
+.card p { color: var(--muted); }
+.card .tag { font-family: var(--font-mono); font-size: .75rem; font-weight: 600; color: var(--accent-text); letter-spacing: .08em; }
 
 /* ---------- grade table ---------- */
 .grades { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
@@ -178,17 +191,24 @@ p { margin: 0; }
 .bar.crc i { background: repeating-linear-gradient(90deg, var(--accent) 0 14px, var(--accent-strong) 14px 16px); }
 .bar b { font-family: var(--font-mono); font-weight: 600; font-variant-numeric: tabular-nums; font-size: .85rem; text-align: right; white-space: nowrap; }
 .measure { margin-top: 1rem; font-size: var(--step--1); color: var(--muted); max-width: 52rem; }
+.arm { margin-top: 1.25rem; display: grid; grid-template-columns: auto 1fr; gap: 1rem; align-items: center; border: 1.5px dashed var(--line); border-radius: var(--radius); padding: 1rem 1.2rem; }
+.arm b { font-family: var(--font-display); font-weight: 400; font-size: 1.35rem; color: var(--accent-text); white-space: nowrap; }
+.arm p { color: var(--muted); font-size: .95rem; }
 
 /* ---------- Korean names ---------- */
-.trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; }
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.4rem; display: grid; gap: .8rem; align-content: start; min-width: 0; }
+.quad { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1.25rem; }
 .mangle { font-family: var(--font-mono); background: var(--fat); border-radius: 10px; padding: .8rem 1rem; display: grid; gap: .3rem; font-size: .92rem; overflow-x: auto; }
 .mangle .bad { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--accent); }
 .mangle .good { color: var(--ink); font-weight: 600; }
-.card p { color: var(--muted); }
 
-/* ---------- OS timeline ---------- */
-.os-row { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: .5rem; }
+/* ---------- platforms ---------- */
+.plats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; }
+.plat { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.4rem; display: grid; gap: .7rem; align-content: start; min-width: 0; }
+.plat header { display: flex; justify-content: space-between; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
+.plat header b { font-family: var(--font-display); font-weight: 400; font-size: 1.5rem; }
+.plat header span { font-family: var(--font-mono); font-size: .75rem; color: var(--muted); }
+.plat ul { margin: 0; padding-left: 1.1rem; color: var(--muted); font-size: .95rem; display: grid; gap: .2rem; }
+.os-row { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: .5rem; margin-top: 2rem; }
 .os-cell { border: 1px solid var(--line); border-radius: 12px; padding: .9rem .7rem; background: var(--surface); display: grid; gap: .45rem; align-content: start; text-align: center; }
 .os-cell b { font-size: .95rem; }
 .os-cell small { font-family: var(--font-mono); color: var(--muted); font-size: .72rem; }
@@ -197,15 +217,45 @@ p { margin: 0; }
 .os-cell.avx .chip { background: var(--accent-strong); color: var(--on-accent); }
 .os-note { margin-top: 1.2rem; color: var(--muted); max-width: 52rem; font-size: .95rem; }
 
-/* ---------- formats / safety ---------- */
+/* ---------- formats ---------- */
+.fmt-tools { display: grid; gap: .9rem; margin-bottom: 1.2rem; }
+.search { display: flex; align-items: center; gap: .6rem; border: 1.5px solid var(--line); border-radius: 12px; background: var(--surface); padding: .2rem .9rem; max-width: 30rem; }
+.search:focus-within { border-color: var(--accent); }
+.search svg { flex: none; width: 18px; height: 18px; stroke: var(--muted); }
+.search input { font: inherit; border: 0; outline: 0; background: transparent; color: var(--ink); padding: .55rem 0; width: 100%; min-width: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+.chips button {
+  font: inherit; font-size: .9rem; border: 1.5px solid var(--line); background: var(--surface); color: var(--ink);
+  padding: .35rem .85rem; border-radius: 999px; cursor: pointer;
+}
+.chips button span { font-family: var(--font-mono); font-size: .78rem; color: var(--muted); margin-left: .2rem; }
+.chips button[aria-pressed="true"] { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--on-accent); }
+.chips button[aria-pressed="true"] span { color: var(--on-accent); opacity: .85; }
+.fmt-wrap { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
+.fmt-table { width: 100%; border-collapse: collapse; font-size: .93rem; }
+.fmt-table th, .fmt-table td { padding: .7rem 1rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+.fmt-table thead th { font-family: var(--font-mono); font-size: .78rem; letter-spacing: .06em; color: var(--muted); font-weight: 600; background: var(--fat); }
+.fmt-table tbody tr:last-child > * { border-bottom: 0; }
+.fmt-table tbody th { font-weight: 400; white-space: nowrap; }
+.fmt-table tbody th b { display: block; font-family: var(--font-mono); font-weight: 600; }
+.fmt-table .cat { display: inline-block; font-size: .72rem; color: var(--muted); }
+.fmt-table .ext { max-width: 15rem; }
+.fmt-table .ext code { display: inline-block; font-size: .78rem; background: var(--fat); color: var(--accent-text); border-radius: 6px; padding: 0 .35rem; margin: 0 .2rem .25rem 0; }
+.fmt-table td:nth-child(3) { color: var(--muted); }
+.fmt-table .w { max-width: 19rem; }
+.fmt-table .w .yes { color: var(--ink); }
+.fmt-table .w .yes::before { content: "✓ "; color: var(--good); font-weight: 700; }
+.fmt-table .w .no { color: var(--muted); font-size: .85rem; }
+.fmt-table tr[hidden] { display: none; }
+.fmt-foot { margin-top: .9rem; display: flex; flex-wrap: wrap; gap: .6rem 1rem; align-items: center; }
+.fmt-count { font-size: var(--step--1); color: var(--muted); }
+.more { font: inherit; font-size: .92rem; font-weight: 700; border: 1.5px solid var(--line); background: var(--surface); color: var(--ink); padding: .5rem 1.1rem; border-radius: 999px; cursor: pointer; }
+.more:hover { border-color: var(--accent); }
+
+/* ---------- safety ---------- */
 .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; align-items: start; }
 .spec { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .spec h3 { padding: 1rem 1.2rem; border-bottom: 1px solid var(--line); background: var(--fat); }
-.spec dl { margin: 0; display: grid; grid-template-columns: minmax(6.5rem, auto) 1fr; }
-.spec dt, .spec dd { margin: 0; padding: .7rem 1.2rem; border-bottom: 1px solid var(--line); }
-.spec dt { font-family: var(--font-mono); font-weight: 600; font-size: .9rem; }
-.spec dd { color: var(--muted); font-size: .93rem; }
-.spec dl > :nth-last-child(-n+2) { border-bottom: 0; }
 .checks { list-style: none; margin: 0; padding: 0; display: grid; }
 .checks li { padding: .85rem 1.2rem; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 1.4rem 1fr; gap: .6rem; }
 .checks li:last-child { border-bottom: 0; }
@@ -214,7 +264,9 @@ p { margin: 0; }
 .checks span { color: var(--muted); font-size: .93rem; }
 
 /* ---------- screenshots ---------- */
-.tabs { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
+.tabs { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1.2rem; align-items: center; }
+.tabs .grp { font-family: var(--font-mono); font-size: .72rem; font-weight: 600; color: var(--muted); letter-spacing: .08em; margin: 0 .2rem 0 .6rem; }
+.tabs .grp:first-child { margin-left: 0; }
 .tabs button {
   font: inherit; font-size: .92rem; border: 1.5px solid var(--line); background: var(--surface); color: var(--ink);
   padding: .45rem .95rem; border-radius: 999px; cursor: pointer;
@@ -230,21 +282,26 @@ p { margin: 0; }
 .code pre { margin: 0; padding: 1.2rem 1.4rem; font-family: var(--font-mono); font-size: .88rem; line-height: 1.85; }
 .code .c { color: var(--muted); }
 .code .k { color: var(--accent-text); font-weight: 600; }
+.code + .code { margin-top: 1rem; }
 
 /* ---------- download ---------- */
 .download { background: var(--surface); }
-.dl-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem; }
-.dl { border: 1.5px solid var(--line); border-radius: var(--radius); padding: 1.5rem; display: grid; gap: 1rem; background: var(--bg); }
-.dl.recommended { border-color: var(--accent); }
-.dl header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
-.dl header b { font-family: var(--font-display); font-weight: 400; font-size: 1.5rem; }
-.dl header span { font-family: var(--font-mono); font-size: .8rem; color: var(--muted); }
-.dl ul { margin: 0; padding-left: 1.1rem; color: var(--muted); font-size: .93rem; display: grid; gap: .2rem; }
+.dl-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; }
+.dl { border: 1.5px solid var(--line); border-radius: var(--radius); padding: 1.4rem; display: grid; gap: 1rem; background: var(--bg); grid-template-rows: auto 1fr auto; min-width: 0; }
+.dl.recommended { border-color: var(--accent); box-shadow: var(--shadow); }
+.dl header { display: flex; justify-content: space-between; align-items: baseline; gap: .4rem 1rem; flex-wrap: wrap; }
+.dl header b { font-family: var(--font-display); font-weight: 400; font-size: 1.45rem; }
+.dl header span { font-family: var(--font-mono); font-size: .76rem; color: var(--muted); }
+.dl ul { margin: 0; padding-left: 1.1rem; color: var(--muted); font-size: .93rem; display: grid; gap: .2rem; align-content: start; }
 .dl .badge { display: none; font-family: var(--font-mono); font-size: .72rem; font-weight: 600; color: var(--on-accent); background: var(--accent-strong); padding: .15rem .55rem; border-radius: 999px; }
 .dl.recommended .badge { display: inline-block; }
-.req { margin-top: 1.5rem; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; font-size: .93rem; }
-.req div { display: grid; gap: .15rem; }
-.req b { font-family: var(--font-mono); font-size: .78rem; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.dl .links { display: flex; flex-wrap: wrap; gap: .6rem; }
+.dl .btn { padding: .7rem 1.1rem; }
+.dl-note { margin-top: 1.5rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; font-size: .93rem; }
+.dl-note div { display: grid; gap: .15rem; align-content: start; }
+.dl-note b { font-family: var(--font-mono); font-size: .78rem; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.dl-note p { color: var(--muted); }
+.dl-note strong { color: var(--ink); }
 
 /* ---------- FAQ ---------- */
 .faq { display: grid; gap: .6rem; max-width: 48rem; }
@@ -258,18 +315,32 @@ p { margin: 0; }
 footer { border-top: 1px solid var(--line); padding-block: 2.5rem 3rem; font-size: var(--step--1); color: var(--muted); }
 footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 
+@media (max-width: 960px) {
+  .quad, .dl-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 900px) {
   .hero-grid { grid-template-columns: 1fr; }
   .label { justify-self: start; transform: rotate(-1deg); }
   .os-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .facts, .req { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cards, .plats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 720px) {
-  .trio, .two, .dl-grid { grid-template-columns: 1fr; }
+  .two, .dl-grid, .cards, .plats, .quad, .dl-note { grid-template-columns: 1fr; }
+  .arm { grid-template-columns: 1fr; gap: .4rem; }
+  /* formats: one card per row */
+  .fmt-table thead { display: none; }
+  .fmt-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr); padding: .8rem 1rem; border-bottom: 1px solid var(--line); gap: .3rem; }
+  .fmt-table tbody tr:last-child { border-bottom: 0; }
+  .fmt-table tbody tr > * { padding: 0; border: 0; max-width: none; white-space: normal; }
+  .fmt-table tbody th { display: flex; gap: .6rem; align-items: baseline; }
+  .fmt-table tbody th b { display: inline; }
 }
 @media (max-width: 460px) {
   .os-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .top nav { display: none; }
+  .facts { gap: .8rem; }
+  .fact b { font-size: 1.35rem; }
 }
 </style>
 </head>
@@ -282,11 +353,13 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
       <b>고깃ZIP</b>
     </a>
     <nav aria-label="페이지 안내">
+      <a href="#features">기능</a>
       <a href="#engine">가속 엔진</a>
-      <a href="#hangul">한글 파일 이름</a>
-      <a href="#windows">지원 윈도우</a>
+      <a href="#platforms">지원 환경</a>
       <a href="#formats">형식</a>
+      <a href="#screens">화면</a>
       <a href="#download">내려받기</a>
+      <a href="#faq">FAQ</a>
     </nav>
   </div>
 </header>
@@ -296,49 +369,92 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
     <div class="wrap">
       <div class="hero-grid">
         <div class="hero-copy">
-          <p class="eyebrow">압축 해제 프로그램 · Windows 2000 – 11</p>
-          <h1>결대로 썰듯,<br><em>압축</em>을 풉니다.</h1>
-          <p class="lead">고깃ZIP은 C로 쓰고 Win32 API만 부르는 400KB짜리 압축 해제 프로그램입니다. 실행할 때마다 CPU가 지원하는 명령어를 확인해서, 윈도우 7 이상에서는 AVX2로, 더 오래된 PC에서는 SSE와 MMX로 가장 빠른 길을 고릅니다.</p>
+          <p class="eyebrow">압축 프로그램 · Windows · macOS · Linux</p>
+          <h1>결대로 썰듯,<br><em>압축</em>을 풀고 묶습니다.</h1>
+          <p class="lead">고깃ZIP은 C로 직접 짠 가볍고 빠른 압축 프로그램입니다. RAR, 7z, 알집부터 ISO와 디스크 이미지까지 <!-- gen:nread -->52<!-- /gen:nread -->가지 형식을 열고, ZIP과 7z를 AES-256 암호로 만듭니다. 실행할 때마다 CPU를 확인해서 AVX2부터 Pentium, ARM64까지 가장 빠른 엔진을 고릅니다.</p>
+          <div class="os-pills" aria-label="지원 운영체제"><span>Windows 2000 – 11</span><span>macOS 10.13+</span><span>Linux · GTK 3</span></div>
           <div class="cta">
-            <a class="btn btn-primary" id="cta-main" href="https://github.com/NiSeullent/Butcherar/releases/latest">
-              고깃ZIP 내려받기 <small id="cta-sub">Windows 64비트 · 무료</small>
+            <a class="btn btn-primary" id="cta-main" href="#download">
+              <span id="cta-label">고깃ZIP 내려받기</span> <small id="cta-sub">Windows · macOS · Linux · 무료</small>
             </a>
             <a class="btn btn-ghost" href="https://github.com/NiSeullent/Butcherar">
               소스 코드 보기 <small>GitHub · MIT 라이선스</small>
             </a>
           </div>
-          <p class="hint">설치 없이 실행 파일 하나로 동작합니다. 32비트판은 Windows 2000에서도 실행됩니다.</p>
+          <p class="hint" id="cta-hint">Windows는 설치 없이 실행 파일 하나로 동작합니다. 다른 운영체제와 CPU용 파일은 <a href="#download">내려받기</a>에 있습니다.</p>
         </div>
 
         <aside class="label" aria-label="제품 표시사항">
           <div class="label-head"><b>축산물 아니고 압축물</b><span>표시사항</span></div>
           <dl>
-            <dt>품명</dt><dd>고깃ZIP 1.0.0</dd>
-            <dt>부위</dt><dd>압축 해제 (ZIP · TAR · GZ)</dd>
+            <dt>품명</dt><dd>고깃ZIP 2.0.0</dd>
+            <dt>부위</dt><dd>압축 · 해제 (<!-- gen:nread -->52<!-- /gen:nread -->가지 형식)</dd>
             <dt>등급</dt><dd class="grade">1++</dd>
-            <dt>중량</dt><dd>약 400 KB</dd>
-            <dt>원산지</dt><dd>C언어 · Win32 API</dd>
-            <dt>보관방법</dt><dd>설치 필요 없음</dd>
+            <dt>중량</dt><dd>약 1.4 MB (Windows)</dd>
+            <dt>원산지</dt><dd>C언어 · 직접 짠 엔진</dd>
+            <dt>보관방법</dt><dd>Windows · macOS · Linux</dd>
             <dt>판매가</dt><dd class="price">0원</dd>
           </dl>
           <div class="barcode" role="img" aria-label="바코드 장식"></div>
-          <p class="lot">LOT 2026-11 · AVX2 / SSE4.1 / SSE2 / MMX / i586</p>
+          <p class="lot">LOT 2026-11 · AVX2 / SSE4.1 / MMX / i586 / NEON</p>
         </aside>
       </div>
 
       <div class="shot-main">
         <div class="window">
-          <div class="window-bar"><img src="assets/favicon-32.png" alt="" width="16" height="16"><span>2026 고기 축제 자료.zip - 고깃ZIP</span><span>x86</span></div>
+          <div class="window-bar"><img src="assets/favicon-32.png" alt="" width="16" height="16"><span>2026 고기 축제 자료.zip - 고깃ZIP</span><span>WINDOWS</span></div>
           <img src="assets/screens/main.png" alt="고깃ZIP 메인 창: 위쪽 도구 모음, 왼쪽 폴더 트리, 오른쪽 파일 목록, 아래쪽 상태 표시줄" width="1192" height="666">
         </div>
-        <p class="caption">압축 파일을 열면 반디집처럼 폴더 트리와 파일 목록이 나뉘어 보입니다. 상태 표시줄 오른쪽에는 지금 쓰고 있는 가속 엔진이 나옵니다.</p>
+        <p class="caption">압축 파일을 열면 반디집처럼 폴더 트리와 파일 목록이 나뉘어 보입니다. 상태 표시줄 오른쪽에는 지금 쓰고 있는 가속 엔진이 나옵니다. macOS와 Linux 앱도 같은 구성입니다.</p>
       </div>
 
       <div class="facts">
-        <div class="fact"><b>400 KB</b><span>실행 파일 하나, C 런타임 없음</span></div>
-        <div class="fact"><b>7단계</b><span>x86부터 AVX2까지 CPU 엔진</span></div>
-        <div class="fact"><b>2000 – 11</b><span>지원하는 Windows 버전</span></div>
-        <div class="fact"><b>최대 32</b><span>동시에 푸는 스레드 수</span></div>
+        <div class="fact"><b><!-- gen:nread -->52<!-- /gen:nread -->가지</b><span>열고 푸는 형식</span></div>
+        <div class="fact"><b><!-- gen:nwrite -->12<!-- /gen:nwrite -->가지</b><span>만드는 형식 (ZIP · 7z · TAR · ISO …)</span></div>
+        <div class="fact"><b>3개 OS</b><span>Windows · macOS · Linux, x86과 ARM64</span></div>
+        <div class="fact"><b>AES-256</b><span>ZIP · 7z 암호, 파일 이름까지</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">기능</p>
+        <h2>푸는 것도, 묶는 것도 한 프로그램에서</h2>
+        <p class="lead">압축 엔진과 형식 처리를 모두 C로 직접 짰습니다. 외부 압축 라이브러리 없이 같은 엔진이 Windows, macOS, Linux 앱과 명령줄 도구에 들어갑니다.</p>
+      </div>
+      <div class="cards">
+        <article class="card">
+          <p class="tag">READ</p>
+          <h3><!-- gen:nread -->52<!-- /gen:nread -->가지 형식 열기</h3>
+          <p>ZIP, 7z, RAR 1.5 ~ 7, CAB, TAR와 그 압축판은 물론 MSI · NSIS · Inno Setup 설치 파일, ISO · DMG · WIM · VHD 디스크 이미지, NTFS · ext4 · APFS 파일 시스템까지 엽니다. 압축 파일 안의 압축 파일도 두 번 눌러 바로 들어갑니다.</p>
+        </article>
+        <article class="card">
+          <p class="tag">WRITE</p>
+          <h3>ZIP · 7z · TAR · ISO 만들기</h3>
+          <p>Deflate, BZip2, LZMA, LZMA2, PPMd, Zstandard로 압축합니다. 7z는 솔리드 압축과 실행 파일용 BCJ · ARM64 필터를, ISO는 Joliet와 Rock Ridge 이름을 씁니다.</p>
+        </article>
+        <article class="card">
+          <p class="tag">LOCK</p>
+          <h3>AES-256 암호</h3>
+          <p>ZIP은 WinZip AES-256과 ZipCrypto, 7z는 AES-256에 파일 이름 암호화까지 만듭니다. RAR 3 · 5, 알집 EGG(AES · LEA), ALZ 암호 파일도 풉니다.</p>
+        </article>
+        <article class="card">
+          <p class="tag">SPEED</p>
+          <h3>CPU에 맞춘 가속 엔진</h3>
+          <p>같은 실행 파일 안에 명령어 세트별 엔진이 들어 있어서, 시작할 때 CPU가 지원하는 가장 빠른 것을 고릅니다. 여러 파일은 CPU 코어 수만큼 동시에 풉니다.</p>
+        </article>
+        <article class="card">
+          <p class="tag">KOREAN</p>
+          <h3>알집 ALZ · EGG와 한글 이름</h3>
+          <p>이스트소프트 알집 파일을 따로 프로그램 없이 풀고, CP949와 UTF-8 이름을 파일마다 구별합니다. 맥에서 자모가 풀어진 이름도 다시 합칩니다.</p>
+        </article>
+        <article class="card">
+          <p class="tag">SAFE</p>
+          <h3>푸는 동안 지키는 것</h3>
+          <p>대상 폴더 밖으로 나가는 경로와 링크를 막고, 모든 파일의 CRC와 해시를 확인합니다. 손상된 파일과 압축 폭탄으로 퍼징 테스트를 거쳤습니다.</p>
+        </article>
       </div>
     </div>
   </section>
@@ -348,7 +464,7 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
       <div class="section-head">
         <p class="eyebrow">가속 엔진 등급표</p>
         <h2>CPU 마블링을 보고 엔진을 고릅니다</h2>
-        <p class="lead">같은 실행 파일 안에 명령어 세트별로 컴파일한 압축 해제 엔진이 일곱 벌 들어 있습니다. 시작할 때 CPUID와 운영체제의 레지스터 저장 상태(XGETBV)를 보고 쓸 수 있는 가장 높은 등급을 씁니다. 설정에서 낮은 등급을 직접 고를 수도 있습니다.</p>
+        <p class="lead">같은 실행 파일 안에 명령어 세트별로 컴파일한 엔진이 일곱 벌 들어 있습니다. 시작할 때 CPUID와 운영체제의 레지스터 저장 상태(XGETBV)를 보고 쓸 수 있는 가장 높은 등급을 씁니다. 설정에서 낮은 등급을 직접 고를 수도 있습니다.</p>
       </div>
 
       <div class="grades">
@@ -357,11 +473,11 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
             <tr><th scope="col">등급</th><th scope="col">엔진</th><th scope="col">쓰는 명령어</th><th scope="col">필요한 Windows</th><th scope="col">Deflate 해제</th><th scope="col">CRC32 검사</th></tr>
           </thead>
           <tbody>
-            <tr><td class="g">1++</td><td class="tier">AVX2</td><td>AVX2 32바이트 복사, BMI2 비트 추출, VPCLMULQDQ</td><td class="os">7 SP1 이상</td>
+            <tr><td class="g">1++</td><td class="tier">AVX2</td><td>AVX2 32바이트 복사, BMI2 비트 추출, VPCLMULQDQ, VAES</td><td class="os">7 SP1 이상</td>
               <td><div class="bar"><i style="width:97.2%"></i><b>717 MB/s</b></div></td><td><div class="bar crc"><i style="width:100%"></i><b>27.4 GB/s</b></div></td></tr>
             <tr><td class="g">1+</td><td class="tier">AVX</td><td>VEX 인코딩 32바이트 복사, PCLMULQDQ</td><td class="os">7 SP1 이상</td>
               <td><div class="bar"><i style="width:99.5%"></i><b>734 MB/s</b></div></td><td><div class="bar crc"><i style="width:63.1%"></i><b>17.3 GB/s</b></div></td></tr>
-            <tr><td class="g">1</td><td class="tier">SSE4.1</td><td>PCLMULQDQ CRC 폴딩, AES-NI</td><td class="os">2000 이상</td>
+            <tr><td class="g">1</td><td class="tier">SSE4.1</td><td>PCLMULQDQ CRC 폴딩, AES-NI, SHA-NI</td><td class="os">2000 이상</td>
               <td><div class="bar"><i style="width:100%"></i><b>738 MB/s</b></div></td><td><div class="bar crc"><i style="width:57.3%"></i><b>15.7 GB/s</b></div></td></tr>
             <tr><td class="g">2</td><td class="tier">SSE2</td><td>16바이트 정수 복사</td><td class="os">2000 이상</td>
               <td><div class="bar"><i style="width:71%"></i><b>524 MB/s</b></div></td><td><div class="bar crc"><i style="width:6.8%"></i><b>1.85 GB/s</b></div></td></tr>
@@ -374,22 +490,26 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
           </tbody>
         </table>
       </div>
-      <p class="measure">측정값은 프로그램에 들어 있는 벤치마크(옵션 → CPU 가속 벤치마크)로 잰 것입니다. Intel Xeon 2.1GHz, 32비트 빌드, 스레드 1개 기준이며 압축 해제는 프로그램 아이콘 데이터를, CRC32는 4MB 버퍼를 반복 처리했습니다. 막대 길이는 각 열의 최댓값을 100으로 놓은 비율입니다. 실제 압축 해제는 여러 파일을 CPU 코어 수만큼 동시에 풀기 때문에 이보다 빠릅니다.</p>
+      <p class="measure">측정값은 Windows 32비트판에 들어 있는 벤치마크(옵션 → CPU 가속 벤치마크)로 잰 것입니다. Intel Xeon 2.1GHz, 스레드 1개 기준이며 압축 해제는 프로그램 아이콘 데이터를, CRC32는 4MB 버퍼를 반복 처리했습니다. 막대 길이는 각 열의 최댓값을 100으로 놓은 비율입니다. 실제로는 여러 파일을 CPU 코어 수만큼 동시에 풀기 때문에 이보다 빠릅니다.</p>
+      <div class="arm">
+        <b>ARM64</b>
+        <p>Apple silicon Mac과 ARM64 Linux에서는 NEON 엔진을 기본으로, CPU가 지원하면 ARMv8 CRC32 · PMULL(CRC 폴딩) · AES · SHA 명령을 함께 씁니다. ARM PC의 Windows 11에서는 64비트판이 에뮬레이션으로 실행됩니다.</p>
+      </div>
     </div>
   </section>
 
   <section id="hangul">
     <div class="wrap">
       <div class="section-head">
-        <p class="eyebrow">한글 파일 이름</p>
+        <p class="eyebrow">한국 압축 파일과 한글 이름</p>
         <h2>이름이 깨진 채로 풀리지 않게</h2>
         <p class="lead">한국 윈도우에서 만든 ZIP은 CP949로, 맥과 리눅스에서 만든 ZIP은 UTF-8로 이름을 저장합니다. 고깃ZIP은 파일마다 어느 쪽인지 확인하고, 맥에서 풀어 쓴 자모도 다시 붙여 줍니다.</p>
       </div>
-      <div class="trio">
+      <div class="quad">
         <article class="card">
           <h3>CP949와 UTF-8 자동 감지</h3>
           <div class="mangle"><span class="bad">╣«╝¡/║╕░φ╝¡.txt</span><span class="good">문서/보고서.txt</span></div>
-          <p>UTF-8 표시가 없어도 이름이 올바른 UTF-8인지 검사해서, 아니면 시스템의 한국어 코드페이지로 읽습니다.</p>
+          <p>UTF-8 표시가 없어도 이름이 올바른 UTF-8인지 검사해서, 아니면 한국어 코드페이지로 읽습니다.</p>
         </article>
         <article class="card">
           <h3>맥에서 만든 압축 파일</h3>
@@ -397,22 +517,56 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
           <p>macOS가 저장하는 NFD 자모(ᄒ+ᅡ+ᆫ)를 한 글자로 합쳐서 탐색기에서 정상적으로 보이게 합니다.</p>
         </article>
         <article class="card">
+          <h3>알집 ALZ · EGG</h3>
+          <div class="mangle"><span class="good">자료.alz · 자료.a00</span><span class="good">자료.vol1.egg</span></div>
+          <p>알집 4 ~ 7의 ALZ와 알집 8 이후의 EGG를 풉니다. 분할 압축, 솔리드, AZO 압축, AES · LEA 암호도 됩니다.</p>
+        </article>
+        <article class="card">
           <h3>코드페이지 직접 고르기</h3>
           <div class="mangle"><span class="good">자동 · UTF-8 · 한국어 · 일본어</span><span class="good">중국어 간체/번체 · 서유럽 · DOS</span></div>
-          <p>그래도 이상하게 보이면 도구 모음의 ‘코드페이지’ 단추로 9가지 인코딩 중 하나를 골라 바로 다시 읽을 수 있습니다.</p>
+          <p>그래도 이상하게 보이면 도구 모음의 ‘코드페이지’ 단추로 인코딩을 골라 바로 다시 읽을 수 있습니다.</p>
         </article>
       </div>
     </div>
   </section>
 
-  <section id="windows">
+  <section id="platforms">
     <div class="wrap">
       <div class="section-head">
-        <p class="eyebrow">지원 윈도우</p>
-        <h2>윈도우 2000부터 11까지, 같은 파일 하나로</h2>
-        <p class="lead">32비트 실행 파일은 Windows 2000(NT 5.0)용 PE 헤더로 만들고 그때부터 있던 API만 직접 연결합니다. 새 윈도우에만 있는 기능(새 폴더 선택 창, 작업 표시줄 진행률, 탐색기 테마)은 실행 중에 있을 때만 불러 씁니다.</p>
+        <p class="eyebrow">지원 환경</p>
+        <h2>윈도우 2000부터 Apple silicon까지</h2>
+        <p class="lead">세 운영체제의 앱이 같은 엔진을 쓰고, 화면은 각 운영체제의 방식(Win32, Cocoa, GTK 3)으로 만들었습니다.</p>
       </div>
-      <div class="os-row" role="list">
+      <div class="plats">
+        <article class="plat">
+          <header><b>Windows</b><span>x86 · x64</span></header>
+          <ul>
+            <li>Windows 2000, XP, Vista, 7, 8, 10, 11</li>
+            <li>C 런타임 없는 실행 파일 하나, 설치 필요 없음</li>
+            <li>탐색기 오른쪽 클릭 메뉴(풀기 · 압축하기), 연결 프로그램</li>
+            <li>32비트판은 Pentium(i586)에서도 실행</li>
+          </ul>
+        </article>
+        <article class="plat">
+          <header><b>macOS</b><span>Intel · Apple silicon</span></header>
+          <ul>
+            <li>Intel: macOS 10.13 High Sierra 이상</li>
+            <li>Apple silicon: macOS 11 Big Sur 이상</li>
+            <li>유니버설 앱 하나 + 명령줄 도구</li>
+            <li>Finder 서비스 메뉴, 문서 형식 연결</li>
+          </ul>
+        </article>
+        <article class="plat">
+          <header><b>Linux</b><span>x86-64 · ARM64</span></header>
+          <ul>
+            <li>GTK 3 앱 <code>gogitzip-gtk</code> + 명령줄 <code>gogitzip</code></li>
+            <li>미리 빌드한 패키지: glibc 2.35 이상 (Ubuntu 22.04, Debian 12, Fedora 36 …)</li>
+            <li>.deb, 또는 내 계정에 설치하는 .tar.gz</li>
+            <li>프로그램 메뉴, MIME 형식, Nautilus · Dolphin · Thunar 메뉴</li>
+          </ul>
+        </article>
+      </div>
+      <div class="os-row" role="list" aria-label="Windows 버전별 최고 엔진">
         <div class="os-cell" role="listitem"><b>2000</b><small>NT 5.0</small><span class="chip">SSE4.1</span></div>
         <div class="os-cell" role="listitem"><b>XP</b><small>NT 5.1</small><span class="chip">SSE4.1</span></div>
         <div class="os-cell" role="listitem"><b>Vista</b><small>NT 6.0</small><span class="chip">SSE4.1</span></div>
@@ -429,27 +583,109 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
   <section id="formats">
     <div class="wrap">
       <div class="section-head">
-        <p class="eyebrow">형식과 안전</p>
-        <h2>푸는 형식, 그리고 푸는 동안 지키는 것</h2>
+        <p class="eyebrow">지원 형식</p>
+        <h2><!-- gen:nread -->52<!-- /gen:nread -->가지 형식을 열고, <!-- gen:nwrite -->12<!-- /gen:nwrite -->가지로 만듭니다</h2>
+        <p class="lead">형식 이름이나 확장자로 찾아보세요. 압축된 TAR(.tar.gz, .tar.xz, .tar.zst …)는 한 번에 열리고, 디스크 이미지 안의 파일 시스템도 바로 열립니다.</p>
+      </div>
+      <div class="fmt-tools">
+        <label class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <span class="sr-only">형식 검색</span>
+          <input type="search" id="fmt-q" placeholder="형식이나 확장자 (예: alz, iso, rar)" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="chips" id="fmt-chips" role="group" aria-label="분류"><!-- gen:formats-filters -->
+<button type="button" class="chip" data-cat="" aria-pressed="true">전체 <span>52</span></button>
+<button type="button" class="chip" data-cat="archive" aria-pressed="false">압축 파일 <span>24</span></button>
+<button type="button" class="chip" data-cat="installer" aria-pressed="false">설치 파일·실행 파일 <span>9</span></button>
+<button type="button" class="chip" data-cat="disk" aria-pressed="false">디스크 이미지 <span>11</span></button>
+<button type="button" class="chip" data-cat="fs" aria-pressed="false">파일 시스템 <span>8</span></button>
+<button type="button" class="chip" data-cat="write" aria-pressed="false">만들기 가능 <span>8</span></button>
+<!-- /gen:formats-filters --></div>
+      </div>
+      <div class="fmt-wrap"><!-- gen:formats-html -->
+<table class="fmt-table" id="fmt-table">
+<thead><tr><th scope="col">형식</th><th scope="col">확장자</th><th scope="col">읽기</th><th scope="col">만들기</th></tr></thead>
+<tbody>
+<tr data-cat="archive" data-w="1" data-key="7z 7z 7z lzma/lzma2/ppmd/bzip2/deflate64/zstd/lz4, bcj/bcj2 filters, aes-256, encrypted headers 7z"><th scope="row"><b>7z</b><span class="cat">압축 파일</span></th><td class="ext"><code>.7z</code></td><td>LZMA·LZMA2·PPMd·BZip2·Deflate64·Zstd·LZ4, BCJ·BCJ2 필터, AES-256, 헤더 암호화</td><td class="w"><span class="yes">저장 · Deflate · BZip2 · LZMA · LZMA2 · PPMd + AES-256, BCJ·ARM64 필터, 파일 이름 암호화 (.7z)</span></td></tr>
+<tr data-cat="archive" data-w="1" data-key="zip zip zip deflate/deflate64/bzip2/lzma/ppmd/zstd/xz/implode/shrink, zip64, winzip aes/zipcrypto, split (.z01), sfx zip zipx jar war ear apk xpi odt ods odp docx xlsx pptx epub ipa appx nupkg whl z01"><th scope="row"><b>ZIP</b><span class="cat">압축 파일</span></th><td class="ext"><code>.zip</code> <code>.zipx</code> <code>.jar</code> <code>.war</code> <code>.ear</code> <code>.apk</code> <code>.xpi</code> <code>.odt</code> <code>.ods</code> <code>.odp</code> <code>.docx</code> <code>.xlsx</code> <code>.pptx</code> <code>.epub</code> <code>.ipa</code> <code>.appx</code> <code>.nupkg</code> <code>.whl</code> <code>.z01</code></td><td>Deflate·Deflate64·BZip2·LZMA·PPMd·Zstd·XZ·Implode·Shrink, ZIP64, WinZip AES·ZipCrypto, 분할(.z01), SFX</td><td class="w"><span class="yes">저장 · Deflate · BZip2 · LZMA · PPMd + ZipCrypto · AES-256, ZIP64 (.zip)</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="rar5 rar5 rar5 rar 5-7: solid, volumes, aes-256, encrypted headers, blake2sp rar exe"><th scope="row"><b>RAR5</b><span class="cat">압축 파일</span></th><td class="ext"><code>.rar</code> <code>.exe</code></td><td>RAR 5 ~ 7, 솔리드, 볼륨, AES-256 암호·헤더 암호화, BLAKE2sp</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="rar rar rar rar 1.4-4.x: solid, volumes, aes-128, encrypted headers rar r00 exe"><th scope="row"><b>RAR</b><span class="cat">압축 파일</span></th><td class="ext"><code>.rar</code> <code>.r00</code> <code>.exe</code></td><td>RAR 1.4 ~ 4.x, 솔리드, 볼륨, AES-128 암호·헤더 암호화</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="alz alz alz alzip 4-7: split sets (.a00), zipcrypto, korean names alz a00"><th scope="row"><b>ALZ</b><span class="cat">압축 파일</span></th><td class="ext"><code>.alz</code> <code>.a00</code></td><td>알집 4 ~ 7, 분할(.a00), ZipCrypto 암호, 한글 이름(CP949)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="egg egg egg alzip 8+: solid, split sets, azo/lzma/bzip2/deflate, aes and lea encryption egg"><th scope="row"><b>EGG</b><span class="cat">압축 파일</span></th><td class="ext"><code>.egg</code></td><td>알집 8 이상, 솔리드, 분할, AZO·LZMA·BZip2·Deflate, AES·LEA 암호</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="1" data-key="tar tar tar ustar/gnu/pax/v7, long names and links, compressed tarballs in one step tar"><th scope="row"><b>TAR</b><span class="cat">압축 파일</span></th><td class="ext"><code>.tar</code></td><td>ustar·GNU·pax·v7, 긴 이름과 링크, 압축된 TAR(.tar.gz 등)도 바로</td><td class="w"><span class="yes">ustar·pax: 긴 이름·링크·권한 (.tar)</span></td></tr>
+<tr data-cat="archive" data-w="1" data-key="gzip gzip gzip multi-member, .tar.gz/.tgz gz gzip tgz taz tpz"><th scope="row"><b>GZIP</b><span class="cat">압축 파일</span></th><td class="ext"><code>.gz</code> <code>.gzip</code> <code>.tgz</code> <code>.taz</code> <code>.tpz</code></td><td>여러 멤버, .tar.gz·.tgz</td><td class="w"><span class="yes">저장 · Deflate (.gz, .tar.gz)</span></td></tr>
+<tr data-cat="archive" data-w="1" data-key="bzip2 bzip2 bzip2 multi-stream, .tar.bz2 bz2 bzip2 tbz2 tbz"><th scope="row"><b>BZIP2</b><span class="cat">압축 파일</span></th><td class="ext"><code>.bz2</code> <code>.bzip2</code> <code>.tbz2</code> <code>.tbz</code></td><td>여러 스트림, .tar.bz2</td><td class="w"><span class="yes">BZip2 (.bz2, .tar.bz2)</span></td></tr>
+<tr data-cat="archive" data-w="1" data-key="xz xz xz bcj/delta filters, crc-64/sha-256 checks, .tar.xz xz txz"><th scope="row"><b>XZ</b><span class="cat">압축 파일</span></th><td class="ext"><code>.xz</code> <code>.txz</code></td><td>BCJ·Delta 필터, CRC-64·SHA-256 검사, .tar.xz</td><td class="w"><span class="yes">저장 · LZMA2 (.xz, .tar.xz)</span></td></tr>
+<tr data-cat="archive" data-w="1" data-key="zstd zstd zstd zstandard, .tar.zst zst tzst zstd"><th scope="row"><b>ZSTD</b><span class="cat">압축 파일</span></th><td class="ext"><code>.zst</code> <code>.tzst</code> <code>.zstd</code></td><td>Zstandard, .tar.zst</td><td class="w"><span class="yes">저장 · Zstandard (.zst, .tar.zst)</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="lzma lzma lzma lzma-alone (.lzma) lzma tlz"><th scope="row"><b>LZMA</b><span class="cat">압축 파일</span></th><td class="ext"><code>.lzma</code> <code>.tlz</code></td><td>LZMA-alone (.lzma)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="lzip lzip lzip lzip (.lz) lz tlz"><th scope="row"><b>LZIP</b><span class="cat">압축 파일</span></th><td class="ext"><code>.lz</code> <code>.tlz</code></td><td>lzip (.lz)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="lz4 lz4 lz4 lz4 frames lz4 tlz4"><th scope="row"><b>LZ4</b><span class="cat">압축 파일</span></th><td class="ext"><code>.lz4</code> <code>.tlz4</code></td><td>LZ4 프레임 (.lz4)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="lzo lzo lzo lzop lzo tzo"><th scope="row"><b>LZO</b><span class="cat">압축 파일</span></th><td class="ext"><code>.lzo</code> <code>.tzo</code></td><td>lzop (.lzo)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="z z z unix compress (.z) z taz"><th scope="row"><b>Z</b><span class="cat">압축 파일</span></th><td class="ext"><code>.z</code> <code>.taz</code></td><td>Unix compress (.Z)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="cab cab cab mszip/quantum/lzx, multi-cabinet sets, cabs inside executables cab"><th scope="row"><b>CAB</b><span class="cat">압축 파일</span></th><td class="ext"><code>.cab</code></td><td>MSZIP·Quantum·LZX, 여러 CAB에 걸친 파일, 실행 파일 속 CAB</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="arj arj arj arj 0.x-3.x, volumes, sfx, garbled files arj"><th scope="row"><b>ARJ</b><span class="cat">압축 파일</span></th><td class="ext"><code>.arj</code></td><td>ARJ 0.x ~ 3.x, 볼륨, SFX, 암호(XOR)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="lzh lzh / lha lzh / lha lh0-lh7/lzs/lz5, header levels 0-3, sfx lzh lha lzs"><th scope="row"><b>LZH / LHA</b><span class="cat">압축 파일</span></th><td class="ext"><code>.lzh</code> <code>.lha</code> <code>.lzs</code></td><td>lh0 ~ lh7·lzs·lz5, 헤더 레벨 0 ~ 3, SFX</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="cpio cpio cpio newc/crc/odc/binary, initramfs cpio"><th scope="row"><b>CPIO</b><span class="cat">압축 파일</span></th><td class="ext"><code>.cpio</code></td><td>newc·crc·odc·바이너리, initramfs</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="chm chm chm windows html help (lzx) chm chi chq chw"><th scope="row"><b>CHM</b><span class="cat">압축 파일</span></th><td class="ext"><code>.chm</code> <code>.chi</code> <code>.chq</code> <code>.chw</code></td><td>Windows 도움말 (LZX)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="szdd szdd / kwaj szdd / kwaj ms compress.exe files (setup.ex_ ...) ex_ dl_ sy_ in_ hl_ tx_ cp_ ch_ bm_ fo_ dr_ ov_ 38_"><th scope="row"><b>SZDD / KWAJ</b><span class="cat">압축 파일</span></th><td class="ext"><code>.ex_</code> <code>.dl_</code> <code>.sy_</code> <code>.in_</code> <code>.hl_</code> <code>.tx_</code> <code>.cp_</code> <code>.ch_</code> <code>.bm_</code> <code>.fo_</code> <code>.dr_</code> <code>.ov_</code> <code>.38_</code></td><td>MS compress.exe (SETUP.EX_ 등)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="pbzx pbzx pbzx macos update / installer payloads pbzx"><th scope="row"><b>PBZX</b><span class="cat">압축 파일</span></th><td class="ext"><code>.pbzx</code></td><td>macOS 업데이트·설치 페이로드</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="archive" data-w="0" data-key="split 분할 파일 split files split files (.001) joined and opened 001"><th scope="row"><b>분할 파일</b><span class="cat">압축 파일</span></th><td class="ext"><code>.001</code></td><td>7-Zip·HJSplit 분할 파일(.001)을 이어서 열기</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="installer" data-w="0" data-key="nsis nsis nsis nsis 2-3 installers (zlib/bzip2/lzma, solid) exe nsis"><th scope="row"><b>NSIS</b><span class="cat">설치 파일·실행 파일</span></th><td class="ext"><code>.exe</code> <code>.nsis</code></td><td>NSIS 2 ~ 3 설치 파일 (zlib·BZip2·LZMA, 솔리드)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="installer" data-w="0" data-key="inno setup inno setup inno setup inno setup 1.3-7.x installers, passwords exe bin"><th scope="row"><b>Inno Setup</b><span class="cat">설치 파일·실행 파일</span></th><td class="ext"><code>.exe</code> <code>.bin</code></td><td>Inno Setup 1.3 ~ 7.x 설치 파일, 암호</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="installer" data-w="0" data-key="compound msi / ole msi / ole windows installer (.msi/.msp/.msm), office 97-2003 documents, outlook .msg msi msp mst msm doc xls ppt msg"><th scope="row"><b>MSI / OLE</b><span class="cat">설치 파일·실행 파일</span></th><td class="ext"><code>.msi</code> <code>.msp</code> <code>.mst</code> <code>.msm</code> <code>.doc</code> <code>.xls</code> <code>.ppt</code> <code>.msg</code></td><td>Windows Installer(.msi·.msp·.msm), Office 97 ~ 2003 문서, Outlook .msg</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="installer" data-w="0" data-key="xar xar xar macos installer packages (.pkg), .xip xar pkg xip mpkg"><th scope="row"><b>XAR</b><span class="cat">설치 파일·실행 파일</span></th><td class="ext"><code>.xar</code> <code>.pkg</code> <code>.xip</code> <code>.mpkg</code></td><td>macOS 설치 패키지(.pkg), .xip</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="installer" data-w="0" data-key="rpm rpm rpm rpm packages (gzip/bzip2/xz/zstd payloads) rpm"><th scope="row"><b>RPM</b><span class="cat">설치 파일·실행 파일</span></th><td class="ext"><code>.rpm</code></td><td>RPM 패키지 (gzip·bzip2·xz·zstd 페이로드)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="installer" data-w="0" data-key="ar ar ar debian packages (.deb), static libraries (.a/.lib) a ar deb lib udeb ddeb ipk"><th scope="row"><b>AR</b><span class="cat">설치 파일·실행 파일</span></th><td class="ext"><code>.a</code> <code>.ar</code> <code>.deb</code> <code>.lib</code> <code>.udeb</code> <code>.ddeb</code> <code>.ipk</code></td><td>Debian 패키지(.deb), 정적 라이브러리(.a·.lib)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="installer" data-w="0" data-key="pe pe pe windows executables/dlls: sections, resources (icons, version, strings), overlay exe dll sys ocx cpl scr efi mui drv ax acm tsp te"><th scope="row"><b>PE</b><span class="cat">설치 파일·실행 파일</span></th><td class="ext"><code>.exe</code> <code>.dll</code> <code>.sys</code> <code>.ocx</code> <code>.cpl</code> <code>.scr</code> <code>.efi</code> <code>.mui</code> <code>.drv</code> <code>.ax</code> <code>.acm</code> <code>.tsp</code> <code>.te</code></td><td>Windows 실행 파일·DLL: 섹션, 리소스(아이콘·버전·문자열), 덧붙은 데이터</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="installer" data-w="0" data-key="elf elf elf linux executables/libraries: sections, segments elf so o ko axf prx mod"><th scope="row"><b>ELF</b><span class="cat">설치 파일·실행 파일</span></th><td class="ext"><code>.elf</code> <code>.so</code> <code>.o</code> <code>.ko</code> <code>.axf</code> <code>.prx</code> <code>.mod</code></td><td>Linux 실행 파일·라이브러리: 섹션, 세그먼트</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="installer" data-w="0" data-key="mach-o mach-o mach-o macos executables, universal binaries dylib bundle macho o"><th scope="row"><b>Mach-O</b><span class="cat">설치 파일·실행 파일</span></th><td class="ext"><code>.dylib</code> <code>.bundle</code> <code>.macho</code> <code>.o</code></td><td>macOS 실행 파일, 유니버설 바이너리</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="disk" data-w="1" data-key="iso iso iso iso 9660/joliet/rock ridge, el torito boot images, files over 4 gb iso img"><th scope="row"><b>ISO</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.iso</code> <code>.img</code></td><td>ISO 9660·Joliet·Rock Ridge, El Torito 부트 이미지, 4GB 넘는 파일</td><td class="w"><span class="yes">Joliet·Rock Ridge (.iso)</span></td></tr>
+<tr data-cat="disk" data-w="0" data-key="udf udf udf udf 1.02-2.60 (dvd, blu-ray) udf iso img"><th scope="row"><b>UDF</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.udf</code> <code>.iso</code> <code>.img</code></td><td>UDF 1.02 ~ 2.60 (DVD·Blu-ray)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="disk" data-w="0" data-key="dmg dmg dmg macos disk images (adc/zlib/bzip2/lzfse/xz) dmg img smi"><th scope="row"><b>DMG</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.dmg</code> <code>.img</code> <code>.smi</code></td><td>macOS 디스크 이미지 (ADC·zlib·bzip2·LZFSE·XZ)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="disk" data-w="0" data-key="wim wim wim windows images wim/esd/swm (xpress/lzx/lzms) wim swm esd"><th scope="row"><b>WIM</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.wim</code> <code>.swm</code> <code>.esd</code></td><td>Windows 이미지 WIM·ESD·SWM (XPRESS·LZX·LZMS)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="disk" data-w="0" data-key="vhd vhd vhd virtual pc/hyper-v (fixed, dynamic, differencing) vhd"><th scope="row"><b>VHD</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.vhd</code></td><td>Virtual PC·Hyper-V (고정·동적·차이 디스크)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="disk" data-w="0" data-key="vhdx vhdx vhdx hyper-v vhdx vhdx avhdx"><th scope="row"><b>VHDX</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.vhdx</code> <code>.avhdx</code></td><td>Hyper-V VHDX</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="disk" data-w="0" data-key="vmdk vmdk vmdk vmware (sparse, streamoptimized, flat) vmdk"><th scope="row"><b>VMDK</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.vmdk</code></td><td>VMware (sparse·streamOptimized·flat)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="disk" data-w="0" data-key="vdi vdi vdi virtualbox vdi"><th scope="row"><b>VDI</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.vdi</code></td><td>VirtualBox</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="disk" data-w="0" data-key="qcow2 qcow / qcow2 qcow / qcow2 qemu (compressed clusters too) qcow2 qcow qcow2c img"><th scope="row"><b>QCOW / QCOW2</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.qcow2</code> <code>.qcow</code> <code>.qcow2c</code> <code>.img</code></td><td>QEMU (압축 클러스터 포함)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="disk" data-w="0" data-key="sparse sparse sparse android sparse images simg img"><th scope="row"><b>Sparse</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.simg</code> <code>.img</code></td><td>Android sparse 이미지</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="disk" data-w="0" data-key="mbr mbr / gpt mbr / gpt partition maps: mbr, gpt, apple partition map mbr gpt img bin raw dsk hdd"><th scope="row"><b>MBR / GPT</b><span class="cat">디스크 이미지</span></th><td class="ext"><code>.mbr</code> <code>.gpt</code> <code>.img</code> <code>.bin</code> <code>.raw</code> <code>.dsk</code> <code>.hdd</code></td><td>파티션 테이블 MBR·GPT·Apple Partition Map</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="fs" data-w="0" data-key="ntfs ntfs ntfs compression (lznt1, wof), alternate streams, links ntfs img"><th scope="row"><b>NTFS</b><span class="cat">파일 시스템</span></th><td class="ext"><code>.ntfs</code> <code>.img</code></td><td>압축·WOF 압축, 대체 데이터 스트림, 링크</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="fs" data-w="0" data-key="fat fat fat fat12/16/32, long names fat img ima vfd flp"><th scope="row"><b>FAT</b><span class="cat">파일 시스템</span></th><td class="ext"><code>.fat</code> <code>.img</code> <code>.ima</code> <code>.vfd</code> <code>.flp</code></td><td>FAT12·FAT16·FAT32, 긴 이름</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="fs" data-w="0" data-key="exfat exfat exfat exfat exfat img"><th scope="row"><b>exFAT</b><span class="cat">파일 시스템</span></th><td class="ext"><code>.exfat</code> <code>.img</code></td><td>exFAT</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="fs" data-w="0" data-key="ext ext2/3/4 ext2/3/4 ext2/ext3/ext4 (extents, inline data) ext ext2 ext3 ext4 img"><th scope="row"><b>ext2/3/4</b><span class="cat">파일 시스템</span></th><td class="ext"><code>.ext</code> <code>.ext2</code> <code>.ext3</code> <code>.ext4</code> <code>.img</code></td><td>ext2·ext3·ext4 (익스텐트, 인라인 데이터)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="fs" data-w="0" data-key="hfs+ hfs / hfs+ hfs / hfs+ hfs/hfs+/hfsx, compressed files hfs hfsx hfsplus img"><th scope="row"><b>HFS / HFS+</b><span class="cat">파일 시스템</span></th><td class="ext"><code>.hfs</code> <code>.hfsx</code> <code>.hfsplus</code> <code>.img</code></td><td>HFS·HFS+·HFSX, 압축된 파일</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="fs" data-w="0" data-key="apfs apfs apfs apple file system (unencrypted volumes) apfs img"><th scope="row"><b>APFS</b><span class="cat">파일 시스템</span></th><td class="ext"><code>.apfs</code> <code>.img</code></td><td>Apple File System (암호화되지 않은 볼륨)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="fs" data-w="0" data-key="squashfs squashfs squashfs squashfs 3.x/4.0 (gzip/lzma/xz/lzo/lz4/zstd) sqfs squashfs squash sfs snap img"><th scope="row"><b>SquashFS</b><span class="cat">파일 시스템</span></th><td class="ext"><code>.sqfs</code> <code>.squashfs</code> <code>.squash</code> <code>.sfs</code> <code>.snap</code> <code>.img</code></td><td>SquashFS 3.x·4.0 (gzip·lzma·xz·lzo·lz4·zstd)</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+<tr data-cat="fs" data-w="0" data-key="cramfs cramfs cramfs cramfs cramfs cram img"><th scope="row"><b>CramFS</b><span class="cat">파일 시스템</span></th><td class="ext"><code>.cramfs</code> <code>.cram</code> <code>.img</code></td><td>CramFS</td><td class="w"><span class="no">읽기 전용</span></td></tr>
+</tbody>
+</table>
+<!-- /gen:formats-html --></div>
+      <div class="fmt-foot"><button type="button" class="more" id="fmt-more" aria-controls="fmt-table" hidden>모두 보기</button><p class="fmt-count" id="fmt-count" aria-live="polite"></p></div>
+    </div>
+  </section>
+
+  <section id="safety">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">안전</p>
+        <h2>푸는 동안 확인하는 것</h2>
       </div>
       <div class="two">
         <div class="spec">
-          <h3>지원 형식</h3>
-          <dl>
-            <dt>ZIP</dt><dd>Store, Deflate, Deflate64 · ZIP64(4GB 이상) · 자동 압축 풀림(SFX) 실행 파일</dd>
-            <dt>암호</dt><dd>ZipCrypto · WinZip AES-128/192/256 (AES-NI 가속, HMAC 인증 확인)</dd>
-            <dt>TAR</dt><dd>ustar, GNU 긴 이름, pax 확장 헤더</dd>
-            <dt>GZ</dt><dd>단일 파일, 여러 멤버를 이어 붙인 파일</dd>
-            <dt>TAR.GZ</dt><dd>.tar.gz, .tgz를 한 번에 읽어서 바로 풀기</dd>
-          </dl>
+          <h3>파일과 폴더</h3>
+          <ul class="checks">
+            <li><div><b>대상 폴더 밖으로 나가지 않음</b><span>../ 나 C:\ 로 시작하는 이름(Zip Slip)과 폴더 밖을 가리키는 링크는 만들지 않습니다.</span></div></li>
+            <li><div><b>운영체제 예약 이름 처리</b><span>CON, PRN, COM1 같은 이름과 끝의 마침표·공백, 너무 긴 이름은 바꿔서 저장합니다.</span></div></li>
+            <li><div><b>덮어쓰기 전에 물어보기</b><span>기존 파일과 새 파일의 크기·날짜를 비교해서 덮어쓰기, 건너뛰기, 이름 바꾸기 중에 고릅니다.</span></div></li>
+          </ul>
         </div>
         <div class="spec">
-          <h3>푸는 동안 확인하는 것</h3>
+          <h3>데이터</h3>
           <ul class="checks">
-            <li><div><b>대상 폴더 밖으로 나가지 않음</b><span>../ 나 C:\ 로 시작하는 이름(Zip Slip)은 경로에서 걸러 냅니다.</span></div></li>
-            <li><div><b>윈도우 예약 이름 처리</b><span>CON, PRN, COM1 같은 이름과 끝의 마침표·공백은 바꿔서 저장합니다.</span></div></li>
-            <li><div><b>모든 파일의 CRC32 검사</b><span>손상된 파일은 지우고 결과 창에 이유와 함께 보여 줍니다.</span></div></li>
-            <li><div><b>덮어쓰기 전에 물어보기</b><span>기존 파일과 새 파일의 크기·날짜를 비교해서 덮어쓰기, 건너뛰기, 이름 바꾸기 중에 고릅니다.</span></div></li>
+            <li><div><b>모든 파일의 CRC · 해시 검사</b><span>손상된 파일은 지우고 결과 창에 이유와 함께 보여 줍니다. ZIP AES와 RAR 5 암호 파일은 HMAC으로 암호와 데이터를 함께 확인합니다.</span></div></li>
+            <li><div><b>손상 · 악성 파일 퍼징</b><span>잘리거나 비트가 뒤집힌 파일, 터무니없는 크기와 개수로 모든 형식을 시험해서 멈추거나 메모리를 다 쓰지 않게 했습니다.</span></div></li>
+            <li><div><b>출처 표시 전달 (Windows)</b><span>인터넷에서 받은 압축 파일의 Mark-of-the-Web을 푼 파일에도 붙입니다.</span></div></li>
           </ul>
         </div>
       </div>
@@ -463,15 +699,20 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
         <h2>익숙한 한국식 압축 프로그램 화면</h2>
       </div>
       <div class="tabs" role="tablist" aria-label="스크린샷">
+        <span class="grp" aria-hidden="true">WINDOWS</span>
         <button type="button" role="tab" id="tab-welcome" aria-selected="true" aria-controls="stage" data-shot="welcome">시작 화면</button>
-        <button type="button" role="tab" id="tab-extract" aria-selected="false" aria-controls="stage" data-shot="extract">압축 풀기</button>
-        <button type="button" role="tab" id="tab-progress" aria-selected="false" aria-controls="stage" data-shot="progress">진행 상황</button>
-        <button type="button" role="tab" id="tab-bench" aria-selected="false" aria-controls="stage" data-shot="bench">벤치마크</button>
+        <button type="button" role="tab" id="tab-create" aria-selected="false" aria-controls="stage" data-shot="create" tabindex="-1">압축하기</button>
+        <button type="button" role="tab" id="tab-extract" aria-selected="false" aria-controls="stage" data-shot="extract" tabindex="-1">압축 풀기</button>
+        <button type="button" role="tab" id="tab-progress" aria-selected="false" aria-controls="stage" data-shot="progress" tabindex="-1">진행 상황</button>
+        <button type="button" role="tab" id="tab-bench" aria-selected="false" aria-controls="stage" data-shot="bench" tabindex="-1">벤치마크</button>
+        <span class="grp" aria-hidden="true">LINUX</span>
+        <button type="button" role="tab" id="tab-lmain" aria-selected="false" aria-controls="stage" data-shot="lmain" tabindex="-1">메인 창</button>
+        <button type="button" role="tab" id="tab-lextract" aria-selected="false" aria-controls="stage" data-shot="lextract" tabindex="-1">압축 풀기</button>
       </div>
-      <div class="gallery-stage" id="stage" role="tabpanel" aria-live="polite">
+      <div class="gallery-stage" id="stage" role="tabpanel" aria-labelledby="tab-welcome" aria-live="polite">
         <figure>
           <img id="stage-img" src="assets/screens/welcome.png" alt="시작 화면: 로고, 끌어다 놓기 영역, 최근 사용한 파일 목록" width="1192" height="666">
-          <figcaption id="stage-cap">압축 파일을 끌어다 놓거나 최근 파일을 바로 열 수 있는 시작 화면입니다.</figcaption>
+          <figcaption id="stage-cap">압축 파일을 열거나, 압축할 파일을 끌어다 놓거나, 최근 파일을 바로 열 수 있는 시작 화면입니다.</figcaption>
         </figure>
       </div>
     </div>
@@ -480,19 +721,23 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
   <section id="cli">
     <div class="wrap">
       <div class="section-head">
-        <p class="eyebrow">탐색기 메뉴와 명령줄</p>
-        <h2>오른쪽 클릭 한 번으로 풀기</h2>
-        <p class="lead">설정에서 탐색기 메뉴를 켜면 ZIP·TAR·GZ 파일의 오른쪽 클릭 메뉴에 ‘고깃ZIP’이 생깁니다. 윈도우 7 이상에서는 하위 메뉴로, XP와 비스타에서는 바로 보이는 항목으로 등록하며 관리자 권한은 필요 없습니다.</p>
+        <p class="eyebrow">오른쪽 클릭과 명령줄</p>
+        <h2>오른쪽 클릭 한 번으로 풀고 묶기</h2>
+        <p class="lead">Windows 탐색기, macOS Finder, Linux 파일 관리자에서 압축 파일을 바로 풀고, 파일과 폴더를 ZIP이나 7z로 묶을 수 있습니다. 스크립트에는 모든 운영체제에 같은 명령줄 도구 <code>gogitzip</code>을 쓰면 됩니다.</p>
       </div>
       <div class="code">
-<pre><span class="k">GogitZip.exe</span> 자료.zip                <span class="c">: 압축 파일 열기</span>
-<span class="k">GogitZip.exe</span> /smart 자료.zip         <span class="c">: '자료' 폴더를 만들어 풀기 (최상위 폴더가 하나면 생략)</span>
-<span class="k">GogitZip.exe</span> /here 자료.zip          <span class="c">: 압축 파일이 있는 곳에 풀기</span>
+<pre><span class="k">gogitzip</span> l 자료.zip                     <span class="c"># 목록 보기</span>
+<span class="k">gogitzip</span> x 자료.7z -o 받은파일           <span class="c"># 풀기 (--smart: 필요할 때만 폴더 만들기)</span>
+<span class="k">gogitzip</span> t 자료.rar -p 암호              <span class="c"># 검사</span>
+<span class="k">gogitzip</span> a 묶음.zip 문서/ 사진/           <span class="c"># 압축하기 (형식은 확장자로: .7z .tar.xz .iso …)</span>
+<span class="k">gogitzip</span> a -mx9 -p 암호 --encrypt-names 비밀.7z 폴더/
+<span class="k">gogitzip</span> i                              <span class="c"># 지원 형식과 지금 쓰는 CPU 엔진</span></pre>
+      </div>
+      <div class="code">
+<pre><span class="k">GogitZip.exe</span> /smart 자료.zip         <span class="c">: '자료' 폴더를 만들어 풀기 (최상위 폴더가 하나면 생략)</span>
 <span class="k">GogitZip.exe</span> /to D:\받은파일 자료.zip  <span class="c">: 지정한 폴더에 풀기</span>
-<span class="k">GogitZip.exe</span> /extract 자료.zip       <span class="c">: 압축 풀기 옵션 창 열기</span>
-<span class="k">GogitZip.exe</span> /test 자료.zip          <span class="c">: 압축 파일 검사</span>
-<span class="k">GogitZip.exe</span> /register [/assoc]     <span class="c">: 탐색기 메뉴 등록 (연결 프로그램 포함)</span>
-<span class="k">GogitZip.exe</span> /bench                  <span class="c">: CPU 가속 벤치마크</span></pre>
+<span class="k">GogitZip.exe</span> /zip 문서               <span class="c">: 창 없이 "문서.zip"으로 압축 (/7z: "문서.7z", /add: 압축하기 창)</span>
+<span class="k">GogitZip.exe</span> /register [/assoc]     <span class="c">: 탐색기 메뉴 등록 (연결 프로그램 포함)</span></pre>
       </div>
     </div>
   </section>
@@ -501,34 +746,75 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
     <div class="wrap">
       <div class="section-head">
         <p class="eyebrow">내려받기</p>
-        <h2>고깃ZIP 1.0.0</h2>
-        <p class="lead">두 판 모두 같은 기능을 가진 단일 실행 파일입니다. 아무 폴더에나 두고 실행하면 됩니다.</p>
+        <h2>고깃ZIP 2.0.0</h2>
+        <p class="lead">모두 무료이고 같은 기능을 가집니다. 이 기기에 맞는 파일에 ‘추천’ 표시가 붙습니다.</p>
       </div>
       <div class="dl-grid">
-        <article class="dl" id="dl-x64">
-          <header><b>64비트</b><span class="badge">이 PC에 추천</span><span>GogitZip64.exe · 약 380 KB</span></header>
+        <article class="dl" id="dl-win64">
+          <header><b>Windows 64비트</b><span class="badge">이 기기에 추천</span><span>GogitZip64.exe</span></header>
           <ul>
-            <li>Windows XP x64 · Vista · 7 · 8 · 10 · 11 (64비트)</li>
-            <li>64비트 비트 버퍼로 Deflate 해제가 더 빠름</li>
-            <li>SSE2 · SSE4.1 · AVX · AVX2 엔진</li>
+            <li>Windows 7 · 8 · 10 · 11, XP x64 · Vista 64비트</li>
+            <li>설치 없이 실행, 설정은 HKCU에만 저장</li>
+            <li>ARM PC의 Windows 11에서도 실행 (에뮬레이션)</li>
           </ul>
-          <a class="btn btn-primary" href="https://github.com/NiSeullent/Butcherar/releases/latest">64비트판 받기 <small>GitHub Releases</small></a>
+          <div class="links"><a class="btn btn-primary" href="https://github.com/NiSeullent/Butcherar/releases/latest/download/GogitZip64.exe" data-asset="^GogitZip64\.exe$">64비트판 받기 <small>.exe · 약 1.3 MB</small></a></div>
         </article>
-        <article class="dl" id="dl-x86">
-          <header><b>32비트</b><span class="badge">이 PC에 추천</span><span>GogitZip.exe · 약 400 KB</span></header>
+        <article class="dl" id="dl-win32">
+          <header><b>Windows 32비트</b><span class="badge">이 기기에 추천</span><span>GogitZip.exe</span></header>
           <ul>
-            <li>Windows 2000 · XP · Vista · 7 · 8 · 10 · 11</li>
+            <li>Windows 2000 · XP · Vista 이상 모든 Windows</li>
             <li>Pentium(i586) 이상의 모든 x86 CPU</li>
             <li>x86 · MMX · SSE · SSE2 · SSE4.1 · AVX · AVX2 엔진</li>
           </ul>
-          <a class="btn btn-ghost" href="https://github.com/NiSeullent/Butcherar/releases/latest">32비트판 받기 <small>오래된 PC는 이쪽</small></a>
+          <div class="links"><a class="btn btn-ghost" href="https://github.com/NiSeullent/Butcherar/releases/latest/download/GogitZip.exe" data-asset="^GogitZip\.exe$">32비트판 받기 <small>.exe · 오래된 PC는 이쪽</small></a></div>
+        </article>
+        <article class="dl" id="dl-mac">
+          <header><b>macOS</b><span class="badge">이 기기에 추천</span><span>GogitZIP-mac.dmg</span></header>
+          <ul>
+            <li>Intel: 10.13 High Sierra 이상</li>
+            <li>Apple silicon: 11 Big Sur 이상</li>
+            <li>유니버설 앱, ‘응용 프로그램’으로 끌어다 놓기</li>
+          </ul>
+          <div class="links"><a class="btn btn-ghost" href="https://github.com/NiSeullent/Butcherar/releases/latest/download/GogitZIP-mac.dmg" data-asset="^GogitZIP-mac\.dmg$">macOS용 받기 <small>.dmg · 유니버설</small></a></div>
+        </article>
+        <article class="dl" id="dl-linux-x64">
+          <header><b>Linux x86-64</b><span class="badge">이 기기에 추천</span><span>glibc 2.35+ · GTK 3</span></header>
+          <ul>
+            <li>Ubuntu 22.04+, Debian 12+, Fedora 36+ …</li>
+            <li>.deb: <code>sudo apt install ./gogitzip_2.0.0_amd64.deb</code></li>
+            <li>.tar.gz: 풀고 <code>./install.sh</code> (~/.local)</li>
+          </ul>
+          <div class="links">
+            <a class="btn btn-ghost" href="https://github.com/NiSeullent/Butcherar/releases/latest/download/gogitzip_2.0.0_amd64.deb" data-asset="^gogitzip_.*_amd64\.deb$">.deb <small>Debian · Ubuntu</small></a>
+            <a class="btn btn-ghost" href="https://github.com/NiSeullent/Butcherar/releases/latest/download/GogitZIP-2.0.0-linux-x86_64.tar.gz" data-asset="^GogitZIP-.*-linux-x86_64\.tar\.gz$">.tar.gz <small>모든 배포판</small></a>
+          </div>
+        </article>
+        <article class="dl" id="dl-linux-arm64">
+          <header><b>Linux ARM64</b><span class="badge">이 기기에 추천</span><span>glibc 2.35+ · GTK 3</span></header>
+          <ul>
+            <li>Raspberry Pi OS 64비트, ARM 서버 · 노트북</li>
+            <li>.deb: <code>sudo apt install ./gogitzip_2.0.0_arm64.deb</code></li>
+            <li>.tar.gz: 풀고 <code>./install.sh</code> (~/.local)</li>
+          </ul>
+          <div class="links">
+            <a class="btn btn-ghost" href="https://github.com/NiSeullent/Butcherar/releases/latest/download/gogitzip_2.0.0_arm64.deb" data-asset="^gogitzip_.*_arm64\.deb$">.deb <small>Debian · Ubuntu</small></a>
+            <a class="btn btn-ghost" href="https://github.com/NiSeullent/Butcherar/releases/latest/download/GogitZIP-2.0.0-linux-aarch64.tar.gz" data-asset="^GogitZIP-.*-linux-aarch64\.tar\.gz$">.tar.gz <small>모든 배포판</small></a>
+          </div>
+        </article>
+        <article class="dl" id="dl-source">
+          <header><b>소스 코드</b><span>MIT 라이선스</span></header>
+          <ul>
+            <li>모든 릴리스 파일과 SHA256SUMS.txt</li>
+            <li>직접 빌드: <code>make</code> · <code>make linux</code> · <code>make mac</code></li>
+            <li>바뀐 점은 릴리스 노트에</li>
+          </ul>
+          <div class="links"><a class="btn btn-ghost" href="https://github.com/NiSeullent/Butcherar/releases/latest">모든 파일 보기 <small>GitHub Releases</small></a></div>
         </article>
       </div>
-      <div class="req">
-        <div><b>CPU</b>Pentium 133MHz 이상</div>
-        <div><b>메모리</b>스레드 하나당 약 1.5MB</div>
-        <div><b>디스크</b>1MB 미만</div>
-        <div><b>설치</b>필요 없음 · 설정은 HKCU</div>
+      <div class="dl-note">
+        <div><b>WINDOWS 첫 실행</b><p>코드 서명이 없어서 SmartScreen 경고가 나오면 <strong>추가 정보 → 실행</strong>을 누르세요.</p></div>
+        <div><b>MACOS 첫 실행</b><p>앱을 <strong>오른쪽 클릭 → 열기</strong>로 실행하세요(macOS 15부터는 시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기).</p></div>
+        <div><b>파일 확인</b><p>릴리스의 <code>SHA256SUMS.txt</code>와 받은 파일의 SHA-256 값을 비교할 수 있습니다.</p></div>
       </div>
     </div>
   </section>
@@ -541,24 +827,40 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
       </div>
       <div class="faq">
         <details>
-          <summary>왜 이름이 고깃ZIP인가요?</summary>
-          <p>프로젝트 이름이 Butcherar(정육점 + 아카이버)입니다. 정육점에서 고기를 결대로 썰어 내듯 압축 파일을 빠르게 풀어 낸다는 뜻으로 지었습니다. 로고의 지퍼 손잡이는 뼈다귀 모양입니다.</p>
+          <summary>Windows에서 “Windows의 PC 보호” 경고가 나와요.</summary>
+          <p>고깃ZIP 실행 파일에는 유료 코드 서명 인증서가 없어서, 받은 사람이 적은 동안 SmartScreen이 경고를 보여 줍니다. <strong>추가 정보 → 실행</strong>을 누르면 됩니다. 받은 파일이 GitHub 릴리스의 원본과 같은지는 <code>SHA256SUMS.txt</code>의 값과 비교해 확인할 수 있습니다(PowerShell: <code>Get-FileHash GogitZip64.exe</code>).</p>
         </details>
         <details>
-          <summary>압축(새로 만들기)도 되나요?</summary>
-          <p>1.0은 압축 해제 전용입니다. 대신 푸는 쪽에 집중해서 ZIP, ZIP64, Deflate64, AES 암호, TAR, GZ를 지원합니다.</p>
+          <summary>macOS에서 “확인되지 않은 개발자” 때문에 열리지 않아요.</summary>
+          <p>Apple 공증을 받지 않은 앱이라 Gatekeeper가 처음 실행을 막습니다. Finder의 ‘응용 프로그램’ 폴더에서 GogitZIP을 <strong>오른쪽 클릭(Control+클릭) → 열기</strong>를 누르고 한 번 더 <strong>열기</strong>를 누르세요. macOS 15 Sequoia부터는 한 번 열기를 시도한 뒤 <strong>시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기</strong>를 누릅니다. 터미널에서 <code>xattr -dr com.apple.quarantine /Applications/GogitZIP.app</code>을 실행해도 됩니다.</p>
         </details>
         <details>
-          <summary>윈도우 2000에서도 정말 돌아가나요?</summary>
-          <p>32비트판은 PE 헤더의 운영체제 버전이 5.0이고, kernel32·user32·gdi32 등에서 윈도우 2000에 있던 함수만 직접 가져옵니다. C 런타임(msvcrt)도 쓰지 않습니다. 비스타 이후에만 있는 기능은 실행 중에 있을 때만 불러옵니다.</p>
+          <summary>32비트판은 무엇이고, 윈도우 2000에서도 정말 돌아가나요?</summary>
+          <p>32비트판(GogitZip.exe)은 PE 헤더의 운영체제 버전이 5.0이고, kernel32 · user32 · gdi32 등에서 윈도우 2000에 있던 함수만 직접 가져옵니다. C 런타임(msvcrt)도 쓰지 않습니다. 새 폴더 선택 창이나 작업 표시줄 진행률처럼 나중에 생긴 기능은 실행 중에 있을 때만 불러옵니다. CPU는 Pentium(i586)이면 충분하고, 새 CPU에서는 AVX2 엔진까지 씁니다. 64비트 윈도우라면 64비트판이 조금 더 빠릅니다.</p>
         </details>
         <details>
-          <summary>AVX가 있는 CPU인데 윈도우 XP에서는 왜 AVX를 안 쓰나요?</summary>
-          <p>AVX 레지스터는 운영체제가 작업 전환 때 저장해 줘야 안전하게 쓸 수 있습니다. 윈도우 7 SP1 이전에는 이 기능이 없어서, 고깃ZIP은 XGETBV로 이를 확인하고 PCLMULQDQ와 AES-NI까지 쓰는 SSE4.1 엔진으로 동작합니다.</p>
+          <summary>제 파일은 안전한가요?</summary>
+          <p>고깃ZIP은 네트워크를 쓰지 않고, 파일을 어디에도 보내지 않습니다. 압축을 풀 때는 대상 폴더 밖으로 나가는 경로와 링크를 막고, 모든 파일의 CRC나 해시를 확인해서 손상된 파일은 남기지 않습니다. 새로 압축할 때는 임시 파일에 쓴 뒤 다 만들어지면 이름을 바꾸므로, 중간에 취소해도 기존 파일이 망가지지 않습니다. 소스 코드는 모두 공개되어 있습니다.</p>
+        </details>
+        <details>
+          <summary>알집(ALZ, EGG) 파일도 풀 수 있나요?</summary>
+          <p>네. 알집 4 ~ 7의 ALZ(분할 .a00 포함)와 알집 8 이후의 EGG(분할, 솔리드, AZO · LZMA 압축, AES · LEA 암호)를 알집 없이 풉니다. 새로 만들 때는 어디서나 열리는 ZIP이나 7z를 권합니다.</p>
+        </details>
+        <details>
+          <summary>RAR 파일을 만들 수 있나요?</summary>
+          <p>RAR는 만드는 방법이 공개되어 있지 않아 풀기만 합니다(RAR 1.4 ~ 7, 볼륨, 암호 포함). 만들기는 ZIP, 7z, TAR(.gz · .bz2 · .xz · .zst), GZ · BZ2 · XZ · ZST, ISO를 지원합니다.</p>
+        </details>
+        <details>
+          <summary>리눅스 패키지가 실행되지 않아요.</summary>
+          <p>미리 빌드한 패키지는 glibc 2.35 이상(Ubuntu 22.04, Debian 12, Fedora 36 이후)과 GTK 3가 필요합니다. 더 오래된 배포판에서는 소스에서 <code>make linux</code>로 직접 빌드하면 됩니다. 명령줄 도구 <code>gogitzip</code>은 GTK 없이도 동작합니다.</p>
         </details>
         <details>
           <summary>설정은 어디에 저장되나요?</summary>
-          <p>현재 사용자 레지스트리 HKCU\Software\GogitZIP에 저장합니다. 탐색기 메뉴도 HKCU에만 등록하므로 관리자 권한이 필요 없고, 설정 창에서 끄면 깨끗하게 지워집니다.</p>
+          <p>Windows는 현재 사용자 레지스트리 HKCU\Software\GogitZIP에, macOS는 사용자 기본 설정에, Linux는 ~/.config/gogitzip에 저장합니다. 탐색기 메뉴도 HKCU에만 등록하므로 관리자 권한이 필요 없고, 설정 창에서 끄면 깨끗하게 지워집니다.</p>
+        </details>
+        <details>
+          <summary>왜 이름이 고깃ZIP인가요?</summary>
+          <p>프로젝트 이름이 Butcherar(정육점 + 아카이버)입니다. 정육점에서 고기를 결대로 썰어 내듯 압축 파일을 빠르게 풀어 낸다는 뜻으로 지었습니다. 로고의 지퍼 손잡이는 뼈다귀 모양입니다.</p>
         </details>
       </div>
     </div>
@@ -568,29 +870,47 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
 <footer>
   <div class="wrap">
     <span>© 2026 Butcherar 프로젝트 · MIT 라이선스</span>
-    <span><a href="https://github.com/NiSeullent/Butcherar">GitHub</a> · <a href="https://github.com/NiSeullent/Butcherar/issues">문제 신고</a></span>
+    <span><a href="https://github.com/NiSeullent/Butcherar">GitHub</a> · <a href="https://github.com/NiSeullent/Butcherar/releases">릴리스</a> · <a href="https://github.com/NiSeullent/Butcherar/issues">문제 신고</a></span>
   </div>
 </footer>
 
 <script>
 (function () {
+  "use strict";
+  var REPO = "NiSeullent/Butcherar";
+  var DL = "https://github.com/" + REPO + "/releases/latest/download/";
+  var VERSION = document.documentElement.getAttribute("data-version") || "";
+
+  /* ---------- screenshots ---------- */
   var shots = {
     welcome: ["assets/screens/welcome.png", 1192, 666, "시작 화면: 로고, 끌어다 놓기 영역, 최근 사용한 파일 목록",
-              "압축 파일을 끌어다 놓거나 최근 파일을 바로 열 수 있는 시작 화면입니다."],
+              "압축 파일을 열거나, 압축할 파일을 끌어다 놓거나, 최근 파일을 바로 열 수 있는 시작 화면입니다."],
+    create: ["assets/screens/create.png", 543, 343, "압축하기 창: 압축 파일 이름, 형식, 방식, 레벨, 암호",
+             "형식(ZIP · 7z · TAR · ISO …), 압축 방식과 레벨, 암호와 파일 이름 암호화를 고르는 창입니다."],
     extract: ["assets/screens/extract.png", 543, 340, "압축 풀기 창: 풀 위치, 폴더 만들기, 덮어쓰기 방식",
               "풀 위치와 덮어쓰기 방식을 고르는 창입니다. 최상위 폴더가 하나뿐이면 폴더를 겹쳐 만들지 않습니다."],
     progress: ["assets/screens/progress.png", 525, 245, "진행 창: 진행 막대, 처리량, 속도, 남은 시간, 사용 중인 엔진",
-               "1.88GB를 4스레드로 푸는 중입니다. 속도와 남은 시간, 사용 중인 엔진이 함께 표시됩니다."],
+               "여러 스레드로 푸는 중입니다. 속도와 남은 시간, 사용 중인 엔진이 함께 표시됩니다."],
     bench: ["assets/screens/bench.png", 525, 354, "벤치마크 창: 엔진별 압축 해제 속도와 CRC32 속도",
-            "이 PC에서 쓸 수 있는 모든 엔진의 속도를 직접 재 볼 수 있습니다."]
+            "이 PC에서 쓸 수 있는 모든 엔진의 속도를 직접 재 볼 수 있습니다."],
+    lmain: ["assets/screens/linux-main.png", 1192, 666, "Linux GTK 3 메인 창: 도구 모음, 폴더 트리, 파일 목록",
+            "Linux에서도 같은 구성의 GTK 3 창입니다. 바탕 화면의 아이콘 테마와 글꼴을 따릅니다."],
+    lextract: ["assets/screens/linux-extract.png", 522, 415, "Linux 압축 풀기 창: 풀 위치, 바로 가기 단추, 덮어쓰기 방식",
+               "자주 쓰는 위치(다운로드, 바탕 화면, 문서)를 단추 하나로 고를 수 있습니다."]
   };
   var tabs = document.querySelectorAll('.tabs [role="tab"]');
+  var stage = document.getElementById("stage");
   var img = document.getElementById("stage-img"), cap = document.getElementById("stage-cap");
   function show(key) {
     var s = shots[key];
     if (!s) return;
     img.src = s[0]; img.width = s[1]; img.height = s[2]; img.alt = s[3]; cap.textContent = s[4];
-    for (var i = 0; i < tabs.length; i++) tabs[i].setAttribute("aria-selected", tabs[i].getAttribute("data-shot") === key ? "true" : "false");
+    for (var i = 0; i < tabs.length; i++) {
+      var on = tabs[i].getAttribute("data-shot") === key;
+      tabs[i].setAttribute("aria-selected", on ? "true" : "false");
+      tabs[i].tabIndex = on ? 0 : -1;
+      if (on) stage.setAttribute("aria-labelledby", tabs[i].id);
+    }
   }
   for (var i = 0; i < tabs.length; i++) {
     tabs[i].addEventListener("click", function () { show(this.getAttribute("data-shot")); });
@@ -602,15 +922,116 @@ footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wr
     });
   }
 
-  /* Recommend the build that fits this PC (64-bit Windows -> x64). */
-  var ua = navigator.userAgent || "";
-  var win = /Windows/.test(ua);
-  var is64 = /Win64|WOW64|x64|amd64/i.test(ua) || !win;
-  var oldWin = /Windows NT 5\./.test(ua);
-  var rec = document.getElementById(is64 && !oldWin ? "dl-x64" : "dl-x86");
-  if (rec) rec.classList.add("recommended");
-  var sub = document.getElementById("cta-sub");
-  if (sub && win && (!is64 || oldWin)) sub.textContent = "Windows 32비트 · 무료";
+  /* ---------- formats: search + category filter ---------- */
+  var q = document.getElementById("fmt-q"), chips = document.querySelectorAll("#fmt-chips button");
+  var rows = document.querySelectorAll("#fmt-table tbody tr"), count = document.getElementById("fmt-count");
+  var cat = "", more = document.getElementById("fmt-more"), expanded = false, FIRST = 12;
+  /* the full list is long: without a search or a category only the first rows show until "모두 보기" */
+  function filter() {
+    var text = (q.value || "").toLowerCase().replace(/^\s+|\s+$/g, ""), words = text.split(/\s+/), n = 0;
+    var collapsed = !expanded && !text && !cat;
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i], key = r.getAttribute("data-key") + " " + r.textContent.toLowerCase(), ok = true;
+      if (cat === "write") ok = r.getAttribute("data-w") === "1";
+      else if (cat) ok = r.getAttribute("data-cat") === cat;
+      for (var j = 0; ok && j < words.length; j++) {
+        var w = words[j].replace(/^\./, "");
+        if (w && key.indexOf(w) < 0) ok = false;
+      }
+      if (ok) n++;
+      r.hidden = !ok || (collapsed && n > FIRST);
+    }
+    more.hidden = !(collapsed && n > FIRST);
+    more.textContent = "모두 보기 (" + (n - FIRST) + "가지 더)";
+    count.textContent = n ? n + "가지 형식" + (n < rows.length ? " (전체 " + rows.length + "가지 중)" : "")
+                          : "찾는 형식이 없습니다. 확장자나 형식 이름으로 다시 찾아보세요.";
+  }
+  if (q && rows.length) {
+    q.addEventListener("input", filter);
+    more.addEventListener("click", function () { expanded = true; filter(); });
+    for (var c = 0; c < chips.length; c++) {
+      chips[c].addEventListener("click", function () {
+        cat = this.getAttribute("data-cat") || "";
+        for (var k = 0; k < chips.length; k++) chips[k].setAttribute("aria-pressed", chips[k] === this ? "true" : "false");
+        filter();
+      });
+    }
+    filter();
+  }
+
+  /* ---------- downloads: recommend the file for this device ---------- */
+  var ua = navigator.userAgent || "", uad = navigator.userAgentData, assets = null;
+  var os = /Windows/.test(ua) ? "win" : /Android|iPhone|iPad|iPod|CrOS/.test(ua) ? "" :
+           /Macintosh|Mac OS X/.test(ua) ? (navigator.maxTouchPoints > 1 ? "" : "mac") :
+           /Linux|X11/.test(ua) ? "linux" : "";
+  /* every a[data-asset] points at the newest release's file whose name matches the pattern */
+  function relink() {
+    if (!assets) return;
+    var links = document.querySelectorAll("a[data-asset]");
+    for (var i = 0; i < links.length; i++) {
+      var re = new RegExp(links[i].getAttribute("data-asset"));
+      for (var j = 0; j < assets.length; j++) {
+        if (re.test(assets[j].name)) { links[i].href = assets[j].browser_download_url; break; }
+      }
+    }
+  }
+  function esc(s) { return s.replace(/[.]/g, "\\."); }
+  function pick(arch, bits) {
+    var id = "", file = "", pat = "", label = "", sub = "", hint = "";
+    if (os === "win") {
+      var old = /Windows NT 5\.[01]/.test(ua) && !/Win64|WOW64|x64/i.test(ua);
+      var is64 = bits === "64" || arch === "arm" || /Win64|WOW64|x64|amd64|ARM64/i.test(ua);
+      if (is64 && !old) { id = "dl-win64"; file = "GogitZip64.exe"; sub = "Windows 64비트 · " + VERSION; }
+      else { id = "dl-win32"; file = "GogitZip.exe"; sub = "Windows 32비트 · " + VERSION; }
+      pat = "^" + esc(file) + "$";
+      label = "Windows용 받기";
+      hint = "설치 없이 실행 파일 하나로 동작합니다. 32비트판은 Windows 2000에서도 실행됩니다.";
+    } else if (os === "mac") {
+      id = "dl-mac"; file = "GogitZIP-mac.dmg"; pat = "^" + esc(file) + "$";
+      label = "macOS용 받기"; sub = "유니버설 · Intel · Apple silicon";
+      hint = "dmg를 열고 GogitZIP을 ‘응용 프로그램’ 폴더로 끌어다 놓으세요. 처음에는 오른쪽 클릭 → 열기로 실행합니다.";
+    } else if (os === "linux") {
+      var arm = arch === "arm" || /aarch64|arm64|armv8/i.test(ua), deb = /Ubuntu|Debian|Mint/i.test(ua);
+      id = arm ? "dl-linux-arm64" : "dl-linux-x64";
+      if (deb) {
+        file = "gogitzip_" + VERSION + (arm ? "_arm64.deb" : "_amd64.deb");
+        pat = "^gogitzip_.*_" + (arm ? "arm64" : "amd64") + "\\.deb$";
+      } else {
+        file = "GogitZIP-" + VERSION + "-linux-" + (arm ? "aarch64" : "x86_64") + ".tar.gz";
+        pat = "^GogitZIP-.*-linux-" + (arm ? "aarch64" : "x86_64") + "\\.tar\\.gz$";
+      }
+      label = "Linux용 받기"; sub = (arm ? "ARM64" : "x86-64") + (deb ? " · .deb" : " · .tar.gz");
+      hint = "glibc 2.35 이상과 GTK 3가 필요합니다. 다른 CPU와 패키지 형식은 아래 내려받기에 있습니다.";
+    }
+    if (!id) return;
+    var card = document.getElementById(id);
+    if (card) {
+      card.className += " recommended";
+      /* the recommended card's first button becomes the filled one */
+      var btns = document.querySelectorAll(".dl .btn"), first = card.querySelector(".btn");
+      for (var b = 0; b < btns.length; b++) {
+        btns[b].className = btns[b].className.replace(/\bbtn-(primary|ghost)\b/, btns[b] === first ? "btn-primary" : "btn-ghost");
+      }
+    }
+    var a = document.getElementById("cta-main");
+    a.href = DL + file;
+    a.setAttribute("data-asset", pat);
+    document.getElementById("cta-label").textContent = label;
+    document.getElementById("cta-sub").textContent = sub;
+    document.getElementById("cta-hint").textContent = hint;
+    relink();
+  }
+  if (uad && uad.getHighEntropyValues) {
+    uad.getHighEntropyValues(["architecture", "bitness"]).then(function (v) { pick(v.architecture, v.bitness); },
+                                                                function () { pick("", ""); });
+  } else {
+    pick("", "");
+  }
+  /* the Linux file names carry the version: follow the newest release when GitHub answers */
+  if (window.fetch && window.Promise) {
+    fetch("https://api.github.com/repos/" + REPO + "/releases/latest").then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (rel) { if (rel && rel.assets) { assets = rel.assets; relink(); } })["catch"](function () {});
+  }
 })();
 </script>
 </body>

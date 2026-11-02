@@ -16,6 +16,8 @@ src/core/    model + helpers shared by everything (no OS calls)
   str.c        UTF-8/UTF-16 conversion, Hangul composition, time conversion, gz_wcs*
   gz_write.h   archive creation API (gz_wopts, gz_witem, gz_sink, writer registry)
   write.c      writer dispatch
+  version.h    GZ_APP_VERSION and GZ_VER_MAJOR/MINOR/PATCH: the one place of the program
+               version (front ends, res/app.rc, Makefile packages, docs checked by tests)
   cpu.c/h      CPUID / XGETBV / AArch64 HWCAP detection and kernel dispatch
   crc32.c/h    CRC-32 (slice-by-8, PCLMULQDQ, AVX, VPCLMULQDQ)
   crypto.c/h   ZipCrypto, SHA-1, HMAC, PBKDF2-SHA1, AES-CTR (T-table, AES-NI)
@@ -27,7 +29,12 @@ src/app/     portable engine (extraction/compression jobs) + command line tool
 src/gtk/     Linux GTK 3 front end
 src/mac/     macOS Cocoa front end
 tests/       gzt.c test driver, run_tests.py, cases/*.py, lib/gztest.py
-tools/       gen_registry.sh, gen_assets.py
+tools/       gen_registry.sh, gen_assets.py, gen_linux_data.py, gen_mac_data.py, make_icns.py,
+             gen_docs.py (format tables of README / web site / release notes), linux/ (packages),
+             web_screens.py (Windows screenshots of the web site under Wine)
+data/        Linux launcher, MIME, icons, metainfo; macOS Info.plist, icons, localizations
+web/         official web site (GitHub Pages)
+.github/     CI and release workflow (build.yml), site deployment (pages.yml), release notes
 ```
 
 Include directories: `-Isrc/core -Isrc/codec -Isrc/fmt` (and `src/app`,
@@ -197,3 +204,18 @@ streaming variants, e.g. ZIP data descriptors). Honour `o->cancel`.
 * Every format adds hostile-input checks (truncated, bit-flipped, huge counts).
 * Run `make test HOST_CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"`
   before finishing.
+* A new reader or writer changes the format tables of README.md, web/index.html and
+  .github/release-notes.md: run `python3 tools/gen_docs.py` (and describe the format in
+  its META table). `tests/cases/release_meta.py` fails while they are stale, while the
+  version differs between src/core/version.h and the documents, or when the workflow
+  calls a make target that does not exist.
+
+## Releases
+
+* The version lives in `src/core/version.h` only; `python3 tools/gen_docs.py` copies it
+  into the documents. The Linux metainfo gets a new `<release>` entry by hand.
+* `.github/workflows/build.yml` builds Windows (x86, x64), Linux packages (`make dist-linux`,
+  `make deb` on x86_64 and aarch64, glibc 2.35 baseline), the macOS disk image, and runs the
+  tests on Linux x86_64 / ARM64 and macOS. A pushed `v*` tag or a release published in
+  the UI gets every package, `SHA256SUMS.txt` and `.github/release-notes.md`;
+  *Run workflow* with a tag rebuilds that tag and replaces its assets.

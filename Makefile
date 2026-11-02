@@ -7,10 +7,15 @@
 #   make install    -> Linux: programs, launcher, MIME package, icons (PREFIX=/usr/local, DESTDIR=)
 #   make mac        -> build/mac/GogitZIP.app (on macOS, universal x86_64 + arm64) + build/gogitzip
 #   make dmg        -> build/GogitZIP-mac.dmg (on macOS)
+#   make dist-linux -> build/dist/GogitZIP-<version>-linux-<cpu>.tar.gz (Linux, prebuilt package)
+#   make deb        -> build/dist/gogitzip_<version>_<arch>.deb (Debian / Ubuntu package)
 #
 # Sources: src/core (model, crypto, CPU dispatch), src/codec (compression codecs),
 # src/fmt (archive formats and writers), src/win (Windows UI), src/posix (Linux/macOS
 # platform layer), src/app (portable engine + CLI), src/gtk, src/mac.
+
+# program version (one place: src/core/version.h), used by the macOS bundle and the packages
+VERSION := $(shell sed -n 's/^\#define GZ_APP_VERSION "\(.*\)"/\1/p' src/core/version.h)
 
 CC32  ?= i686-w64-mingw32-gcc
 CC64  ?= x86_64-w64-mingw32-gcc
@@ -106,10 +111,10 @@ $(B)/x64/win/%.o: src/win/%.c $(HDRS)
 	@mkdir -p $(dir $@)
 	$(CC64) $(CFLAGS) $(OPT_UI) $(ARCH64) -c $< -o $@
 
-$(B)/x86/res.o: res/app.rc res/app.ico res/doc.ico res/assets.bin res/app.manifest
+$(B)/x86/res.o: res/app.rc res/app.ico res/doc.ico res/assets.bin res/app.manifest src/core/version.h
 	@mkdir -p $(dir $@)
 	$(WR32) -c 65001 -I res -O coff $< $@
-$(B)/x64/res.o: res/app.rc res/app.ico res/doc.ico res/assets.bin res/app.manifest
+$(B)/x64/res.o: res/app.rc res/app.ico res/doc.ico res/assets.bin res/app.manifest src/core/version.h
 	@mkdir -p $(dir $@)
 	$(WR64) -c 65001 -I res -O coff $< $@
 
@@ -179,6 +184,26 @@ uninstall:
 	  $(SHARE)/metainfo/gogitzip.metainfo.xml
 	for s in $(ICON_SIZES); do rm -f $(SHARE)/icons/hicolor/$${s}x$${s}/apps/gogitzip.png; done
 
+# ---- Linux packages for this machine's CPU (CI release jobs build them natively on x86_64 and aarch64) ----
+#   make dist-linux -> build/dist/GogitZIP-<version>-linux-<uname -m>.tar.gz (bin/, share/, install.sh,
+#                      uninstall.sh, README.txt: installs into ~/.local or /usr/local)
+#   make deb        -> build/dist/gogitzip_<version>_<amd64|arm64>.deb (/usr, depends on libgtk-3-0)
+# The files are the ones `make install` installs (staged with DESTDIR), programs stripped
+# (STRIP=...). SOURCE_DATE_EPOCH=<commit time> makes the archives reproducible.
+DIST      := $(B)/dist
+DIST_ARCH ?= $(shell uname -m)
+DEB_ARCH  ?= $(shell dpkg --print-architecture 2>/dev/null || uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+dist-linux: linux
+	rm -rf $(DIST)/tree-tar
+	$(MAKE) --no-print-directory install DESTDIR=$(abspath $(DIST))/tree-tar PREFIX=
+	sh tools/linux/pkg.sh tar $(VERSION) $(DIST_ARCH) $(DIST) $(DIST)/tree-tar
+	rm -rf $(DIST)/tree-tar
+deb: linux
+	rm -rf $(DIST)/tree-deb
+	$(MAKE) --no-print-directory install DESTDIR=$(abspath $(DIST))/tree-deb PREFIX=
+	sh tools/linux/pkg.sh deb $(VERSION) $(DEB_ARCH) $(DIST) $(DIST)/tree-deb
+	rm -rf $(DIST)/tree-deb
+
 # ---- macOS Cocoa front end (on macOS, Xcode command line tools; see docs/BUILD-mac.md) ----
 # One universal build: the arm64 slice gets macOS 11 as its minimum automatically (the first
 # release on Apple silicon). Objects live in build/mac/obj (not build/host: test drivers link
@@ -199,7 +224,7 @@ MACSRC   := $(sort $(wildcard src/mac/*.m))
 MACOBJ   := $(patsubst src/mac/%.m,$(B)/mac/obj/mac/%.o,$(MACSRC))
 MACHDRS  := $(wildcard src/mac/*.h) src/win/asset_ids.h
 MACAPP   := $(B)/mac/GogitZIP.app
-MACVER    = $(shell sed -n 's/^\#define GZ_APP_VERSION "\(.*\)"/\1/p' src/app/engine.h)
+MACVER    = $(VERSION)
 
 $(B)/mac/obj/gen/registry.o: $(REG) $(HDRS)
 	@mkdir -p $(dir $@)
@@ -216,7 +241,7 @@ $(B)/mac/obj/GogitZIP-app: $(MACOBJ) $(MACCORE)
 $(B)/mac/obj/gogitzip-cli: src/app/cli.c $(MACCORE)
 	$(MACCC) $(MACFLAGS) -o $@ src/app/cli.c $(MACCORE) -liconv
 
-# GogitZIP.app: Info.plist (version from engine.h), icons, localizations, the icon atlas,
+# GogitZIP.app: Info.plist (version from src/core/version.h), icons, localizations, the icon atlas,
 # the command line tool in Contents/Helpers; signed inside out
 mac: $(B)/mac/obj/GogitZIP-app $(B)/mac/obj/gogitzip-cli $(B)/gogitzip
 	rm -rf $(MACAPP)
@@ -270,4 +295,4 @@ assets:
 clean:
 	rm -rf $(B)
 
-.PHONY: all win cli linux mac dmg install uninstall test assets clean clean-host fuzz
+.PHONY: all win cli linux mac dmg install uninstall dist-linux deb test assets clean clean-host fuzz

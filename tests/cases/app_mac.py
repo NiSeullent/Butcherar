@@ -26,8 +26,10 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 
 def app_version():
-    m = re.search(r'#define GZ_APP_VERSION "([^"]+)"', open(os.path.join(ROOT, "src", "app", "engine.h")).read())
-    return m.group(1)
+    for rel in (("src", "core", "version.h"), ("src", "app", "engine.h")):
+        m = re.search(r'#define GZ_APP_VERSION "([^"]+)"', open(os.path.join(ROOT, *rel)).read())
+        if m:
+            return m.group(1)
 
 
 def load_plist(path):
