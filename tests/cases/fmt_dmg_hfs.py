@@ -699,6 +699,8 @@ def fuzz(t, seeds):
         ok = r.returncode == 0 and "ok %d" % iters in out and "Sanitizer" not in out and "runtime error" not in out
         t.record(ok, "fuzz " + os.path.basename(p), out.strip()[-300:])
     for p in seeds[:3]:
+        if not os.path.exists(p):         # e.g. the LZFSE image needs pyliblzfse
+            continue
         r = t.sh([drv, "-t", p], check=False, timeout=600)
         out = r.stdout.decode(errors="replace") + r.stderr.decode(errors="replace")
         t.record(r.returncode == 0 and out.startswith("ok"), "threads " + os.path.basename(p), out.strip()[-200:])

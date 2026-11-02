@@ -169,8 +169,11 @@ def make_src(t, root, files, links=(), hard=(), sparse=(), modes=None, owners=No
         os.symlink(tgt, p)
     if special:
         os.mkfifo(os.path.join(root, "special/fifo"))
-        os.mknod(os.path.join(root, "special/chardev"), 0o20644, os.makedev(1, 3))
-        os.mknod(os.path.join(root, "special/blockdev"), 0o60644, os.makedev(7, 0))
+        for nm, mode, dev in (("chardev", 0o20644, (1, 3)), ("blockdev", 0o60644, (7, 0))):
+            try:
+                os.mknod(os.path.join(root, "special", nm), mode, os.makedev(*dev))
+            except PermissionError:
+                pass                  # device nodes need root
         tmp = "/tmp/gzsq%d" % os.getpid()           # AF_UNIX paths are short: bind, then move
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -181,7 +184,10 @@ def make_src(t, root, files, links=(), hard=(), sparse=(), modes=None, owners=No
     for rel, mode in (modes or {}).items():
         os.chmod(os.path.join(root, rel), mode)
     for rel, (uid, gid) in (owners or {}).items():
-        os.chown(os.path.join(root, rel), uid, gid, follow_symlinks=False)
+        try:
+            os.chown(os.path.join(root, rel), uid, gid, follow_symlinks=False)
+        except PermissionError:
+            pass                      # not root (CI): owners are not part of what is compared
     for rel, name, val in xattrs:
         try:
             os.setxattr(os.path.join(root, rel), name, val)
