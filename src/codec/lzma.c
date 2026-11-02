@@ -619,6 +619,9 @@ static int lz_decode_part(gz_lzma_dec *d, u64 *out_n, u64 *in_n, int lzma1, int 
             if (r) return r;
             avail = (size_t)(d->in_end - d->in_pos);
         }
+        /* the input itself ended before the bytes this step may read (a cut
+         * stream or chunk), as opposed to the end of a complete LZMA2 chunk */
+        const int in_short = d->in_eof && (u64)avail < *in_n;
         if (avail > *in_n) avail = (size_t)*in_n;
         const u8 *start = d->in_pos;
         const u8 *real_end = start + avail;
@@ -638,7 +641,7 @@ static int lz_decode_part(gz_lzma_dec *d, u64 *out_n, u64 *in_n, int lzma1, int 
         u32 e = lz_run(d, lim, buf_limit);
         if (d->in_pos > real_end) {             /* the last symbol read past the end */
             d->in_pos = real_end;
-            return lzma1 && d->in_eof ? GZ_E_TRUNC : GZ_E_DATA;
+            return in_short ? GZ_E_TRUNC : GZ_E_DATA;
         }
         *in_n -= (u64)(d->in_pos - start);
         if (e) return GZ_E_DATA;

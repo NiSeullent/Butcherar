@@ -541,7 +541,7 @@ def run(t):
         check_dec("raw2 read chunk %s" % rchunk, comp, spec2, mixed, ("-r", rchunk))
     check_dec("raw2 truncated", comp[:-1], spec2, mixed, want_rc=GZ_E_TRUNC)
     rc, used, out, err = drv.dec(comp[: len(comp) // 3], spec2)
-    t.record(not err and rc in (GZ_E_TRUNC, GZ_E_DATA), "raw2 truncated third", "rc=%d" % rc)
+    t.record(not err and rc == GZ_E_TRUNC, "raw2 truncated third", "rc=%d" % rc)   # cut inside a chunk
 
     # ---- 4. XZ Utils conformance files
     for fn in sorted(os.listdir(DATA)):
