@@ -218,11 +218,12 @@ int gz_out_flush(gz_inflater *z, const gz_stream_io *io, u8 *out, u8 **new_out)
     return GZ_OK;
 }
 
-int gz_inflate_run(gz_inflater *z, const gz_stream_io *io, int deflate64)
+static int inflate_start(gz_inflater *z, const gz_stream_io *io, int deflate64, int nsis)
 {
     u8 *base = z->ibuf + GZ_ILOOKBEHIND;
     __builtin_memset(z->ibuf, 0, GZ_ILOOKBEHIND);
     z->deflate64 = deflate64;
+    z->nsis = nsis;
     z->crc = 0;
     z->total_out = 0;
     z->in_eof = 0;
@@ -234,6 +235,16 @@ int gz_inflate_run(gz_inflater *z, const gz_stream_io *io, int deflate64)
     return gz_inflate_kernel(z, io);
 }
 
+int gz_inflate_run(gz_inflater *z, const gz_stream_io *io, int deflate64)
+{
+    return inflate_start(z, io, deflate64, 0);
+}
+
+int gz_inflate_run_nsis(gz_inflater *z, const gz_stream_io *io)
+{
+    return inflate_start(z, io, 0, 1);
+}
+
 int gz_inflate_run_dict(gz_inflater *z, const gz_stream_io *io, const u8 *dict, u32 dict_len)
 {
     if (dict_len > GZ_INFLATE_DICT_MAX) {          /* only the last 32 KiB can be referenced */
@@ -243,6 +254,7 @@ int gz_inflate_run_dict(gz_inflater *z, const gz_stream_io *io, const u8 *dict, 
     u8 *base = z->ibuf + GZ_ILOOKBEHIND;
     __builtin_memset(z->ibuf, 0, GZ_ILOOKBEHIND);
     z->deflate64 = 0;
+    z->nsis = 0;
     z->crc = 0;
     z->total_out = 0;
     z->in_eof = 0;
