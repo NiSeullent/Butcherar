@@ -1007,8 +1007,19 @@ def test_fuzz(t, drv, seeds, hostile):
         t.record(r.returncode == 0 and "Sanitizer" not in err and "runtime error" not in err,
                  "hostile set in memory (%d files)" % len(hostile), (r.stdout.decode()[-80:] + err[-400:]).strip())
 
+def gnu_cpio():
+    """GNU cpio writes crc/newc/odc/bin; BSD cpio (macOS) lacks the crc format and differs in links"""
+    import subprocess as sp
+    try:
+        r = sp.run(["cpio", "--version"], capture_output=True, timeout=10)
+    except Exception:
+        return False
+    return b"GNU" in r.stdout + r.stderr
+
 def run(t):
     t.need("cpio")
+    if not gnu_cpio():
+        t.skip("needs GNU cpio (BSD cpio lacks -H crc)")
     drv = t.build_driver("tests/drivers/unixfmt.c")
     seeds, hs = [], []
     for fn in (test_cpio, test_ar, test_rpm, test_xar, test_split, test_real):

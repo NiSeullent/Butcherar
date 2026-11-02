@@ -20,6 +20,7 @@ data descriptors, ZIP64 records, contiguous entries, extras):
     items/options/failures, checked with our reader); our reader on damaged output
 """
 import os, mmap, struct, shutil, subprocess, zipfile, zlib, random
+import unicodedata
 
 ENV = dict(os.environ, LC_ALL="C.UTF-8", LANG="C.UTF-8", TZ="UTC")
 # `gzt c` (tests/gzt.c) does not free its item list; our own driver is leak-free
@@ -236,11 +237,11 @@ def tree_of(root):
         rel = os.path.relpath(dp, root).replace(os.sep, "/")
         for d in dns:
             fp = os.path.join(dp, d)
-            k = (rel + "/" + d if rel != "." else d)
+            k = unicodedata.normalize("NFC", rel + "/" + d if rel != "." else d)
             out[k] = ("link", os.readlink(fp)) if os.path.islink(fp) else None
         for f in fns:
             fp = os.path.join(dp, f)
-            k = (rel + "/" + f if rel != "." else f)
+            k = unicodedata.normalize("NFC", rel + "/" + f if rel != "." else f)
             out[k] = ("link", os.readlink(fp)) if os.path.islink(fp) else open(fp, "rb").read()
     return out
 

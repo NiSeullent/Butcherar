@@ -12,6 +12,15 @@ create fixtures in its own work directory and check the native driver (gzt):
 """
 import os, sys, shutil, subprocess, unicodedata, hashlib
 
+if sys.platform == 'darwin':
+    # CI runners use the C locale: 7-Zip and friends would mangle non-ASCII arguments
+    os.environ.setdefault('LC_ALL', 'en_US.UTF-8')
+    os.environ.setdefault('LANG', 'en_US.UTF-8')
+
+def nfc(s):
+    """macOS file systems hand back decomposed (NFD) Hangul: compare names composed."""
+    return unicodedata.normalize('NFC', s)
+
 def normalize(name):
     """What 고깃ZIP shows for a raw entry name."""
     name = name.replace("\\", "/")
@@ -75,7 +84,7 @@ class T:
                 fp = os.path.join(dp, fn)
                 if os.path.islink(fp):
                     continue
-                rel = os.path.relpath(fp, root).replace(os.sep, "/")
+                rel = nfc(os.path.relpath(fp, root).replace(os.sep, "/"))
                 out[rel] = open(fp, "rb").read()
         return out
 

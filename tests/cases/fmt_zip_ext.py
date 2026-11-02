@@ -236,7 +236,9 @@ def run(t):
         t.record(any(x["method"] == "PPMd AES-256" for x in rows), "method column PPMd AES-256", str([x["method"] for x in rows][:3]))
 
     # ---------------- Info-ZIP and Python's zipfile / pyzipper
-    if t.tool("zip"):
+    zip_bz2 = t.tool("zip") and subprocess.run(["zip", "-Z", "bzip2", "-q", "-", "/dev/null"],
+                                               capture_output=True).returncode != 19   # 19 = method not enabled
+    if zip_bz2:
         for label, opts in (("zip -Z bzip2", ["-Z", "bzip2"]), ("zip -Z bzip2 -P", ["-Z", "bzip2", "-P", "secret"])):
             p = t.path("iz_%d.zip" % len(opts))
             if os.path.exists(p):
@@ -363,8 +365,9 @@ def run(t):
             t.check_vs_7z(p, label="split vs 7z", allow_extra=True)
         r, typ, rows = t.listing(os.path.join(d, "s1.z01"))
         t.record(typ == "ZIP" and len(rows) == nent and nent > len(FILES), "split .z01 listing", "%s %d" % (typ, len(rows)))
-        d2, p2 = zsplit("s2", "64k", "-Z", "bzip2", "-P", "pw")
-        t.check_extract(p2, FILES, pw="pw", label="split bzip2 + ZipCrypto", allow_extra=True)
+        if zip_bz2:
+            d2, p2 = zsplit("s2", "64k", "-Z", "bzip2", "-P", "pw")
+            t.check_extract(p2, FILES, pw="pw", label="split bzip2 + ZipCrypto", allow_extra=True)
         d3, p3 = zsplit("s3", "200k", "-fz")
         t.check_extract(p3, FILES, label="split ZIP64", allow_extra=True)
         # upper-case names

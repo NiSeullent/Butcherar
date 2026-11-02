@@ -11,6 +11,7 @@ readers (libarchive's bsdtar, py7zr, unar) and through our own reader once a 7z
 reader is registered. A table compares the sizes with `7z a` at the same settings.
 """
 import os, struct, zlib, lzma, shutil, subprocess, random, hashlib, time
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -335,10 +336,10 @@ def tree_of(root):
         for d in dns:
             p = os.path.join(dp, d)
             if not os.path.islink(p):
-                dirs.add(os.path.relpath(p, root))
+                dirs.add(unicodedata.normalize("NFC", os.path.relpath(p, root)))
         for fn in fns:
             p = os.path.join(dp, fn)
-            rel = os.path.relpath(p, root)
+            rel = unicodedata.normalize("NFC", os.path.relpath(p, root))
             files[rel] = ("LINK", os.readlink(p)) if os.path.islink(p) else open(p, "rb").read()
     return files, dirs
 
