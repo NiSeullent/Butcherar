@@ -39,6 +39,7 @@
 #include "crypto.h"
 #include "strings.h"
 #include "asset_ids.h"
+#include "selmask.h"
 
 #define GZ_VERSION_W   L"1.0.0"
 #define GZ_VERSION_A   "1.0.0"
@@ -97,7 +98,6 @@ wchar_t *wfmtn(wchar_t *buf, size_t cap, const wchar_t *fmt, ...);
         __builtin_types_compatible_p(__typeof__(b), __typeof__(&(b)[0])),          \
         (size_t)1024, sizeof(b) >> 1 /* wchar_t is 2 bytes on Windows */)
 #define wfmt(b, ...) wfmtn((b), GZ_BUFCAP(b), __VA_ARGS__)
-int    prefix_ieq(const wchar_t *s, const wchar_t *p, size_t n);   /* ASCII case-folded */
 void   fmt_u64(wchar_t *o, u64 v);
 void   fmt_thousands(wchar_t *o, u64 v);
 void   fmt_size(wchar_t *o, u64 v);                            /* 1.5 MB    */
@@ -108,8 +108,10 @@ u64    entry_filetime(const gz_entry *e);                      /* UTC FILETIME o
 const wchar_t *path_base(const wchar_t *p);
 void   path_dir(wchar_t *dir, const wchar_t *path, size_t cap);
 void   path_join(wchar_t *o, const wchar_t *a, const wchar_t *b, size_t cap);
-int    path_is_dir(const wchar_t *p);
+int    path_is_dir(const wchar_t *p);                          /* any length (os_win.c long-path form) */
 int    path_exists(const wchar_t *p);
+DWORD  path_attributes(const wchar_t *p);                      /* os_win.c; INVALID_FILE_ATTRIBUTES */
+#define GZ_LONGPATH 32768                                      /* longest Win32 path + NUL */
 int    scale(int px);                                          /* DPI scale from 96 */
 extern int g_dpi;
 
@@ -201,7 +203,7 @@ typedef struct ui_job {
     gz_extract_opts xo;           /* engine options (strings point into this struct)  */
     gz_compress_opts co;
     wchar_t dest[MAX_PATH * 2];   /* extraction folder (before smart naming)          */
-    wchar_t out[MAX_PATH * 2];    /* compression: archive to create                   */
+    wchar_t out[GZ_LONGPATH];     /* compression: archive to create (any length)      */
     wchar_t pw[256];
     const wchar_t *title;         /* progress window subtitle                         */
     int open_folder;

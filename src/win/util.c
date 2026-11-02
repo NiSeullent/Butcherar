@@ -42,19 +42,6 @@ wchar_t *wfmtn(wchar_t *buf, size_t cap, const wchar_t *fmt, ...)
     return buf;
 }
 
-/* Same folding as the archive's folder hash (ASCII letters only), so a
- * folder prefix matches every entry that was merged into that folder. */
-int prefix_ieq(const wchar_t *s, const wchar_t *p, size_t n)
-{
-    for (size_t i = 0; i < n; i++) {
-        wchar_t x = s[i], y = p[i];
-        if (x >= 'A' && x <= 'Z') x += 32;
-        if (y >= 'A' && y <= 'Z') y += 32;
-        if (x != y || !x) return 0;
-    }
-    return 1;
-}
-
 void fmt_u64(wchar_t *o, u64 v)
 {
     wchar_t t[24];
@@ -171,11 +158,11 @@ void path_join(wchar_t *o, const wchar_t *a, const wchar_t *b, size_t cap)
 
 int path_is_dir(const wchar_t *p)
 {
-    DWORD a = GetFileAttributesW(p);
+    DWORD a = path_attributes(p);
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-int path_exists(const wchar_t *p) { return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES; }
+int path_exists(const wchar_t *p) { return path_attributes(p) != INVALID_FILE_ATTRIBUTES; }
 
 int scale(int px) { return MulDiv(px, g_dpi, 96); }
 
