@@ -8,7 +8,82 @@
 
 #define GZ_STRINGS(X) \
 X(S_APP,            L"고깃ZIP", L"GogitZIP") \
-X(S_TAGLINE,        L"가볍고 빠른 압축 해제 프로그램", L"Lightweight, fast archive extractor") \
+X(S_TAGLINE,        L"가볍고 빠른 압축 프로그램", L"Lightweight, fast archiver") \
+X(S_TB_NEW,         L"새로 압축", L"New") \
+X(S_M_NEW,          L"새로 압축(&N)...\tCtrl+N", L"&New archive...\tCtrl+N") \
+X(S_M_OPENINSIDE,   L"압축 파일로 열기(&I)", L"Open as &archive") \
+X(S_W_NEW,          L"새로 압축...", L"New archive...") \
+X(S_OW_NEWER,       L"더 새로운 파일만 덮어쓰기", L"Overwrite older files") \
+X(S_P_COMPRESSING,  L"압축하는 중", L"Compressing") \
+X(S_C_TITLE,        L"새로 압축", L"New archive") \
+X(S_C_SUMMARY,      L"항목 %s개 압축", L"Compress %s item(s)") \
+X(S_C_OUT,          L"압축 파일 이름", L"Archive name") \
+X(S_C_FORMAT,       L"압축 형식", L"Format") \
+X(S_C_LEVEL,        L"압축 레벨", L"Level") \
+X(S_C_METHOD,       L"압축 방식", L"Method") \
+X(S_C_PW,           L"비밀번호", L"Password") \
+X(S_C_PW2,          L"비밀번호 확인", L"Confirm password") \
+X(S_C_ENC,          L"암호화 방식", L"Encryption") \
+X(S_C_ENCNAMES,     L"파일 이름도 암호화 (7Z)", L"Encrypt file names (7Z)") \
+X(S_C_SOLID,        L"솔리드 압축 (7Z)", L"Solid archive (7Z)") \
+X(S_C_START,        L"압축 시작", L"Compress") \
+X(S_C_DEFAULT,      L"기본값", L"Default") \
+X(S_C_STORE,        L"저장 (압축 안 함)", L"Store") \
+X(S_C_PWMISMATCH,   L"비밀번호가 서로 다릅니다.", L"The passwords do not match.") \
+X(S_C_EXISTS,       L"같은 이름의 파일이 이미 있습니다. 바꿀까요?\n\n%s", L"The file already exists. Replace it?\n\n%s") \
+X(S_C_NOWRITER,     L"이 형식으로는 압축할 수 없습니다.", L"This format cannot be written.") \
+X(S_C_ONEFILE,      L"이 형식은 파일 하나만 압축할 수 있습니다. 여러 파일은 ZIP, 7Z 또는 TAR 계열 형식을 고르세요.", L"This format holds a single file. Choose ZIP, 7Z or a TAR format for several files.") \
+X(S_C_SAVE,         L"압축 파일 저장", L"Save archive as") \
+X(S_C_OPENFOLDER,   L"압축한 다음 폴더 열기", L"Open the folder when done") \
+X(S_L_0,            L"0 - 저장 (압축 안 함)", L"0 - Store") \
+X(S_L_1,            L"1 - 가장 빠르게", L"1 - Fastest") \
+X(S_L_3,            L"3 - 빠르게", L"3 - Fast") \
+X(S_L_5,            L"5 - 보통", L"5 - Normal") \
+X(S_L_7,            L"7 - 높게", L"7 - Maximum") \
+X(S_L_9,            L"9 - 최고 압축", L"9 - Ultra") \
+X(S_E_VOLUME,       L"분할 압축 파일의 다음 볼륨이 없습니다", L"A volume of the split archive is missing") \
+X(S_E_LIMIT,        L"안전 한도를 넘는 크기입니다 (손상되었거나 악의적인 파일)", L"Exceeds a safety limit (damaged or malicious file)") \
+X(S_N_RENAMED,      L"다른 이름으로 저장함", L"Saved under another name") \
+X(S_N_SHORTENED,    L"이름이 너무 길어 줄여서 저장함", L"Name too long: shortened") \
+X(S_N_PATH_LONG,    L"경로가 너무 깁니다", L"Path too long") \
+X(S_N_LINK_UNSAFE,  L"대상 폴더 밖을 가리키는 링크라 만들지 않음", L"Link pointing outside the destination: not created") \
+X(S_N_LINK_FAILED,  L"링크를 만들 수 없습니다", L"Cannot create the link") \
+X(S_N_SPECIAL,      L"장치·파이프 파일은 압축하지 않음", L"Device or pipe: not archived") \
+X(S_N_LOOP,         L"폴더 링크가 순환하여 건너뜀", L"Folder link loop: skipped") \
+X(S_N_NOT_FOUND,    L"파일을 찾을 수 없습니다", L"File not found") \
+X(S_N_UNREADABLE,   L"파일을 읽을 수 없습니다", L"Cannot read the file") \
+X(S_N_EXISTS,       L"같은 이름의 압축 파일이 이미 있습니다", L"The archive already exists") \
+X(S_N_NO_FILES,     L"압축할 파일이 없습니다", L"Nothing to compress") \
+X(S_VOL_TITLE,      L"분할 압축 파일", L"Split archive") \
+X(S_VOL_PROMPT,     L"다음 볼륨을 찾을 수 없습니다. 파일이 있는 곳을 지정하세요.", L"The next volume was not found. Please locate it.") \
+X(S_VOL_AGAIN,      L"이번에도 볼륨을 찾지 못했습니다. 다른 파일을 지정하세요.", L"The volume was still not found. Please choose another file.") \
+X(S_VOL_RETRY,      L"다시 찾기", L"Retry") \
+X(S_PW_ARCHIVE,     L"파일 목록이 암호로 보호되어 있습니다. 비밀번호를 입력하세요.", L"The file list is encrypted. Please enter the password.") \
+X(S_I_METHOD,       L"압축 방식", L"Methods") \
+X(S_I_SOLID,        L"솔리드", L"solid") \
+X(S_I_HDRENC,       L"파일 목록까지 암호화", L"file list encrypted") \
+X(S_I_VOLUMES,      L"볼륨", L"Volumes") \
+X(S_AS_TITLE,       L"파일 연결", L"File associations") \
+X(S_AS_DESC,        L"고깃ZIP으로 열 압축 파일 형식을 고르세요. 오른쪽 메뉴에도 같은 형식이 쓰입니다.", L"Choose the archive types GogitZIP opens. The Explorer menu uses the same list.") \
+X(S_AS_ALL,         L"모두 선택", L"Select all") \
+X(S_AS_NONE,        L"모두 해제", L"Clear") \
+X(S_AS_DEFAULT,     L"기본값", L"Defaults") \
+X(S_AS_BTN,         L"형식 선택...", L"Formats...") \
+X(S_AG_ZIP,         L"ZIP 계열", L"ZIP family") \
+X(S_AG_7Z,          L"7Z", L"7Z") \
+X(S_AG_RAR,         L"RAR", L"RAR") \
+X(S_AG_ALZ,         L"ALZ / EGG", L"ALZ / EGG") \
+X(S_AG_TAR,         L"TAR 계열 · 단일 파일 압축 (GZ, BZ2, XZ, ZST ...)", L"TAR family · single-file (GZ, BZ2, XZ, ZST ...)") \
+X(S_AG_ISO,         L"ISO / IMG", L"ISO / IMG") \
+X(S_AG_DISK,        L"디스크 이미지 (VHD, VMDK, VDI, QCOW2 ...)", L"Disk images (VHD, VMDK, VDI, QCOW2 ...)") \
+X(S_AG_OTHER,       L"기타 압축 형식", L"Other archives") \
+X(S_AG_EXE,         L"설치 파일 · 실행 파일 · 문서 (기본: 연결 안 함)", L"Installers · executables · documents (off by default)") \
+X(S_V_ADD,          L"압축하기...", L"Compress...") \
+X(S_V_ZIP,          L"\"<이름>.zip\"(으)로 압축", L"Compress to \"<name>.zip\"") \
+X(S_V_7Z,           L"\"<이름>.7z\"(으)로 압축", L"Compress to \"<name>.7z\"") \
+X(S_R_CREATED,      L"압축 파일을 만들었습니다.", L"The archive was created.") \
+X(S_R_OPENFOLDER,   L"폴더 열기", L"Open folder") \
+X(S_R_PROBLEMS,     L"문제", L"Problem") \
 X(S_TB_OPEN,        L"열기", L"Open") \
 X(S_TB_EXTRACT,     L"압축 풀기", L"Extract") \
 X(S_TB_HERE,        L"바로 풀기", L"Quick") \
@@ -66,8 +141,7 @@ X(S_ST_SUMMARY,     L"파일 %s개, 폴더 %s개  ·  원본 %s  ·  압축 %s (
 X(S_ST_SELECTED,    L"%s개 선택 (%s)", L"%s selected (%s)") \
 X(S_ST_ENGINE,      L"%S 엔진  ·  %d스레드", L"%S engine  ·  %d threads") \
 X(S_ST_READY,       L"준비", L"Ready") \
-X(S_W_DROP,         L"압축 파일을 이곳에 끌어다 놓으세요", L"Drop an archive here") \
-X(S_W_FORMATS,      L"ZIP · ZIP64 · Deflate64 · TAR · TAR.GZ · TGZ · GZ  |  AES · ZipCrypto", L"ZIP · ZIP64 · Deflate64 · TAR · TAR.GZ · TGZ · GZ  |  AES · ZipCrypto") \
+X(S_W_DROP,         L"압축 파일이나 압축할 파일을 이곳에 끌어다 놓으세요", L"Drop an archive to open, or files to compress") \
 X(S_W_OPEN,         L"압축 파일 열기", L"Open archive") \
 X(S_W_EXTRACT,      L"압축 풀기...", L"Extract...") \
 X(S_W_RECENT,       L"최근 사용한 파일", L"Recent files") \
@@ -98,8 +172,6 @@ X(S_P_PAUSE,        L"일시 정지", L"Pause") \
 X(S_P_RESUME,       L"계속", L"Resume") \
 X(S_P_ELAPSED,      L"경과 시간", L"Elapsed") \
 X(S_P_REMAIN,       L"남은 시간", L"Remaining") \
-X(S_P_SPEED,        L"속도", L"Speed") \
-X(S_P_PROCESSED,    L"처리량", L"Processed") \
 X(S_P_FILES,        L"파일", L"Files") \
 X(S_P_PAUSED,       L"일시 정지됨", L"Paused") \
 X(S_P_CANCELING,    L"취소하는 중...", L"Canceling...") \
@@ -137,7 +209,6 @@ X(S_E_SKIP,         L"건너뜀", L"Skipped") \
 X(S_E_CREATE,       L"파일을 만들 수 없습니다", L"Cannot create file") \
 X(S_E_AUTH,         L"AES 인증 실패 (손상되었거나 변조됨)", L"AES authentication failed") \
 X(S_E_DISK,         L"디스크 공간이 부족합니다", L"Disk is full") \
-X(S_E_SPLIT,        L"분할 압축 파일은 지원하지 않습니다", L"Split archives are not supported") \
 X(S_OPEN_FAIL,      L"압축 파일을 열 수 없습니다.", L"Cannot open the archive.") \
 X(S_FILTER_ARC,     L"압축 파일", L"Archives") \
 X(S_FILTER_ALL,     L"모든 파일", L"All files") \
@@ -154,7 +225,7 @@ X(S_S_ENGINE,       L"CPU 가속 엔진", L"CPU acceleration") \
 X(S_S_ENGINE_AUTO,  L"자동 (%S)", L"Automatic (%S)") \
 X(S_S_SHELL,        L"탐색기 통합", L"Explorer integration") \
 X(S_S_SHELL_MENU,   L"마우스 오른쪽 메뉴에 고깃ZIP 추가", L"Add GogitZIP to the right-click menu") \
-X(S_S_SHELL_ASSOC,  L"ZIP 파일을 고깃ZIP으로 열기 (연결 프로그램)", L"Open ZIP files with GogitZIP") \
+X(S_S_SHELL_ASSOC,  L"압축 파일을 고깃ZIP으로 열기 (연결 프로그램)", L"Open archives with GogitZIP") \
 X(S_S_RESTART,      L"언어 설정은 프로그램을 다시 시작하면 적용됩니다.", L"Restart GogitZIP to apply the language.") \
 X(S_S_ASSOC_WIN8,   L"Windows 8 이상에서는 [설정 > 앱 > 기본 앱]에서 고깃ZIP을 선택해 주세요.", L"On Windows 8 or later, choose GogitZIP in Settings > Apps > Default apps.") \
 X(S_V_MENU,         L"고깃ZIP", L"GogitZIP") \
@@ -193,9 +264,7 @@ X(S_B_INFLATE,      L"압축 해제", L"Inflate") \
 X(S_B_CRC,          L"CRC32", L"CRC32") \
 X(S_B_CURRENT,      L"사용 중", L"active") \
 X(S_B_UNSUPPORTED,  L"이 CPU/OS에서 지원 안 함", L"not supported here") \
-X(S_NO_ARCHIVE,     L"압축 파일이 열려 있지 않습니다.", L"No archive is open.") \
-X(S_LINK_SKIP,      L"링크 항목은 건너뜁니다", L"Link entries are skipped") \
-X(S_REG_DONE,       L"탐색기 메뉴 설정을 적용했습니다.", L"Explorer integration updated.")
+X(S_LINK_SKIP,      L"링크 항목은 건너뜁니다", L"Link entries are skipped")
 
 #define GZ_SX_ENUM(id, ko, en) id,
 enum { GZ_STRINGS(GZ_SX_ENUM) S__COUNT };

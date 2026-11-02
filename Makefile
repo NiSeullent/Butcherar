@@ -47,8 +47,10 @@ LD64 := -nostdlib -s -Wl,--gc-sections -Wl,-e,gz_start -Wl,--subsystem,windows:5
         -Wl,--major-os-version,5 -Wl,--minor-os-version,2 \
         -Wl,--dynamicbase -Wl,--nxcompat -Wl,--high-entropy-va -Wl,--no-insert-timestamp
 
-OBJ32 := $(patsubst src/%.c,$(B)/x86/%.o,$(CORE) $(WIN)) $(B)/x86/gen/registry.o $(B)/x86/res.o
-OBJ64 := $(patsubst src/%.c,$(B)/x64/%.o,$(CORE) $(WIN)) $(B)/x64/gen/registry.o $(B)/x64/res.o
+# the Windows UI runs the portable engine (src/app/engine.c) on top of src/win/os_win.c
+WINAPP := src/app/engine.c
+OBJ32 := $(patsubst src/%.c,$(B)/x86/%.o,$(CORE) $(WINAPP) $(WIN)) $(B)/x86/gen/registry.o $(B)/x86/res.o
+OBJ64 := $(patsubst src/%.c,$(B)/x64/%.o,$(CORE) $(WINAPP) $(WIN)) $(B)/x64/gen/registry.o $(B)/x64/res.o
 
 all: win
 win: $(B)/GogitZip.exe $(B)/GogitZip64.exe
@@ -80,6 +82,14 @@ $(B)/x64/$(1)/%.o: src/$(1)/%.c $$(HDRS)
 	$$(CC64) $$(CFLAGS) $$(OPT_CORE) $$(ARCH64) -c $$< -o $$@
 endef
 $(foreach d,core codec fmt,$(eval $(call core_rules,$(d))))
+
+# the engine only orchestrates I/O (the hot loops are in the codecs): optimise for size
+$(B)/x86/app/%.o: src/app/%.c $(HDRS)
+	@mkdir -p $(dir $@)
+	$(CC32) $(CFLAGS) $(OPT_UI) $(ARCH32) -c $< -o $@
+$(B)/x64/app/%.o: src/app/%.c $(HDRS)
+	@mkdir -p $(dir $@)
+	$(CC64) $(CFLAGS) $(OPT_UI) $(ARCH64) -c $< -o $@
 
 $(B)/x86/win/rt.o: src/win/rt.c $(HDRS)
 	@mkdir -p $(dir $@)

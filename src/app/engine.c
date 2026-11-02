@@ -1271,6 +1271,8 @@ static int w_close(gz_out *o, u32 idx, int st)
             if (apply && m != (0666u & ~j->umask)) gz_os_fset_mode(w->fd, m);   /* else as created */
             u64 t = (j->flags & GZ_XF_NO_TIMES) ? 0 : gz_entry_time(e);
             if (t) gz_os_fset_times(w->fd, t, 0);
+            if ((j->caps & GZ_OSC_ATTRS) && (e->attr & 7) && !(j->flags & GZ_XF_NO_PERMS))
+                gz_os_fset_attr(w->fd, w->s.path, e->attr & 7);    /* read-only, hidden, system */
         }
         int ce = gz_os_close(w->fd);
         w->fd = GZ_FD_NONE;

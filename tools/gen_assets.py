@@ -243,12 +243,22 @@ def ic_error(c):
     c.line([(21, 11), (11, 21)], WHITE, 3.2)
 
 
+def ic_compress(c):
+    # archive box with an arrow going in (mirror of ic_extract)
+    box(c, 9, 9, 29, 29, RED, RED_D)
+    zipper(c, 19.8, 15, 27)
+    c.line([(3.5, 3.5), (12.5, 12.5)], BLUE_D, 3.6)
+    c.line([(3.5, 3.5), (12.5, 12.5)], BLUE, 2.4)
+    c.poly([(16, 16), (16, 7), (7, 16)], BLUE)
+
+
 ICONS = [
     ("IC_OPEN", ic_open), ("IC_EXTRACT", ic_extract), ("IC_EXTRACT_HERE", ic_extract_here),
     ("IC_TEST", ic_test), ("IC_VIEW", ic_view), ("IC_INFO", ic_info),
     ("IC_CODEPAGE", ic_codepage), ("IC_SETTINGS", ic_settings), ("IC_UP", ic_up),
     ("IC_CPU", ic_cpu), ("IC_LOCK", ic_lock), ("IC_WARN", ic_warn), ("IC_BENCH", ic_bench),
     ("IC_FOLDER", ic_folder), ("IC_CHECK", ic_check), ("IC_ERROR", ic_error),
+    ("IC_COMPRESS", ic_compress),
 ]
 ICON_SIZES = [16, 24, 32, 48, 64]   # other sizes are box-filtered at runtime
 

@@ -9,15 +9,6 @@
 
 static HBRUSH s_br_bg, s_br_panel;
 
-typedef struct {
-    int icon, icon_px;
-    wchar_t title[128];
-    wchar_t sub[512];
-    int sub_red;
-    int hdr_dlu, foot_dlu;
-    int hdr_px, foot_px;
-} dlg_base;
-
 #define FG_GRAY   ((HANDLE)(UINT_PTR)1)
 #define FG_RED    ((HANDLE)(UINT_PTR)2)
 #define FG_ACCENT ((HANDLE)(UINT_PTR)3)
@@ -62,7 +53,7 @@ static void center_window(HWND h)
     SetWindowPos(h, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-static void dlg_setup(HWND h, dlg_base *b, int primary_id)
+void dlg_setup(HWND h, dlg_base *b, int primary_id)
 {
     brushes();
     SetWindowLongPtrW(h, DWLP_USER, (LONG_PTR)b);
@@ -83,8 +74,10 @@ static void dlg_setup(HWND h, dlg_base *b, int primary_id)
 
 static void set_fg(HWND h, int id, HANDLE fg) { SetPropW(GetDlgItem(h, id), L"gzfg", fg); }
 static void set_bold(HWND h, int id) { SendDlgItemMessageW(h, id, WM_SETFONT, (WPARAM)g_font.ui_bold, 0); }
+void dlg_gray(HWND h, int id) { set_fg(h, id, FG_GRAY); }
+void dlg_bold(HWND h, int id) { set_bold(h, id); }
 
-static int dlg_common(HWND h, UINT m, WPARAM wp, LPARAM lp, INT_PTR *ret)
+int dlg_common(HWND h, UINT m, WPARAM wp, LPARAM lp, INT_PTR *ret)
 {
     dlg_base *b = (dlg_base *)GetWindowLongPtrW(h, DWLP_USER);
     if (!b) return 0;
@@ -165,16 +158,27 @@ static int dlg_common(HWND h, UINT m, WPARAM wp, LPARAM lp, INT_PTR *ret)
     return 0;
 }
 
-/* template shortcuts */
-#define T_STATIC(d, id, t, x, y, w, h, st) dlgt_item(d, id, DA_STATIC, 0, t, x, y, w, h, SS_LEFT | SS_NOPREFIX | (st), 0)
-#define T_BUTTON(d, id, t, x, y, w, h)     dlgt_item(d, id, DA_BUTTON, 0, t, x, y, w, h, BS_OWNERDRAW | WS_TABSTOP, 0)
-#define T_CHECK(d, id, t, x, y, w, h)      dlgt_item(d, id, DA_BUTTON, 0, t, x, y, w, h, BS_AUTOCHECKBOX | WS_TABSTOP, 0)
-#define T_COMBO(d, id, x, y, w, h, st)     dlgt_item(d, id, DA_COMBO, 0, L"", x, y, w, h, WS_VSCROLL | WS_TABSTOP | (st), 0)
-#define T_EDIT(d, id, t, x, y, w, h, st)   dlgt_item(d, id, DA_EDIT, 0, t, x, y, w, h, WS_TABSTOP | ES_AUTOHSCROLL | (st), WS_EX_CLIENTEDGE)
-
 void msg_box(HWND owner, const wchar_t *text, UINT icon)
 {
     MessageBoxW(owner, text, S(S_APP), MB_OK | icon);
+}
+
+/* open a folder in Explorer, optionally with one item selected ("explorer /select," works on 2000) */
+void open_in_explorer(const wchar_t *dir, const wchar_t *select)
+{
+    if (select && select[0]) {
+        wchar_t a[MAX_PATH * 2 + 16];
+        wfmt(a, L"/select,\"%s\"", select);
+        if ((INT_PTR)ShellExecuteW(NULL, L"open", L"explorer.exe", a, NULL, SW_SHOWNORMAL) > 32) return;
+    }
+    ShellExecuteW(NULL, L"open", dir, NULL, NULL, SW_SHOWNORMAL);
+}
+
+static void add_overwrite_modes(HWND c, int cur)
+{
+    static const int sid[] = { S_OW_ASK, S_OW_ALL, S_OW_SKIP, S_OW_RENAME, S_OW_NEWER };
+    for (u32 i = 0; i < GZ_COUNTOF(sid); i++) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)S(sid[i]));
+    SendMessageW(c, CB_SETCURSEL, (WPARAM)(cur >= 0 && cur < (int)GZ_COUNTOF(sid) ? cur : 0), 0);
 }
 
 /* ======================================================================
@@ -277,7 +281,7 @@ int pick_folder(HWND owner, wchar_t *path, const wchar_t *title)
 enum { ID_X_DEST = 101, ID_X_BROWSE, ID_X_HERE, ID_X_DESKTOP, ID_X_DOCS, ID_X_MKDIR, ID_X_OW, ID_X_OPEN,
        ID_X_SEL, ID_X_OWLABEL, ID_X_DESTLABEL };
 
-typedef struct { dlg_base b; gz_extract_opts *o; wchar_t here[MAX_PATH * 2]; } xdlg;
+typedef struct { dlg_base b; x_opts *o; wchar_t here[MAX_PATH * 2]; } xdlg;
 
 static void special_dir(int csidl, wchar_t *out)
 {
@@ -295,7 +299,7 @@ static INT_PTR CALLBACK xdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     switch (m) {
     case WM_INITDIALOG: {
         x = (xdlg *)lp;
-        gz_extract_opts *o = x->o;
+        x_opts *o = x->o;
         dlg_setup(h, &x->b, IDOK);
         set_bold(h, ID_X_DESTLABEL);
         HWND cb = GetDlgItem(h, ID_X_DEST);
@@ -310,12 +314,7 @@ static INT_PTR CALLBACK xdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         CheckDlgButton(h, ID_X_OPEN, o->open_folder ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(h, ID_X_SEL, o->only_selected ? BST_CHECKED : BST_UNCHECKED);
         if (!o->nselected) ShowWindow(GetDlgItem(h, ID_X_SEL), SW_HIDE);
-        HWND ow = GetDlgItem(h, ID_X_OW);
-        SendMessageW(ow, CB_ADDSTRING, 0, (LPARAM)S(S_OW_ASK));
-        SendMessageW(ow, CB_ADDSTRING, 0, (LPARAM)S(S_OW_ALL));
-        SendMessageW(ow, CB_ADDSTRING, 0, (LPARAM)S(S_OW_SKIP));
-        SendMessageW(ow, CB_ADDSTRING, 0, (LPARAM)S(S_OW_RENAME));
-        SendMessageW(ow, CB_SETCURSEL, (WPARAM)o->overwrite, 0);
+        add_overwrite_modes(GetDlgItem(h, ID_X_OW), o->overwrite);
         SetFocus(GetDlgItem(h, IDOK));
         return FALSE;
     }
@@ -335,7 +334,7 @@ static INT_PTR CALLBACK xdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
             return TRUE;
         }
         case IDOK: {
-            gz_extract_opts *o = x->o;
+            x_opts *o = x->o;
             wchar_t p[MAX_PATH * 2];
             GetDlgItemTextW(h, ID_X_DEST, p, MAX_PATH * 2);
             size_t n = wlen(p);
@@ -346,7 +345,7 @@ static INT_PTR CALLBACK xdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
             o->open_folder = IsDlgButtonChecked(h, ID_X_OPEN) == BST_CHECKED;
             o->only_selected = o->nselected && IsDlgButtonChecked(h, ID_X_SEL) == BST_CHECKED;
             o->overwrite = (int)SendDlgItemMessageW(h, ID_X_OW, CB_GETCURSEL, 0, 0);
-            if (o->overwrite < 0) o->overwrite = OW_ASK;
+            if (o->overwrite < 0) o->overwrite = GZ_OW_ASK;
             g_set.smart_folder = o->make_folder;
             g_set.open_folder = o->open_folder;
             wchar_t desk[MAX_PATH * 2];
@@ -367,20 +366,20 @@ static INT_PTR CALLBACK xdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
-int dlg_extract_options(HWND owner, gz_extract_opts *o)
+int dlg_extract_options(HWND owner, x_opts *o)
 {
     xdlg x;
     __builtin_memset(&x, 0, sizeof x);
     x.o = o;
-    path_dir(x.here, o->oa->path, GZ_COUNTOF(x.here));
+    path_dir(x.here, o->src_path, GZ_COUNTOF(x.here));
     x.b.icon = IC_EXTRACT;
     wcopy(x.b.title, S(S_X_TITLE), 128);
     {
         wchar_t cnt[32], sz[32], line[128];
-        fmt_thousands(cnt, o->oa->arc->nfiles);
-        fmt_size(sz, o->oa->arc->total_usize);
+        fmt_thousands(cnt, o->h->arc->nfiles);
+        fmt_size(sz, o->h->arc->total_usize);
         wfmt(line, S(S_X_SUMMARY), cnt, sz);
-        wfmt(x.b.sub, L"%s  ·  %s", path_base(o->oa->path), line);
+        wfmt(x.b.sub, L"%s  ·  %s", path_base(o->h->name), line);
     }
     x.b.hdr_dlu = 40;
     x.b.foot_dlu = 166;
@@ -405,7 +404,7 @@ int dlg_extract_options(HWND owner, gz_extract_opts *o)
 }
 
 /* ======================================================================
- * Progress
+ * Progress (extraction, test, compression)
  * ====================================================================== */
 
 enum { ID_P_FILE = 201, ID_P_BAR, ID_P_LEFT, ID_P_RIGHT, ID_P_TIME, ID_P_FILES, ID_P_ENGINE, ID_P_OPEN, ID_P_PAUSE };
@@ -426,71 +425,66 @@ static const GUID k_iid_tbl3 = { 0xea1afb91, 0x9e28, 0x4b86, { 0x90, 0xe9, 0x9e,
 
 typedef struct {
     dlg_base b;
-    gz_job *j;
-    int shown, done;
-    u32 last_tick;
-    u64 last_bytes;
-    u64 speed;
+    ui_job *u;
+    int shown, done, paused, canceling;
+    u64 last_ms, last_bytes, speed;
     u32 pct10;   /* 0..1000 */
     TBL3 *tb;
     HWND tbwnd;
     HWND owner;
 } pdlg;
 
+static int op_verb(int op) { return op == OP_TEST ? S_P_TESTING : op == OP_COMPRESS ? S_P_COMPRESSING : S_P_EXTRACTING; }
+
 static void p_update(HWND h, pdlg *p)
 {
-    gz_job *j = p->j;
-    u64 done, total;
-    u32 files, tfiles;
+    ui_job *u = p->u;
+    gz_progress g;
+    __builtin_memset(&g, 0, sizeof g);
+    if (u->j) gz_job_progress(u->j, &g);
+    u->fin = g;
     wchar_t cur[MAX_PATH];
-    EnterCriticalSection(&j->lock);
-    done = j->done_bytes;
-    total = j->total_bytes;
-    files = j->done_files;
-    tfiles = j->total_files;
-    wcopy(cur, j->current, MAX_PATH);
-    LeaveCriticalSection(&j->lock);
-    if (done > total) done = total;
-
-    u32 now = GetTickCount();
-    u32 dt = now - p->last_tick;
-    if (dt >= 400 && !j->paused) {
-        u64 inst = (done - p->last_bytes) * 1000 / dt;
+    EnterCriticalSection(&u->cur_lock);
+    wcopy(cur, u->current, MAX_PATH);
+    LeaveCriticalSection(&u->cur_lock);
+    u64 done = g.done_bytes, total = g.total_bytes, now = g.elapsed_ms;
+    if (total && done > total) done = total;
+    if (done < p->last_bytes) p->last_bytes = done;
+    if (now >= p->last_ms + 400 && !p->paused) {
+        u64 inst = (done - p->last_bytes) * 1000 / (now - p->last_ms);
         p->speed = p->speed ? (p->speed * 3 + inst) / 4 : inst;
-        p->last_tick = now;
+        p->last_ms = now;
         p->last_bytes = done;
     }
-    u32 run_ms = now - j->start_tick - (u32)j->wait_ms;
-    if (!p->speed && run_ms > 150 && done) p->speed = done * 1000 / run_ms;
-    u32 pct10 = total ? (u32)(done * 1000 / total) : (j->finished ? 1000 : 0);
+    if (!p->speed && now > 150 && done) p->speed = done * 1000 / now;
+    u32 pct10 = total ? (u32)(done * 1000 / total) : (p->done ? 1000 : 0);
     if (pct10 != p->pct10) {
         p->pct10 = pct10;
         InvalidateRect(GetDlgItem(h, ID_P_BAR), NULL, FALSE);
     }
     wchar_t t[512], a[40], b[40], c[40];
-    SetDlgItemTextW(h, ID_P_FILE, cur);
+    if (cur[0]) SetDlgItemTextW(h, ID_P_FILE, cur);
     fmt_size(a, done);
     fmt_size(b, total);
     wfmt(t, L"%d%%   ·   %s / %s", pct10 / 10, a, b);
     SetDlgItemTextW(h, ID_P_LEFT, t);
-    if (j->paused) wcopy(t, S(S_P_PAUSED), 64);
-    else if (j->cancel) wcopy(t, S(S_P_CANCELING), 64);
+    if (p->paused) wcopy(t, S(S_P_PAUSED), 64);
+    else if (p->canceling && !p->done) wcopy(t, S(S_P_CANCELING), 64);
     else { fmt_speed(a, p->speed); wcopy(t, a, 64); }
     SetDlgItemTextW(h, ID_P_RIGHT, t);
-    u32 el = (now - j->start_tick - (u32)j->wait_ms) / 1000;
-    fmt_duration(a, el);
+    fmt_duration(a, (u32)(now / 1000));
     if (p->speed && total > done) fmt_duration(c, (u32)((total - done) / p->speed));
     else wcopy(c, L"--:--", 40);
     wfmt(t, L"%s %s   ·   %s %s", S(S_P_ELAPSED), a, S(S_P_REMAIN), c);
     SetDlgItemTextW(h, ID_P_TIME, t);
-    fmt_thousands(a, files);
-    fmt_thousands(b, tfiles);
+    fmt_thousands(a, g.done_files);
+    fmt_thousands(b, g.total_files);
     wfmt(t, L"%s %s / %s", S(S_P_FILES), a, b);
     SetDlgItemTextW(h, ID_P_FILES, t);
-    wfmt(t, L"%d%% - %s - %s", pct10 / 10, path_base(j->oa->path), S(j->test_only ? S_P_TESTING : S_P_EXTRACTING));
+    wfmt(t, L"%d%% - %s - %s", pct10 / 10, path_base(u->title), S(op_verb(u->op)));
     SetWindowTextW(h, t);
     if (p->tb) {
-        p->tb->v->SetProgressState(p->tb, p->tbwnd, j->paused ? 8 : 2);
+        p->tb->v->SetProgressState(p->tb, p->tbwnd, p->paused ? 8 : 2);
         p->tb->v->SetProgressValue(p->tb, p->tbwnd, pct10, 1000);
     }
 }
@@ -506,8 +500,16 @@ static void p_draw_bar(const DRAWITEMSTRUCT *di, pdlg *p)
     if (w > 0) {
         RECT f = r;
         f.right = f.left + (w < rad * 2 ? rad * 2 : w);
-        gfx_round_rect(dc, &f, rad, p->j->paused ? RGB(245, 170, 60) : C_ACCENT, 0, 0);
+        gfx_round_rect(dc, &f, rad, p->paused ? RGB(245, 170, 60) : C_ACCENT, 0, 0);
     }
+}
+
+static void p_show(HWND h, pdlg *p)
+{
+    if (p->shown) return;
+    KillTimer(h, 2);
+    ShowWindow(h, SW_SHOW);
+    p->shown = 1;
 }
 
 static INT_PTR CALLBACK pdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
@@ -519,15 +521,20 @@ static INT_PTR CALLBACK pdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     switch (m) {
     case WM_INITDIALOG: {
         p = (pdlg *)lp;
+        ui_job *u = p->u;
         dlg_setup(h, &p->b, IDCANCEL);
         set_fg(h, ID_P_ENGINE, FG_GRAY);
         set_fg(h, ID_P_FILE, FG_GRAY);
         set_bold(h, ID_P_LEFT);
-        CheckDlgButton(h, ID_P_OPEN, p->j->open_folder ? BST_CHECKED : BST_UNCHECKED);
-        if (p->j->test_only) ShowWindow(GetDlgItem(h, ID_P_OPEN), SW_HIDE);
+        CheckDlgButton(h, ID_P_OPEN, u->open_folder ? BST_CHECKED : BST_UNCHECKED);
+        if (u->op == OP_TEST) ShowWindow(GetDlgItem(h, ID_P_OPEN), SW_HIDE);
         wchar_t t[256];
-        int nthreads = p->j->oa->arc->solid ? 1 : p->j->threads;
-        if (nthreads > (int)p->j->oa->arc->nfiles && p->j->oa->arc->nfiles) nthreads = (int)p->j->oa->arc->nfiles;
+        int nthreads = g_set.threads > 0 ? g_set.threads : cpu_threads();
+        if (u->op != OP_COMPRESS) {
+            gz_archive *a = u->h->arc;
+            if (a->solid) nthreads = 1;
+            if (nthreads > (int)a->nfiles && a->nfiles) nthreads = (int)a->nfiles;
+        }
         wfmt(t, S(S_P_ENGINE), gz_dispatch_inflate_name(), gz_dispatch_crc_name(), nthreads);
         SetDlgItemTextW(h, ID_P_ENGINE, t);
         SetDlgItemTextW(h, ID_P_FILE, S(S_P_PREPARING));
@@ -540,9 +547,12 @@ static INT_PTR CALLBACK pdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
                 p->tb = 0;
             if (p->tb && FAILED(p->tb->v->HrInit(p->tb))) { p->tb->v->Release(p->tb); p->tb = 0; }
         }
-        p->last_tick = GetTickCount();
-        p->j->notify = h;
-        job_start(p->j);
+        if (!ui_job_start(u, h)) {
+            u->result = GZ_E_NOMEM;
+            if (p->tb) { p->tb->v->Release(p->tb); p->tb = 0; }
+            EndDialog(h, 0);
+            return TRUE;
+        }
         SetTimer(h, 1, 150, NULL);
         SetTimer(h, 2, 350, NULL);
         return TRUE;
@@ -550,13 +560,13 @@ static INT_PTR CALLBACK pdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == 2) {
             KillTimer(h, 2);
-            if (!p->done) { ShowWindow(h, SW_SHOW); p->shown = 1; }
+            if (!p->done) p_show(h, p);
         } else {
             p_update(h, p);
         }
         return TRUE;
     case WM_APP_ASK: {
-        if (!p->shown) { KillTimer(h, 2); ShowWindow(h, SW_SHOW); p->shown = 1; }
+        p_show(h, p);
         int r = dlg_ask(h, (gz_ask *)lp);
         SetWindowLongPtrW(h, DWLP_MSGRESULT, r);
         return TRUE;
@@ -566,7 +576,7 @@ static INT_PTR CALLBACK pdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         KillTimer(h, 1);
         KillTimer(h, 2);
         p_update(h, p);
-        p->j->open_folder = IsDlgButtonChecked(h, ID_P_OPEN) == BST_CHECKED;
+        p->u->open_folder = IsDlgButtonChecked(h, ID_P_OPEN) == BST_CHECKED;
         if (p->tb) {
             p->tb->v->SetProgressState(p->tb, p->tbwnd, 0);
             p->tb->v->Release(p->tb);
@@ -575,19 +585,19 @@ static INT_PTR CALLBACK pdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         EndDialog(h, 0);
         return TRUE;
     case WM_COMMAND:
-        if (LOWORD(wp) == ID_P_PAUSE && !p->done) {
-            gz_job *j = p->j;
-            if (j->paused) { j->paused = 0; SetEvent(j->run_event); SetDlgItemTextW(h, ID_P_PAUSE, S(S_P_PAUSE)); }
-            else { ResetEvent(j->run_event); j->paused = 1; SetDlgItemTextW(h, ID_P_PAUSE, S(S_P_RESUME)); }
+        if (LOWORD(wp) == ID_P_PAUSE && !p->done && p->u->j) {
+            p->paused = !p->paused;
+            gz_job_pause(p->u->j, p->paused);
+            SetDlgItemTextW(h, ID_P_PAUSE, S(p->paused ? S_P_RESUME : S_P_PAUSE));
             InvalidateRect(GetDlgItem(h, ID_P_BAR), NULL, FALSE);
             p_update(h, p);
             return TRUE;
         }
         if (LOWORD(wp) == IDCANCEL) {
-            if (!p->done) {
-                InterlockedExchange(&p->j->cancel, 1);
-                p->j->paused = 0;
-                SetEvent(p->j->run_event);
+            if (!p->done && p->u->j) {
+                p->canceling = 1;
+                gz_job_cancel(p->u->j);
+                if (p->paused) { p->paused = 0; gz_job_pause(p->u->j, 0); }
                 EnableWindow(GetDlgItem(h, IDCANCEL), FALSE);
                 EnableWindow(GetDlgItem(h, ID_P_PAUSE), FALSE);
                 p_update(h, p);
@@ -599,18 +609,18 @@ static INT_PTR CALLBACK pdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
-int run_job_with_progress(HWND owner, gz_job *j)
+int run_job_with_progress(HWND owner, ui_job *u)
 {
     pdlg p;
     __builtin_memset(&p, 0, sizeof p);
-    p.j = j;
-    p.b.icon = j->test_only ? IC_TEST : IC_EXTRACT;
-    wcopy(p.b.title, S(j->test_only ? S_P_TESTING : S_P_EXTRACTING), 128);
-    wcopy(p.b.sub, j->oa->path, 512);
+    p.u = u;
+    p.b.icon = u->op == OP_TEST ? IC_TEST : u->op == OP_COMPRESS ? IC_COMPRESS : IC_EXTRACT;
+    wcopy(p.b.title, S(op_verb(u->op)), 128);
+    wcopy(p.b.sub, u->title ? u->title : L"", 512);
     p.b.hdr_dlu = 40;
     p.b.foot_dlu = 114;
     dlgt d;
-    dlgt_begin(&d, S(S_P_EXTRACTING), 300, 140, DS_NOIDLEMSG);
+    dlgt_begin(&d, S(op_verb(u->op)), 300, 140, DS_NOIDLEMSG);
     /* the dialog starts hidden and is shown after 350 ms (fast jobs never flash) */
     {
         DWORD st;
@@ -626,16 +636,19 @@ int run_job_with_progress(HWND owner, gz_job *j)
     T_STATIC(&d, ID_P_TIME, L"", 12, 82, 186, 10, 0);
     T_STATIC(&d, ID_P_FILES, L"", 200, 82, 88, 10, SS_RIGHT);
     T_STATIC(&d, ID_P_ENGINE, L"", 12, 97, 276, 10, 0);
-    T_CHECK(&d, ID_P_OPEN, S(S_X_OPENFOLDER), 12, 123, 140, 10);
+    T_CHECK(&d, ID_P_OPEN, S(u->op == OP_COMPRESS ? S_C_OPENFOLDER : S_X_OPENFOLDER), 12, 123, 160, 10);
     T_BUTTON(&d, ID_P_PAUSE, S(S_P_PAUSE), 176, 120, 56, 15);
     T_BUTTON(&d, IDCANCEL, S(S_CANCEL), 236, 120, 52, 15);
     dlgt_run(&d, owner, pdlg_proc, (LPARAM)&p);
-    if (j->thread) WaitForSingleObject(j->thread, INFINITE);
-    return j->result;
+    if (u->j) {
+        u->result = gz_job_wait(u->j);
+        gz_job_progress(u->j, &u->fin);
+    }
+    return u->result;
 }
 
 /* ======================================================================
- * Questions from workers: password / overwrite
+ * Questions from the engine: password / overwrite / missing volume
  * ====================================================================== */
 
 enum { ID_PW_TEXT = 301, ID_PW_EDIT, ID_PW_SHOW };
@@ -666,11 +679,11 @@ static INT_PTR CALLBACK pw_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
             return TRUE;
         }
         if (LOWORD(wp) == IDOK) {
-            GetDlgItemTextW(h, ID_PW_EDIT, x->a->password, 256);
-            EndDialog(h, ANS_YES);
+            GetDlgItemTextW(h, ID_PW_EDIT, x->a->answer, 256);
+            EndDialog(h, GZ_ANS_YES);
             return TRUE;
         }
-        if (LOWORD(wp) == IDCANCEL) { EndDialog(h, ANS_CANCEL); return TRUE; }
+        if (LOWORD(wp) == IDCANCEL) { EndDialog(h, GZ_ANS_CANCEL); return TRUE; }
         break;
     }
     return FALSE;
@@ -700,27 +713,67 @@ static INT_PTR CALLBACK ow_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         set_fg(h, ID_OW_L1, FG_GRAY);
         set_fg(h, ID_OW_L2, FG_GRAY);
         wchar_t t[160];
-        ow_info(t, x->a->old_size, x->a->old_time);
+        ow_info(t, x->a->old_size, x->a->old_mtime);
         SetDlgItemTextW(h, ID_OW_I1, t);
-        ow_info(t, x->a->new_size, x->a->new_time);
+        ow_info(t, x->a->new_size, x->a->new_mtime);
         SetDlgItemTextW(h, ID_OW_I2, t);
         SetFocus(GetDlgItem(h, ID_OW_YES));
         SetForegroundWindow(h);
         return FALSE;
     }
     case WM_COMMAND: {
-        int id = LOWORD(wp), r = 0;
-        if (id == ID_OW_YES) r = ANS_YES;
-        else if (id == ID_OW_NO) r = ANS_NO;
-        else if (id == ID_OW_REN) r = ANS_RENAME;
-        else if (id == IDCANCEL) r = ANS_CANCEL;
-        if (r) {
-            x->a->apply_all = IsDlgButtonChecked(h, ID_OW_ALL) == BST_CHECKED;
-            EndDialog(h, r);
-            return TRUE;
-        }
+        int id = LOWORD(wp), all = IsDlgButtonChecked(h, ID_OW_ALL) == BST_CHECKED, r = -1;
+        if (id == ID_OW_YES) r = all ? GZ_ANS_YES_ALL : GZ_ANS_YES;
+        else if (id == ID_OW_NO) r = all ? GZ_ANS_NO_ALL : GZ_ANS_NO;
+        else if (id == ID_OW_REN) r = all ? GZ_ANS_RENAME_ALL : GZ_ANS_RENAME;
+        else if (id == IDCANCEL) r = GZ_ANS_CANCEL;
+        if (r >= 0) { EndDialog(h, r); return TRUE; }
         break;
     }
+    }
+    return FALSE;
+}
+
+enum { ID_V_PATH = 451, ID_V_TEXT, ID_V_BROWSE, ID_V_RETRY };
+
+static INT_PTR CALLBACK vol_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
+{
+    INT_PTR ret;
+    if (dlg_common(h, m, wp, lp, &ret)) return ret;
+    adlg *x = (adlg *)GetWindowLongPtrW(h, DWLP_USER);
+    switch (m) {
+    case WM_INITDIALOG:
+        x = (adlg *)lp;
+        dlg_setup(h, &x->b, ID_V_BROWSE);
+        set_bold(h, ID_V_PATH);
+        if (x->a->retry) set_fg(h, ID_V_TEXT, FG_RED);
+        SetForegroundWindow(h);
+        return TRUE;
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case ID_V_BROWSE: {
+            wchar_t file[MAX_PATH * 2], dir[MAX_PATH * 2];
+            wcopy(file, path_base(x->a->path), GZ_COUNTOF(file));
+            path_dir(dir, x->a->path, GZ_COUNTOF(dir));
+            OPENFILENAMEW of;
+            __builtin_memset(&of, 0, sizeof of);
+            of.lStructSize = sizeof of;
+            of.hwndOwner = h;
+            of.lpstrFilter = L"*.*\0*.*\0";
+            of.lpstrFile = file;
+            of.nMaxFile = GZ_COUNTOF(file);
+            of.lpstrInitialDir = dir;
+            of.lpstrTitle = S(S_VOL_TITLE);
+            of.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_EXPLORER;
+            if (!GetOpenFileNameW(&of)) return TRUE;
+            wcopy(x->a->answer, file, GZ_ASK_CAP);
+            EndDialog(h, GZ_ANS_YES);
+            return TRUE;
+        }
+        case ID_V_RETRY: x->a->answer[0] = 0; EndDialog(h, GZ_ANS_YES); return TRUE;
+        case IDCANCEL: EndDialog(h, GZ_ANS_CANCEL); return TRUE;
+        }
+        break;
     }
     return FALSE;
 }
@@ -732,25 +785,41 @@ int dlg_ask(HWND owner, gz_ask *a)
     __builtin_memset(&x, 0, sizeof x);
     x.a = a;
     x.b.hdr_dlu = 40;
-    if (a->kind == ASK_PASSWORD) {
+    if (a->kind == GZ_ASK_PASSWORD) {
         x.b.icon = IC_LOCK;
         wcopy(x.b.title, S(S_PW_TITLE), 128);
-        wcopy(x.b.sub, a->path, 512);
+        wcopy(x.b.sub, a->path ? a->path : L"", 512);
         x.b.foot_dlu = 100;
         dlgt_begin(&d, S(S_PW_TITLE), 270, 126, 0);
-        T_STATIC(&d, ID_PW_TEXT, a->retry ? S(S_PW_WRONG) : S(S_PW_PROMPT), 12, 44, 246, 18, 0);
+        T_STATIC(&d, ID_PW_TEXT, a->retry ? S(S_PW_WRONG) : a->entry ? S(S_PW_PROMPT) : S(S_PW_ARCHIVE),
+                 12, 44, 246, 18, 0);
         T_EDIT(&d, ID_PW_EDIT, L"", 12, 64, 246, 13, ES_PASSWORD);
         T_CHECK(&d, ID_PW_SHOW, S(S_PW_SHOW), 12, 83, 150, 10);
         T_BUTTON(&d, IDOK, S(S_BTN_OK), 152, 106, 52, 15);
         T_BUTTON(&d, IDCANCEL, S(S_CANCEL), 208, 106, 50, 15);
-        return (int)dlgt_run(&d, owner, pw_proc, (LPARAM)&x);
+        INT_PTR r = dlgt_run(&d, owner, pw_proc, (LPARAM)&x);
+        return r == GZ_ANS_YES ? GZ_ANS_YES : GZ_ANS_CANCEL;
+    }
+    if (a->kind == GZ_ASK_VOLUME) {
+        x.b.icon = IC_OPEN;
+        wcopy(x.b.title, S(S_VOL_TITLE), 128);
+        wcopy(x.b.sub, a->archive ? a->archive : L"", 512);
+        x.b.foot_dlu = 88;
+        dlgt_begin(&d, S(S_VOL_TITLE), 300, 114, 0);
+        T_STATIC(&d, ID_V_TEXT, a->retry ? S(S_VOL_AGAIN) : S(S_VOL_PROMPT), 12, 44, 276, 18, 0);
+        T_STATIC(&d, ID_V_PATH, a->path ? a->path : L"", 12, 66, 276, 10, SS_PATHELLIPSIS);
+        T_BUTTON(&d, ID_V_BROWSE, S(S_BROWSE), 128, 94, 56, 15);
+        T_BUTTON(&d, ID_V_RETRY, S(S_VOL_RETRY), 188, 94, 50, 15);
+        T_BUTTON(&d, IDCANCEL, S(S_CANCEL), 242, 94, 46, 15);
+        INT_PTR r = dlgt_run(&d, owner, vol_proc, (LPARAM)&x);
+        return r == GZ_ANS_YES ? GZ_ANS_YES : GZ_ANS_CANCEL;
     }
     x.b.icon = IC_WARN;
     wcopy(x.b.title, S(S_OW_TITLE), 128);
     wcopy(x.b.sub, S(S_OW_PROMPT), 512);
     x.b.foot_dlu = 124;
     dlgt_begin(&d, S(S_OW_TITLE), 300, 150, 0);
-    T_STATIC(&d, ID_OW_PATH, a->path, 12, 44, 276, 10, SS_PATHELLIPSIS);
+    T_STATIC(&d, ID_OW_PATH, a->path ? a->path : L"", 12, 44, 276, 10, SS_PATHELLIPSIS);
     T_STATIC(&d, ID_OW_L1, S(S_OW_EXISTING), 12, 60, 276, 9, 0);
     T_STATIC(&d, ID_OW_I1, L"", 12, 70, 276, 10, 0);
     T_STATIC(&d, ID_OW_L2, S(S_OW_NEW), 12, 84, 276, 9, 0);
@@ -760,7 +829,8 @@ int dlg_ask(HWND owner, gz_ask *a)
     T_BUTTON(&d, ID_OW_NO, S(S_OW_B_SKIP), 120, 130, 56, 15);
     T_BUTTON(&d, ID_OW_REN, S(S_OW_B_RENAME), 180, 130, 56, 15);
     T_BUTTON(&d, IDCANCEL, S(S_CANCEL), 240, 130, 48, 15);
-    return (int)dlgt_run(&d, owner, ow_proc, (LPARAM)&x);
+    INT_PTR r = dlgt_run(&d, owner, ow_proc, (LPARAM)&x);
+    return r < 0 ? GZ_ANS_CANCEL : (int)r;
 }
 
 /* ======================================================================
@@ -774,11 +844,12 @@ const cp_item g_cp_list[] = {
 const int g_cp_count = (int)(sizeof g_cp_list / sizeof g_cp_list[0]);
 
 enum { ID_S_CP = 501, ID_S_OW, ID_S_LANG, ID_S_MKDIR, ID_S_OPEN, ID_S_THREADS, ID_S_ENGINE, ID_S_BENCH,
-       ID_S_MENU, ID_S_ASSOC, ID_S_H1, ID_S_H2, ID_S_H3, ID_S_L1, ID_S_L2, ID_S_L3, ID_S_L4, ID_S_L5 };
+       ID_S_MENU, ID_S_ASSOC, ID_S_H1, ID_S_H2, ID_S_H3, ID_S_L1, ID_S_L2, ID_S_L3, ID_S_L4, ID_S_L5,
+       ID_S_TYPES };
 
 static const int k_thread_opts[] = { 0, 1, 2, 4, 6, 8, 12, 16, 24, 32 };
 
-typedef struct { dlg_base b; int tiers[GZ_TIER_COUNT + 1]; int ntiers; } sdlg;
+typedef struct { dlg_base b; int tiers[GZ_TIER_COUNT + 1]; int ntiers; int types_changed; wchar_t assoc[1024]; } sdlg;
 
 static INT_PTR CALLBACK sdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
@@ -788,6 +859,7 @@ static INT_PTR CALLBACK sdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     switch (m) {
     case WM_INITDIALOG: {
         x = (sdlg *)lp;
+        wcopy(x->assoc, g_set.assoc, GZ_COUNTOF(x->assoc));      /* restored on cancel */
         dlg_setup(h, &x->b, IDOK);
         set_bold(h, ID_S_H1); set_bold(h, ID_S_H2); set_bold(h, ID_S_H3);
         set_fg(h, ID_S_H1, FG_ACCENT); set_fg(h, ID_S_H2, FG_ACCENT); set_fg(h, ID_S_H3, FG_ACCENT);
@@ -796,12 +868,7 @@ static INT_PTR CALLBACK sdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
             SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)S(g_cp_list[i].sid));
             if (g_cp_list[i].cp == g_set.codepage) SendMessageW(c, CB_SETCURSEL, (WPARAM)i, 0);
         }
-        c = GetDlgItem(h, ID_S_OW);
-        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)S(S_OW_ASK));
-        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)S(S_OW_ALL));
-        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)S(S_OW_SKIP));
-        SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)S(S_OW_RENAME));
-        SendMessageW(c, CB_SETCURSEL, (WPARAM)g_set.overwrite, 0);
+        add_overwrite_modes(GetDlgItem(h, ID_S_OW), g_set.overwrite);
         c = GetDlgItem(h, ID_S_LANG);
         SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)S(S_S_LANG_AUTO));
         SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"한국어");
@@ -838,6 +905,7 @@ static INT_PTR CALLBACK sdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     }
     case WM_COMMAND:
         if (LOWORD(wp) == ID_S_BENCH) { dlg_bench(h); return TRUE; }
+        if (LOWORD(wp) == ID_S_TYPES) { if (dlg_assoc(h)) x->types_changed = 1; return TRUE; }
         if (LOWORD(wp) == IDOK) {
             int i = (int)SendDlgItemMessageW(h, ID_S_CP, CB_GETCURSEL, 0, 0);
             g_set.codepage = (i >= 0 && i < g_cp_count) ? g_cp_list[i].cp : 0;
@@ -855,7 +923,7 @@ static INT_PTR CALLBACK sdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
             int menu = IsDlgButtonChecked(h, ID_S_MENU) == BST_CHECKED;
             int assoc = IsDlgButtonChecked(h, ID_S_ASSOC) == BST_CHECKED;
             int reg = shell_is_registered();
-            if (menu != ((reg & 1) != 0) || assoc != ((reg & 2) != 0)) {
+            if (menu != ((reg & 1) != 0) || assoc != ((reg & 2) != 0) || (x->types_changed && (menu || assoc))) {
                 if (menu || assoc) shell_register(assoc);
                 else shell_unregister();
                 if (assoc && !(reg & 2) && g_os.major * 100 + g_os.minor >= 602)
@@ -865,7 +933,11 @@ static INT_PTR CALLBACK sdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
             EndDialog(h, 1);
             return TRUE;
         }
-        if (LOWORD(wp) == IDCANCEL) { EndDialog(h, 0); return TRUE; }
+        if (LOWORD(wp) == IDCANCEL) {
+            wcopy(g_set.assoc, x->assoc, GZ_COUNTOF(g_set.assoc));
+            EndDialog(h, 0);
+            return TRUE;
+        }
         break;
     }
     return FALSE;
@@ -899,7 +971,8 @@ void dlg_settings(HWND owner)
     T_BUTTON(&d, ID_S_BENCH, S(S_B_RUN), 236, 171, 52, 14);
     T_STATIC(&d, ID_S_H3, S(S_S_SHELL), 12, 194, 276, 10, 0);
     T_CHECK(&d, ID_S_MENU, S(S_S_SHELL_MENU), 18, 208, 270, 10);
-    T_CHECK(&d, ID_S_ASSOC, S(S_S_SHELL_ASSOC), 18, 221, 270, 10);
+    T_CHECK(&d, ID_S_ASSOC, S(S_S_SHELL_ASSOC), 18, 221, 208, 10);
+    T_BUTTON(&d, ID_S_TYPES, S(S_AS_BTN), 230, 219, 58, 14);
     T_BUTTON(&d, IDOK, S(S_BTN_OK), 180, 243, 52, 15);
     T_BUTTON(&d, IDCANCEL, S(S_CANCEL), 236, 243, 52, 15);
     dlgt_run(&d, owner, sdlg_proc, (LPARAM)&x);
@@ -1003,29 +1076,88 @@ static INT_PTR CALLBACK info_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     if (dlg_common(h, m, wp, lp, &ret)) return ret;
     if (m == WM_INITDIALOG) {
         dlg_setup(h, (dlg_base *)lp, IDOK);
-        for (int id = 801; id < 820; id += 2) if (GetDlgItem(h, id)) set_fg(h, id, FG_GRAY);
+        for (int id = 801; id < 830; id += 2) if (GetDlgItem(h, id)) set_fg(h, id, FG_GRAY);
         return TRUE;
     }
     if (m == WM_COMMAND && (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL)) { EndDialog(h, 0); return TRUE; }
     return FALSE;
 }
 
-void dlg_info(HWND owner, gz_open_arc *oa)
+/* distinct entry methods ("Deflate, Store"), most frequent first, at most 4 */
+static void method_summary(gz_archive *a, wchar_t *o, size_t cap)
 {
-    if (!oa) return;
-    gz_archive *a = oa->arc;
+    wchar_t m[6][48];
+    u32 cnt[6] = { 0 };
+    int nm = 0, more = 0;
+    o[0] = 0;
+    u32 step = a->n > 20000 ? a->n / 20000 : 1;          /* sample huge archives */
+    for (u32 i = 0; i < a->n; i += step) {
+        if (a->e[i].is_dir) continue;
+        wchar_t t[96];
+        gz_arc_method(a, &a->e[i], t, 96);
+        if (!t[0]) continue;
+        t[47] = 0;
+        int k = 0;
+        while (k < nm && wcmp(m[k], t)) k++;
+        if (k == nm) {
+            if (nm == 6) { more = 1; continue; }
+            wcopy(m[nm++], t, 48);
+        }
+        cnt[k]++;
+    }
+    for (int shown = 0; shown < 4; shown++) {
+        int best = -1;
+        for (int k = 0; k < nm; k++) if (cnt[k] && (best < 0 || cnt[k] > cnt[best])) best = k;
+        if (best < 0) break;
+        if (shown) wcat(o, L", ", cap);
+        wcat(o, m[best], cap);
+        cnt[best] = 0;
+    }
+    if (nm > 4 || more) wcat(o, L", ...", cap);
+    if (!o[0]) wcopy(o, L"-", cap);
+}
+
+static void enc_summary(gz_archive *a, wchar_t *o, size_t cap)
+{
+    int zc = 0, aes = 0, other = 0, strength = 0;
+    for (u32 i = 0; i < a->n; i++) {
+        const gz_entry *e = &a->e[i];
+        if (e->enc == GZ_ENC_ZIPCRYPTO) zc = 1;
+        else if (e->enc == GZ_ENC_AES) { aes = 1; if (e->aes_strength > strength) strength = e->aes_strength; }
+        else if (e->enc) other = 1;
+    }
+    o[0] = 0;
+    if (!a->has_enc && !a->headers_enc) { wcopy(o, S(S_I_NO), cap); return; }
+    if (aes) { wchar_t t[24]; wfmt(t, L"AES-%d", strength ? 64 + 64 * strength : 256); wcat(o, t, cap); }
+    if (zc) { if (o[0]) wcat(o, L", ", cap); wcat(o, L"ZipCrypto", cap); }
+    if (other || !o[0]) { if (o[0]) wcat(o, L", ", cap); wcat(o, S(S_I_YES), cap); }
+    if (a->headers_enc) { wcat(o, L"  (", cap); wcat(o, S(S_I_HDRENC), cap); wcat(o, L")", cap); }
+}
+
+void dlg_info(HWND owner, gz_handle *hd)
+{
+    if (!hd) return;
+    gz_archive *a = hd->arc;
     dlg_base b;
     __builtin_memset(&b, 0, sizeof b);
     b.icon = IC_INFO;
     wcopy(b.title, S(S_I_TITLE), 128);
-    wcopy(b.sub, path_base(oa->path), 512);
+    wcopy(b.sub, hd->name, 512);
     b.hdr_dlu = 40;
-    wchar_t v[10][300], x1[40], x2[40], x3[40];
-    int lab[10], n = 0;
-    path_dir(v[n], oa->path, 300); lab[n++] = S_I_PATH;
-    wfmt(v[n], L"%S%s", gz_arc_type_name(a), a->has_enc ? (strings_korean() ? L" (암호)" : L" (encrypted)") : L""); lab[n++] = S_I_FORMAT;
-    fmt_size(x1, oa->src.size); fmt_thousands(x2, oa->src.size);
+    wchar_t v[12][300], x1[40], x2[40], x3[40];
+    int lab[12], n = 0;
+    if (hd->parent || hd->temp) wcopy(v[n], hd->name, 300);      /* nested: "outer.zip/inner.tar" */
+    else path_dir(v[n], hd->path, 300);
+    lab[n++] = S_I_PATH;
+    wfmt(v[n], L"%S", gz_arc_type_name(a));
+    if (a->solid) { wcat(v[n], L"  (", 300); wcat(v[n], S(S_I_SOLID), 300); wcat(v[n], L")", 300); }
+    lab[n++] = S_I_FORMAT;
+    fmt_size(x1, a->src_size); fmt_thousands(x2, a->src_size);
     wfmt(v[n], L"%s (%s B)", x1, x2); lab[n++] = S_I_FILESIZE;
+    if (a->nvols) {
+        wfmt(v[n], L"%d", (int)a->nvols + 1);
+        lab[n++] = S_I_VOLUMES;
+    }
     fmt_thousands(x1, a->nfiles); fmt_thousands(x2, a->ndirs);
     wfmt(v[n], strings_korean() ? L"파일 %s개, 폴더 %s개" : L"%s files, %s folders", x1, x2); lab[n++] = S_I_CONTENTS;
     fmt_size(x1, a->total_usize); fmt_thousands(x2, a->total_usize);
@@ -1036,7 +1168,8 @@ void dlg_info(HWND owner, gz_open_arc *oa)
         wfmt(v[n], L"%d.%d%%  (%s)", (int)(pct / 10), (int)(pct % 10), x3);
     } else wcopy(v[n], L"-", 300);
     lab[n++] = S_I_RATIO;
-    wcopy(v[n], a->has_enc ? S(S_I_YES) : S(S_I_NO), 300); lab[n++] = S_I_ENC;
+    method_summary(a, v[n], 300); lab[n++] = S_I_METHOD;
+    enc_summary(a, v[n], 300); lab[n++] = S_I_ENC;
     {
         const wchar_t *cpn = S(S_CP_AUTO);
         for (int i = 0; i < g_cp_count; i++) if (g_cp_list[i].cp == a->used_cp) cpn = S(g_cp_list[i].sid);
@@ -1085,7 +1218,7 @@ void dlg_info(HWND owner, gz_open_arc *oa)
  * Result / error report
  * ====================================================================== */
 
-typedef struct { dlg_base b; gz_job *j; } rdlg;
+typedef struct { dlg_base b; ui_job *u; } rdlg;
 
 static INT_PTR CALLBACK result_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
@@ -1110,25 +1243,40 @@ static INT_PTR CALLBACK result_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
             c.pszText = (wchar_t *)S(S_COL_NAME);
             SendMessageW(lv, LVM_INSERTCOLUMNW, 0, (LPARAM)&c);
             c.cx = (r.right - r.left) - c.cx - GetSystemMetrics(SM_CXVSCROLL);
-            c.pszText = strings_korean() ? (wchar_t *)L"문제" : (wchar_t *)L"Problem";
+            c.pszText = (wchar_t *)S(S_R_PROBLEMS);
             SendMessageW(lv, LVM_INSERTCOLUMNW, 1, (LPARAM)&c);
-            for (u32 i = 0; i < x->j->nerr && i < 5000; i++) {
+            u32 nl = gz_job_log_count(x->u->j), row = 0;
+            for (u32 i = 0; i < nl && row < 5000; i++) {
+                const gz_log *l = gz_job_log_at(x->u->j, i);
+                if (!l || l->level < GZ_LOG_WARN) continue;
                 LVITEMW it;
                 __builtin_memset(&it, 0, sizeof it);
                 it.mask = LVIF_TEXT;
-                it.iItem = (int)i;
-                it.pszText = x->j->errs[i].name;
+                it.iItem = (int)row;
+                it.pszText = l->name;
                 SendMessageW(lv, LVM_INSERTITEMW, 0, (LPARAM)&it);
+                wchar_t t[600];
+                wcopy(t, err_text(l->code), 600);
+                if (l->detail && l->detail[0]) { wcat(t, L"  (", 600); wcat(t, l->detail, 590); wcat(t, L")", 600); }
                 it.iSubItem = 1;
-                it.pszText = (wchar_t *)err_text(x->j->errs[i].code);
-                SendMessageW(lv, LVM_SETITEMTEXTW, i, (LPARAM)&it);
+                it.pszText = t;
+                SendMessageW(lv, LVM_SETITEMTEXTW, row, (LPARAM)&it);
+                row++;
             }
         }
         return TRUE;
     }
     case WM_COMMAND:
         if (LOWORD(wp) == 903) {
-            ShellExecuteW(h, L"open", x->j->dest, NULL, NULL, SW_SHOWNORMAL);
+            ui_job *u = x->u;
+            if (u->op == OP_COMPRESS) {
+                wchar_t dir[MAX_PATH * 2];
+                path_dir(dir, u->out, GZ_COUNTOF(dir));
+                open_in_explorer(dir, u->out);
+            } else {
+                const wchar_t *d = u->j ? gz_job_dest(u->j) : 0;
+                open_in_explorer(d ? d : u->dest, 0);
+            }
             return TRUE;
         }
         if (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL) { EndDialog(h, 0); return TRUE; }
@@ -1137,25 +1285,32 @@ static INT_PTR CALLBACK result_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
-void dlg_errors(HWND owner, gz_job *j)
+void dlg_errors(HWND owner, ui_job *u)
 {
     rdlg x;
     __builtin_memset(&x, 0, sizeof x);
-    x.j = j;
+    x.u = u;
+    u32 nprob = ui_job_problems(u);
     wcopy(x.b.title, S(S_R_TITLE), 128);
-    if (j->result == GZ_E_CANCEL) { x.b.icon = IC_WARN; wcopy(x.b.sub, S(S_R_CANCELED), 512); }
-    else if (j->nerr) { x.b.icon = IC_ERROR; wfmt(x.b.sub, S(S_R_ERRORS), j->nerr); x.b.sub_red = 1; }
-    else { x.b.icon = IC_CHECK; wcopy(x.b.sub, j->test_only ? S(S_R_TEST_OK) : S(S_R_TITLE), 512); }
+    if (u->result == GZ_E_CANCEL) { x.b.icon = IC_WARN; wcopy(x.b.sub, S(S_R_CANCELED), 512); }
+    else if (nprob || u->result) {
+        x.b.icon = IC_ERROR;
+        wfmt(x.b.sub, S(S_R_ERRORS), nprob ? nprob : 1);
+        x.b.sub_red = 1;
+    } else {
+        x.b.icon = IC_CHECK;
+        wcopy(x.b.sub, u->op == OP_TEST ? S(S_R_TEST_OK) : u->op == OP_COMPRESS ? S(S_R_CREATED) : S(S_R_TITLE), 512);
+    }
     x.b.hdr_dlu = 40;
     wchar_t st[200], a[32], b[32], c[32], e[32];
-    u32 ms = j->end_tick - j->start_tick - (u32)j->wait_ms;
-    fmt_thousands(a, j->done_files);
-    fmt_size(b, j->done_bytes);
-    fmt_duration(c, ms / 1000);
-    if (ms < 10000) wfmt(c, L"%d.%02d s", ms / 1000, (ms % 1000) / 10);
-    fmt_speed(e, ms ? j->done_bytes * 1000 / ms : j->done_bytes);
+    u64 ms = u->fin.elapsed_ms;
+    fmt_thousands(a, u->fin.done_files);
+    fmt_size(b, u->fin.done_bytes);
+    fmt_duration(c, (u32)(ms / 1000));
+    if (ms < 10000) wfmt(c, L"%d.%02d s", (int)(ms / 1000), (int)(ms % 1000) / 10);
+    fmt_speed(e, ms ? u->fin.done_bytes * 1000 / ms : u->fin.done_bytes);
     wfmt(st, S(S_R_STATS), a, b, c, e);
-    int list = j->nerr > 0;
+    int list = nprob > 0;
     int h = list ? 190 : 62;
     x.b.foot_dlu = h;
     dlgt d;
@@ -1164,7 +1319,7 @@ void dlg_errors(HWND owner, gz_job *j)
     if (list)
         dlgt_item(&d, 902, 0, WC_LISTVIEWW, L"", 12, 62, 296, 122,
                   LVS_REPORT | LVS_NOSORTHEADER | LVS_SHOWSELALWAYS | WS_TABSTOP | WS_BORDER, 0);
-    if (!j->test_only && j->result != GZ_E_CANCEL) T_BUTTON(&d, 903, strings_korean() ? L"폴더 열기" : L"Open folder", 12, h + 7, 60, 15);
+    if (u->op != OP_TEST && u->result != GZ_E_CANCEL) T_BUTTON(&d, 903, S(S_R_OPENFOLDER), 12, h + 7, 60, 15);
     T_BUTTON(&d, IDOK, S(S_CLOSE), 258, h + 7, 50, 15);
     dlgt_run(&d, owner, result_proc, (LPARAM)&x);
 }
@@ -1358,25 +1513,54 @@ void dlg_bench(HWND owner)
 }
 
 /* ======================================================================
- * Opening an archive on a background thread (big .tar.gz listing)
+ * Opening an archive on a background thread (big listings, encrypted
+ * headers, missing volumes, nested archives copied to a temporary file)
  * ====================================================================== */
 
 typedef struct {
     dlg_base b;
     const wchar_t *path;
+    gz_handle *parent;
+    u32 idx;
     int cp;
     volatile long cancel;
-    gz_open_arc *oa;
+    volatile long pct;          /* -1: unknown (marquee), else 0..1000 */
+    gz_handle *h;
     int err;
-    HWND h;
+    HWND hwnd;
     int phase;
 } odlg;
+
+static int o_ask(void *user, gz_ask *q)
+{
+    odlg *o = (odlg *)user;
+    return (int)SendMessageW(o->hwnd, WM_APP_ASK, 0, (LPARAM)q);
+}
+
+static void o_progress(void *user, const gz_progress *p)
+{
+    odlg *o = (odlg *)user;
+    if (!p->total_bytes) return;
+    u64 d = p->done_bytes > p->total_bytes ? p->total_bytes : p->done_bytes;
+    gz_atomic_store(&o->pct, (long)(d * 1000 / p->total_bytes));
+}
 
 static DWORD WINAPI open_thread(void *arg)
 {
     odlg *o = (odlg *)arg;
-    o->oa = arc_open_path(o->path, o->cp, &o->cancel, &o->err);
-    PostMessageW(o->h, WM_APP_DONE, 0, 0);
+    gz_open_req req;
+    gz_callbacks cb;
+    __builtin_memset(&req, 0, sizeof req);
+    __builtin_memset(&cb, 0, sizeof cb);
+    req.codepage = o->cp;
+    req.cancel = &o->cancel;
+    cb.user = o;
+    cb.ask = o_ask;
+    cb.progress = o_progress;
+    if (o->parent) o->err = gz_handle_open_child(&o->h, o->parent, o->idx, &req, &cb);
+    else o->err = gz_handle_open(&o->h, o->path, &req, &cb);
+    if (o->cancel && !o->h) o->err = GZ_E_CANCEL;
+    PostMessageW(o->hwnd, WM_APP_DONE, 0, 0);
     return 0;
 }
 
@@ -1390,8 +1574,15 @@ static INT_PTR CALLBACK open_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         gfx_fill(di->hDC, &r, C_BG);
         int rad = (r.bottom - r.top) / 2, w = r.right - r.left, seg = w / 4;
         gfx_round_rect(di->hDC, &r, rad, RGB(238, 238, 242), 0, 0);
-        int x0 = (o->phase * w / 40) % (w + seg) - seg;
-        RECT f = { r.left + (x0 < 0 ? 0 : x0), r.top, r.left + (x0 + seg > w ? w : x0 + seg), r.bottom };
+        long pct = gz_atomic_load(&o->pct);
+        RECT f = r;
+        if (pct >= 0) {
+            f.right = r.left + (int)(w * (i64)pct / 1000);
+        } else {
+            int x0 = (o->phase * w / 40) % (w + seg) - seg;
+            f.left = r.left + (x0 < 0 ? 0 : x0);
+            f.right = r.left + (x0 + seg > w ? w : x0 + seg);
+        }
         if (f.right - f.left > rad * 2) gfx_round_rect(di->hDC, &f, rad, C_ACCENT, 0, 0);
         return TRUE;
     }
@@ -1399,11 +1590,11 @@ static INT_PTR CALLBACK open_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     switch (m) {
     case WM_INITDIALOG: {
         o = (odlg *)lp;
-        o->h = h;
+        o->hwnd = h;
         dlg_setup(h, &o->b, IDCANCEL);
-        HANDLE th = CreateThread(NULL, 0, open_thread, o, 0, NULL);
-        if (th) CloseHandle(th);
-        else { o->err = GZ_E_NOMEM; EndDialog(h, 0); }
+        HANDLE th = CreateThread(NULL, 1u << 20, open_thread, o, 0, NULL);
+        if (!th) { o->err = GZ_E_NOMEM; EndDialog(h, 0); return TRUE; }
+        SetPropW(h, L"gzth", th);
         SetTimer(h, 1, 400, NULL);
         return TRUE;
     }
@@ -1411,14 +1602,22 @@ static INT_PTR CALLBACK open_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         if (wp == 1) { KillTimer(h, 1); ShowWindow(h, SW_SHOW); SetTimer(h, 2, 30, NULL); }
         else { o->phase++; InvalidateRect(GetDlgItem(h, 1001), NULL, FALSE); }
         return TRUE;
-    case WM_APP_DONE:
+    case WM_APP_ASK: {
+        int r = dlg_ask(h, (gz_ask *)lp);
+        SetWindowLongPtrW(h, DWLP_MSGRESULT, r);
+        return TRUE;
+    }
+    case WM_APP_DONE: {
         KillTimer(h, 1);
         KillTimer(h, 2);
+        HANDLE th = RemovePropW(h, L"gzth");
+        if (th) { WaitForSingleObject(th, INFINITE); CloseHandle(th); }
         EndDialog(h, 0);
         return TRUE;
+    }
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) {
-            o->cancel = 1;
+            gz_atomic_store(&o->cancel, 1);
             EnableWindow(GetDlgItem(h, IDCANCEL), FALSE);
             return TRUE;
         }
@@ -1427,15 +1626,26 @@ static INT_PTR CALLBACK open_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
-gz_open_arc *open_archive_ui(HWND owner, const wchar_t *path, int codepage, int *err)
+gz_handle *open_archive_ui(HWND owner, const wchar_t *path, gz_handle *parent, u32 idx, int codepage, int *err)
 {
     odlg o;
+    wchar_t full[MAX_PATH * 2];
     __builtin_memset(&o, 0, sizeof o);
-    o.path = path;
+    o.pct = -1;
     o.cp = codepage;
+    if (parent) {
+        if (idx >= parent->arc->n) { *err = GZ_E_FORMAT; return 0; }
+        o.parent = parent;
+        o.idx = idx;
+        wcopy(o.b.sub, parent->arc->e[idx].base, 512);
+    } else {
+        DWORD fl = GetFullPathNameW(path, GZ_COUNTOF(full), full, NULL);
+        if (!fl || fl >= GZ_COUNTOF(full)) wcopy(full, path, GZ_COUNTOF(full));
+        o.path = full;
+        wcopy(o.b.sub, path_base(full), 512);
+    }
     o.b.icon = IC_OPEN;
     wcopy(o.b.title, S(S_P_OPENING), 128);
-    wcopy(o.b.sub, path_base(path), 512);
     o.b.hdr_dlu = 40;
     o.b.foot_dlu = 62;
     dlgt d;
@@ -1449,6 +1659,194 @@ gz_open_arc *open_archive_ui(HWND owner, const wchar_t *path, int codepage, int 
     dlgt_item(&d, 1001, DA_STATIC, 0, L"", 12, 46, 236, 6, SS_OWNERDRAW, 0);
     T_BUTTON(&d, IDCANCEL, S(S_CANCEL), 198, 67, 50, 15);
     dlgt_run(&d, owner, open_proc, (LPARAM)&o);
-    *err = o.cancel && !o.oa ? GZ_E_CANCEL : o.err;
-    return o.oa;
+    *err = o.h ? GZ_OK : (o.err ? o.err : GZ_E_FORMAT);
+    return o.h;
+}
+
+/* ======================================================================
+ * File associations: archive types grouped, checkboxes (tree view:
+ * TVS_CHECKBOXES works with the comctl32 of Windows 2000)
+ * ====================================================================== */
+
+enum { ID_AS_TREE = 1101, ID_AS_DESC, ID_AS_ALL, ID_AS_NONE, ID_AS_DEF };
+#define WM_APP_TVCHECK (WM_APP + 30)
+
+typedef struct {
+    dlg_base b;
+    assoc_ext *l;
+    int n;
+    HTREEITEM grp[AG_COUNT];
+    HTREEITEM *it;
+    int changed;
+} asdlg;
+
+static const int k_ag_sid[AG_COUNT] = { S_AG_ZIP, S_AG_7Z, S_AG_RAR, S_AG_ALZ, S_AG_TAR, S_AG_ISO, S_AG_DISK,
+                                        S_AG_OTHER, S_AG_EXE };
+
+static void tv_check(HWND tv, HTREEITEM i, int on)
+{
+    TVITEMW t;
+    t.mask = TVIF_STATE;
+    t.hItem = i;
+    t.stateMask = TVIS_STATEIMAGEMASK;
+    t.state = INDEXTOSTATEIMAGEMASK(on ? 2 : 1);
+    SendMessageW(tv, TVM_SETITEMW, 0, (LPARAM)&t);
+}
+
+static int tv_checked(HWND tv, HTREEITEM i)
+{
+    return ((UINT)SendMessageW(tv, TVM_GETITEMSTATE, (WPARAM)i, TVIS_STATEIMAGEMASK) >> 12) == 2;
+}
+
+/* group boxes follow their members */
+static void as_sync_groups(HWND tv, asdlg *x)
+{
+    for (int g = 0; g < AG_COUNT; g++) {
+        if (!x->grp[g]) continue;
+        int all = 1;
+        for (int i = 0; i < x->n; i++) if (x->l[i].group == g && !tv_checked(tv, x->it[i])) all = 0;
+        tv_check(tv, x->grp[g], all);
+    }
+}
+
+static void as_set(HWND tv, asdlg *x, int mode)       /* 0 none, 1 all, 2 defaults */
+{
+    for (int i = 0; i < x->n; i++) tv_check(tv, x->it[i], mode == 2 ? x->l[i].def_on : mode);
+    as_sync_groups(tv, x);
+}
+
+static INT_PTR CALLBACK as_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
+{
+    INT_PTR ret;
+    if (dlg_common(h, m, wp, lp, &ret)) return ret;
+    asdlg *x = (asdlg *)GetWindowLongPtrW(h, DWLP_USER);
+    HWND tv = GetDlgItem(h, ID_AS_TREE);
+    switch (m) {
+    case WM_INITDIALOG: {
+        x = (asdlg *)lp;
+        dlg_setup(h, &x->b, IDOK);
+        set_fg(h, ID_AS_DESC, FG_GRAY);
+        tv = GetDlgItem(h, ID_AS_TREE);
+        SetWindowLongW(tv, GWL_STYLE, GetWindowLongW(tv, GWL_STYLE) | TVS_CHECKBOXES);
+        SendMessageW(tv, WM_SETFONT, (WPARAM)g_font.ui, 0);
+        for (int g = 0; g < AG_COUNT; g++) {
+            int cnt = 0;
+            for (int i = 0; i < x->n; i++) cnt += x->l[i].group == g;
+            if (!cnt) continue;
+            TVINSERTSTRUCTW ins;
+            __builtin_memset(&ins, 0, sizeof ins);
+            ins.hParent = TVI_ROOT;
+            ins.hInsertAfter = TVI_LAST;
+            ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+            ins.item.pszText = (wchar_t *)S(k_ag_sid[g]);
+            ins.item.lParam = -1 - g;
+            x->grp[g] = (HTREEITEM)SendMessageW(tv, TVM_INSERTITEMW, 0, (LPARAM)&ins);
+            for (int i = 0; i < x->n; i++) {
+                if (x->l[i].group != g) continue;
+                wchar_t t[20];
+                int k = 0;
+                t[k++] = '.';
+                for (const char *p = x->l[i].ext; *p && k < 18; p++) t[k++] = (wchar_t)(u8)*p;
+                t[k] = 0;
+                ins.hParent = x->grp[g];
+                ins.item.pszText = t;
+                ins.item.lParam = i;
+                x->it[i] = (HTREEITEM)SendMessageW(tv, TVM_INSERTITEMW, 0, (LPARAM)&ins);
+            }
+        }
+        for (int i = 0; i < x->n; i++) tv_check(tv, x->it[i], assoc_wanted(x->l[i].ext));
+        as_sync_groups(tv, x);
+        for (int g = 0; g < AG_COUNT; g++)
+            if (x->grp[g] && g != AG_EXE) SendMessageW(tv, TVM_EXPAND, TVE_EXPAND, (LPARAM)x->grp[g]);
+        if (x->grp[0]) SendMessageW(tv, TVM_SELECTITEM, TVGN_FIRSTVISIBLE, (LPARAM)x->grp[0]);
+        return TRUE;
+    }
+    case WM_NOTIFY: {
+        NMHDR *nh = (NMHDR *)lp;
+        if (nh->idFrom != ID_AS_TREE) break;
+        if (nh->code == NM_CLICK) {
+            TVHITTESTINFO hi;
+            GetCursorPos(&hi.pt);
+            ScreenToClient(tv, &hi.pt);
+            HTREEITEM i = (HTREEITEM)SendMessageW(tv, TVM_HITTEST, 0, (LPARAM)&hi);
+            if (i && (hi.flags & TVHT_ONITEMSTATEICON)) PostMessageW(h, WM_APP_TVCHECK, 0, (LPARAM)i);
+        } else if (nh->code == TVN_KEYDOWN && ((NMTVKEYDOWN *)lp)->wVKey == VK_SPACE) {
+            HTREEITEM i = (HTREEITEM)SendMessageW(tv, TVM_GETNEXTITEM, TVGN_CARET, 0);
+            if (i) PostMessageW(h, WM_APP_TVCHECK, 0, (LPARAM)i);
+        }
+        break;
+    }
+    case WM_APP_TVCHECK: {
+        /* the box has toggled by now: a group carries its members along */
+        HTREEITEM i = (HTREEITEM)lp;
+        int on = tv_checked(tv, i);
+        for (int g = 0; g < AG_COUNT; g++) {
+            if (x->grp[g] != i) continue;
+            for (int k = 0; k < x->n; k++) if (x->l[k].group == g) tv_check(tv, x->it[k], on);
+        }
+        as_sync_groups(tv, x);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case ID_AS_ALL: as_set(tv, x, 1); return TRUE;
+        case ID_AS_NONE: as_set(tv, x, 0); return TRUE;
+        case ID_AS_DEF: as_set(tv, x, 2); return TRUE;
+        case IDOK: {
+            wchar_t s[1024];
+            size_t k = 0;
+            int all_default = 1;
+            s[0] = 0;
+            for (int i = 0; i < x->n; i++) {
+                int on = tv_checked(tv, x->it[i]);
+                if (on != x->l[i].def_on) all_default = 0;
+                if (!on) continue;
+                size_t el = 0;
+                while (x->l[i].ext[el]) el++;
+                if (k + el + 2 >= GZ_COUNTOF(s)) break;
+                if (k) s[k++] = ' ';
+                for (size_t c = 0; c < el; c++) s[k++] = (wchar_t)(u8)x->l[i].ext[c];
+                s[k] = 0;
+            }
+            if (all_default) s[0] = 0;
+            if (!s[0] && !all_default) wcopy(s, L"-", 4);      /* nothing chosen (not "defaults") */
+            x->changed = wcmp(s, g_set.assoc) != 0;
+            wcopy(g_set.assoc, s, GZ_COUNTOF(g_set.assoc));
+            EndDialog(h, 1);
+            return TRUE;
+        }
+        case IDCANCEL: EndDialog(h, 0); return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+int dlg_assoc(HWND owner)
+{
+    asdlg x;
+    __builtin_memset(&x, 0, sizeof x);
+    x.l = (assoc_ext *)mem_alloc(512 * sizeof(assoc_ext));
+    x.it = (HTREEITEM *)mem_alloc(512 * sizeof(HTREEITEM));
+    if (!x.l || !x.it) { mem_free(x.l); mem_free(x.it); return 0; }
+    x.n = assoc_list(x.l, 512);
+    x.b.icon = IC_SETTINGS;
+    wcopy(x.b.title, S(S_AS_TITLE), 128);
+    wcopy(x.b.sub, S(S_APP), 512);
+    x.b.hdr_dlu = 40;
+    x.b.foot_dlu = 218;
+    dlgt d;
+    dlgt_begin(&d, S(S_AS_TITLE), 280, 244, 0);
+    T_STATIC(&d, ID_AS_DESC, S(S_AS_DESC), 12, 44, 256, 18, 0);
+    dlgt_item(&d, ID_AS_TREE, 0, WC_TREEVIEWW, L"", 12, 64, 256, 148,
+              TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS | WS_TABSTOP | WS_BORDER, 0);
+    T_BUTTON(&d, ID_AS_ALL, S(S_AS_ALL), 12, 225, 50, 15);
+    T_BUTTON(&d, ID_AS_NONE, S(S_AS_NONE), 66, 225, 50, 15);
+    T_BUTTON(&d, ID_AS_DEF, S(S_AS_DEFAULT), 120, 225, 44, 15);
+    T_BUTTON(&d, IDOK, S(S_BTN_OK), 172, 225, 46, 15);
+    T_BUTTON(&d, IDCANCEL, S(S_CANCEL), 222, 225, 46, 15);
+    dlgt_run(&d, owner, as_proc, (LPARAM)&x);
+    mem_free(x.l);
+    mem_free(x.it);
+    return x.changed;
 }

@@ -3,6 +3,8 @@
  *
  * Target: Windows 2000 (NT 5.0) .. Windows 11. Only APIs present in
  * Windows 2000 are linked statically; newer ones are loaded at run time.
+ * Extraction, testing, compression and opening run in the portable engine
+ * (src/app/engine.c) on top of the Windows OS layer (os_win.c).
  */
 #ifndef GZ_APP_H
 #define GZ_APP_H
@@ -30,6 +32,7 @@
 
 #include "base.h"
 #include "arc.h"
+#include "engine.h"
 #include "cpu.h"
 #include "crc32.h"
 #include "inflate.h"
@@ -72,8 +75,8 @@
 #define SPI_GETFONTSMOOTHINGTYPE 0x200A
 #endif
 
-#define WM_APP_ASK      (WM_APP + 1)   /* worker -> progress dialog: question     */
-#define WM_APP_DONE     (WM_APP + 2)   /* worker -> progress dialog: finished      */
+#define WM_APP_ASK      (WM_APP + 1)   /* engine thread -> progress / open window: question */
+#define WM_APP_DONE     (WM_APP + 2)   /* engine thread -> progress / open window: finished */
 #define WM_APP_OPENED   (WM_APP + 3)   /* opener thread -> main window             */
 
 /* ---------------- runtime (rt.c) ---------------- */
@@ -104,19 +107,15 @@ void   fmt_filetime(wchar_t *o, u64 ft_utc);
 u64    entry_filetime(const gz_entry *e);                      /* UTC FILETIME or 0 */
 const wchar_t *path_base(const wchar_t *p);
 void   path_dir(wchar_t *dir, const wchar_t *path, size_t cap);
-void   path_strip_ext(wchar_t *name);                          /* "a.tar.gz" -> "a" */
 void   path_join(wchar_t *o, const wchar_t *a, const wchar_t *b, size_t cap);
 int    path_is_dir(const wchar_t *p);
 int    path_exists(const wchar_t *p);
-void   path_long(wchar_t *o, const wchar_t *p, size_t cap);    /* add \\?\ when needed */
-int    mkdirs(const wchar_t *path);
-u8    *w_to_mb(int cp, const wchar_t *w, size_t *outn);        /* caller mem_free */
 int    scale(int px);                                          /* DPI scale from 96 */
 extern int g_dpi;
 
 typedef struct {
     int codepage;          /* 0 auto */
-    int overwrite;         /* 0 ask, 1 overwrite, 2 skip, 3 rename */
+    int overwrite;         /* GZ_OW_*: 0 ask, 1 overwrite, 2 skip, 3 rename, 4 newer */
     int open_folder;
     int smart_folder;
     int threads;           /* 0 auto */
@@ -128,6 +127,9 @@ typedef struct {
     wchar_t dest[MAX_PATH];
     wchar_t recent[6][MAX_PATH];
     int col_w[8];
+    /* last compression options */
+    int c_format, c_level, c_method, c_enc, c_solid, c_encnames;
+    wchar_t assoc[1024];   /* associated extensions "zip 7z ..." (empty = defaults) */
 } gz_settings;
 extern gz_settings g_set;
 void settings_load(void);
@@ -187,102 +189,97 @@ INT_PTR dlgt_run(dlgt *d, HWND owner, DLGPROC proc, LPARAM lp);
 #define DA_LIST   0x83
 #define DA_COMBO  0x85
 
-/* ---------------- engine.c ---------------- */
-enum { OW_ASK = 0, OW_ALL = 1, OW_SKIP = 2, OW_RENAME = 3 };
-enum { ASK_OVERWRITE = 1, ASK_PASSWORD = 2 };
-enum { ANS_YES = 1, ANS_NO = 2, ANS_RENAME = 3, ANS_CANCEL = 4 };
+/* ---------------- engine glue (engine.c) ----------------
+ * A ui_job bundles the engine options with what the progress window needs;
+ * questions from the engine's threads reach the UI thread through
+ * SendMessage(WM_APP_ASK), the end through PostMessage(WM_APP_DONE). */
+enum { OP_EXTRACT = 1, OP_TEST, OP_COMPRESS };
 
-typedef struct gz_job gz_job;
-typedef struct {
-    int kind;
-    const wchar_t *path;      /* overwrite: target file; password: entry name */
-    u64 old_size, old_time, new_size, new_time;
-    int retry;                /* password: previous attempt failed */
-    int apply_all;            /* out */
-    wchar_t password[256];    /* out */
-} gz_ask;
-
-typedef struct {
-    wchar_t *name;
-    int code;
-} gz_err;
-
-typedef struct {
-    wchar_t *path;
-    gz_src src;
-    gz_archive *arc;
-} gz_open_arc;
-
-struct gz_job {
-    /* input */
-    gz_open_arc *oa;
-    u8 *sel;                  /* NULL = all entries (not owned) */
-    u8 *sel_owned;            /* mask allocated by the engine */
-    const wchar_t *strip;     /* folder prefix to strip ("a/b") or NULL */
-    wchar_t dest[MAX_PATH * 2];
-    int overwrite;
-    int test_only;
-    int threads;
-    int open_folder;
-    HWND notify;              /* progress window */
-    /* password */
+typedef struct ui_job {
+    int op;
+    gz_handle *h;                 /* extract / test                                   */
+    gz_extract_opts xo;           /* engine options (strings point into this struct)  */
+    gz_compress_opts co;
+    wchar_t dest[MAX_PATH * 2];   /* extraction folder (before smart naming)          */
+    wchar_t out[MAX_PATH * 2];    /* compression: archive to create                   */
     wchar_t pw[256];
-    int pw_set, pw_gen;
-    /* shared progress */
-    CRITICAL_SECTION lock, ask_lock;
-    volatile LONG cancel;
-    volatile LONG paused;
-    HANDLE run_event;         /* set = running */
-    u64 total_bytes, done_bytes;
-    u32 total_files, done_files, skipped, nworkers;
-    volatile LONG next;
-    u32 *order; u32 count;
+    const wchar_t *title;         /* progress window subtitle                         */
+    int open_folder;
+    /* while running / afterwards */
+    HWND notify;
+    gz_job *j;                    /* engine job, freed by ui_job_free                 */
+    int result;
+    gz_progress fin;              /* last progress snapshot                           */
+    CRITICAL_SECTION cur_lock;
     wchar_t current[MAX_PATH];
-    gz_err *errs; u32 nerr, caperr;
-    u32 start_tick, end_tick;
-    volatile LONG wait_ms;    /* time spent waiting for the user */
-    int finished, result;
-    HANDLE thread;
-    u8 *zone;                 /* archive's Zone.Identifier (Mark-of-the-Web), heap */
-    DWORD zone_n;
-};
+} ui_job;
 
-gz_open_arc *arc_open_path(const wchar_t *path, int codepage, volatile long *cancel, int *err);
-gz_open_arc *open_archive_ui(HWND owner, const wchar_t *path, int codepage, int *err);
-void arc_close(gz_open_arc *oa);
-int  src_open(gz_src *s, const wchar_t *path);
-void src_close(gz_src *s);
-gz_job *job_new(gz_open_arc *oa);
-void job_free(gz_job *j);
-void job_start(gz_job *j);
-int  job_out_path(gz_job *j, const gz_entry *e, wchar_t *out, size_t cap);  /* 1 ok, 0 n/a, -1 too long */
-const wchar_t *err_text(int code);
-int  smart_needs_folder(gz_open_arc *oa, const u8 *sel, const wchar_t *strip);
+void ui_job_init(ui_job *u, int op);
+void ui_job_free(ui_job *u);
+int  ui_job_start(ui_job *u, HWND notify);       /* 0 when out of memory */
+u32  ui_job_problems(ui_job *u);                 /* logged errors + warnings */
+const wchar_t *err_text(int code);              /* GZ_E_* and GZ_N_* */
+/* Open an archive (entry idx of parent when parent != NULL) with the "opening"
+ * window; password and missing-volume questions are asked there. */
+gz_handle *open_archive_ui(HWND owner, const wchar_t *path, gz_handle *parent, u32 idx, int codepage, int *err);
+void open_error_box(HWND owner, const wchar_t *path, int err);
+/* the name's extension belongs to a registered format (strict: archives only,
+ * no documents / executables / generic disk image names) */
+int  is_archive_name(const wchar_t *name, int strict);
+/* "*.zip;*.7z;..." of every registered format (heap, caller mem_free) */
+wchar_t *archive_patterns(void);
 
 /* ---------------- dialogs.c ---------------- */
 typedef struct {
-    gz_open_arc *oa;
+    gz_handle *h;
+    const wchar_t *src_path;      /* outermost file ("next to the archive")           */
     wchar_t dest[MAX_PATH * 2];
     int make_folder, overwrite, open_folder, only_selected, nselected;
-} gz_extract_opts;
+} x_opts;
 
-int  dlg_extract_options(HWND owner, gz_extract_opts *o);
-int  run_job_with_progress(HWND owner, gz_job *j);   /* returns 0 ok */
-int  dlg_ask(HWND owner, gz_ask *a);
+/* shared dialog look (dialogs.c, compress.c) */
+typedef struct {
+    int icon, icon_px;
+    wchar_t title[128];
+    wchar_t sub[512];
+    int sub_red;
+    int hdr_dlu, foot_dlu;
+    int hdr_px, foot_px;
+} dlg_base;
+void dlg_setup(HWND h, dlg_base *b, int primary_id);
+int  dlg_common(HWND h, UINT m, WPARAM wp, LPARAM lp, INT_PTR *ret);
+void dlg_gray(HWND h, int id);
+void dlg_bold(HWND h, int id);
+#define T_STATIC(d, id, t, x, y, w, h, st) dlgt_item(d, id, DA_STATIC, 0, t, x, y, w, h, SS_LEFT | SS_NOPREFIX | (st), 0)
+#define T_BUTTON(d, id, t, x, y, w, h)     dlgt_item(d, id, DA_BUTTON, 0, t, x, y, w, h, BS_OWNERDRAW | WS_TABSTOP, 0)
+#define T_CHECK(d, id, t, x, y, w, h)      dlgt_item(d, id, DA_BUTTON, 0, t, x, y, w, h, BS_AUTOCHECKBOX | WS_TABSTOP, 0)
+#define T_COMBO(d, id, x, y, w, h, st)     dlgt_item(d, id, DA_COMBO, 0, L"", x, y, w, h, WS_VSCROLL | WS_TABSTOP | (st), 0)
+#define T_EDIT(d, id, t, x, y, w, h, st)   dlgt_item(d, id, DA_EDIT, 0, t, x, y, w, h, WS_TABSTOP | ES_AUTOHSCROLL | (st), WS_EX_CLIENTEDGE)
+
+int  dlg_extract_options(HWND owner, x_opts *o);
+int  run_job_with_progress(HWND owner, ui_job *u);   /* returns the job result */
+int  dlg_ask(HWND owner, gz_ask *a);                 /* GZ_ANS_* */
 void dlg_settings(HWND owner);
 void dlg_about(HWND owner);
-void dlg_info(HWND owner, gz_open_arc *oa);
-void dlg_errors(HWND owner, gz_job *j);
+void dlg_info(HWND owner, gz_handle *h);
+void dlg_errors(HWND owner, ui_job *u);
 void dlg_bench(HWND owner);
+int  dlg_assoc(HWND owner);                       /* 1 when g_set.assoc changed */
 int  pick_folder(HWND owner, wchar_t *path, const wchar_t *title);
 typedef struct { int cp; int sid; } cp_item;
 extern const cp_item g_cp_list[];
 extern const int g_cp_count;
 void msg_box(HWND owner, const wchar_t *text, UINT icon);
+void open_in_explorer(const wchar_t *dir, const wchar_t *select);
+
+/* ---------------- compress.c ---------------- */
+/* inputs: absolute paths. Dialog (Bandizip-like), or direct: "<name>.zip" next to them. */
+int  dlg_compress(HWND owner, const wchar_t *const *inputs, u32 n);
+int  compress_direct(HWND owner, const wchar_t *const *inputs, u32 n, int format);
 
 /* ---------------- extract helpers (main.c) ---------------- */
 enum { X_DIALOG = 0, X_HERE = 1, X_SMART = 2, X_TO = 3, X_TEST = 4 };
-int do_extract(HWND owner, gz_open_arc *oa, int mode, const wchar_t *to, const u8 *sel,
+int do_extract(HWND owner, gz_handle *h, const wchar_t *src_path, int mode, const wchar_t *to, const u8 *sel,
                const wchar_t *strip, int nsel);
 
 /* ---------------- mainwnd.c ---------------- */
@@ -293,6 +290,12 @@ int  mainwnd_loop(HWND hwnd);
 int  shell_register(int assoc);
 int  shell_unregister(void);
 int  shell_is_registered(void);
+/* extensions of every registered format, grouped for the association dialog */
+enum { AG_ZIP = 0, AG_7Z, AG_RAR, AG_ALZ, AG_TAR, AG_ISO, AG_DISK, AG_OTHER, AG_EXE, AG_COUNT };
+typedef struct { char ext[16]; int group; int def_on; } assoc_ext;
+int  assoc_list(assoc_ext *out, int cap);
+int  assoc_default_on(const char *ext);        /* a real archive type (not a document / program) */
+int  assoc_wanted(const char *ext);            /* chosen in g_set.assoc (or on by default) */
 
 extern HINSTANCE g_inst;
 extern const wchar_t *g_exe_path;
