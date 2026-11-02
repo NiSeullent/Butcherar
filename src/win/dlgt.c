@@ -26,6 +26,22 @@ static void put32(dlgt *d, DWORD v) { put(d, &v, 4); }
 static void putstr(dlgt *d, const wchar_t *s) { put(d, s ? s : L"", (wlen(s) + 1) * sizeof(wchar_t)); }
 static void align4(dlgt *d) { while (d->len & 3) { u8 z = 0; put(d, &z, 1); } }
 
+/* Control text. In a DLGITEMTEMPLATEEX a title whose first unit is 0xFFFF is an
+ * ordinal: the dialog manager reads one more WORD as its value and the next as
+ * extraCount, then skips that many bytes of creation data. Text that starts with
+ * U+FFFF (an archive comment, a file name) would shift the parser into the bytes
+ * that follow - and past the end of the template. Such a first unit is written as
+ * U+FFFD; the text itself is always a plain string. (Untrusted text is set with
+ * SetDlgItemTextW after creation anyway; this keeps every template well formed.) */
+static void puttext(dlgt *d, const wchar_t *s)
+{
+    if (s && s[0] == 0xFFFF) {
+        put16(d, 0xFFFD);
+        s++;
+    }
+    putstr(d, s);
+}
+
 #define COUNT_OFF 16
 
 void dlgt_begin(dlgt *d, const wchar_t *title, int cx, int cy, DWORD style)
@@ -60,8 +76,8 @@ void dlgt_item(dlgt *d, int id, WORD atom, const wchar_t *cls, const wchar_t *te
     put32(d, (DWORD)id);
     if (atom) { put16(d, 0xFFFF); put16(d, atom); }
     else putstr(d, cls);
-    putstr(d, text);
-    put16(d, 0);
+    puttext(d, text);
+    put16(d, 0);            /* extraCount: no creation data */
     WORD n;
     __builtin_memcpy(&n, d->buf + COUNT_OFF, 2);
     n++;

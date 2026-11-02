@@ -137,6 +137,17 @@ static int np_get(npath *n, const gzch *w)
 
 static void np_free(npath *n) { gz_free(n->heap); n->heap = 0; }
 
+/* GetFileAttributesW for a path of any length (the UI's path_exists / path_is_dir):
+ * without the \\?\ form a long path reads as missing on Windows before 10. */
+DWORD path_attributes(const wchar_t *p)
+{
+    npath np;
+    if (!p || np_get(&np, (const gzch *)p)) return INVALID_FILE_ATTRIBUTES;
+    DWORD a = GetFileAttributesW(np.p);
+    np_free(&np);
+    return a;
+}
+
 /* path + suffix (e.g. ":Zone.Identifier"), as a native path */
 static int np_suffix(npath *n, const gzch *w, const wchar_t *suffix)
 {

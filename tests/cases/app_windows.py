@@ -68,6 +68,8 @@ comdlg32 GetSaveFileNameW
 kernel32 CreateHardLinkW CreateMutexW CreateSemaphoreW ReleaseSemaphore GetCurrentDirectoryW
 kernel32 GetFileInformationByHandle GetSystemTimeAsFileTime GetVersion MoveFileExW SetFilePointerEx Sleep
 user32 DestroyIcon FindWindowExW GetKeyState MsgWaitForMultipleObjects PeekMessageW SendMessageTimeoutW
+kernel32 GetCurrentThreadId
+user32 EnumThreadWindows
 """
 # Vista+ (or later) functions that must never be imported statically
 FORBIDDEN = {"GetTickCount64", "InitializeSRWLock", "AcquireSRWLockExclusive", "InitializeConditionVariable",
@@ -106,12 +108,28 @@ def winpath(p):
     return "Z:" + os.path.abspath(p).replace("/", "\\")
 
 
+def wine_prefix(t):
+    # kept between runs (creating one takes a minute); 32-bit only: the tested exe is
+    # 32-bit and a WoW64 prefix is twice the size (about 1.3 GB)
+    return os.environ.get("GZ_WINEPREFIX") or os.path.join(os.path.dirname(t.gzt), "wine-gzt32")
+
+
+def prefix_lock(t):
+    """Test modules run in parallel threads, and every Wine user of one prefix shares its
+    wineserver (which Wine() kills when it starts and ends): hold this lock while using it.
+    Returns the open lock file; closing it releases the lock."""
+    import fcntl
+    prefix = wine_prefix(t)
+    os.makedirs(os.path.dirname(prefix), exist_ok=True)
+    f = open(prefix + ".lock", "w")
+    fcntl.flock(f, fcntl.LOCK_EX)
+    return f
+
+
 class Wine:
     def __init__(self, t, exe):
         self.t, self.exe = t, exe
-        # kept between runs (creating one takes a minute); 32-bit only: the tested exe is
-        # 32-bit and a WoW64 prefix is twice the size (about 1.3 GB)
-        self.prefix = os.environ.get("GZ_WINEPREFIX") or os.path.join(os.path.dirname(t.gzt), "wine-gzt32")
+        self.prefix = wine_prefix(t)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("MAKE")}
         self.env.update(WINEPREFIX=self.prefix, WINEARCH="win32", WINEDEBUG="-all", LANG="ko_KR.UTF-8",
                         LC_ALL="ko_KR.UTF-8", WINEDLLOVERRIDES="mscoree,mshtml=")
@@ -263,6 +281,14 @@ def tree_eq(t, a, b):
 
 def run(t):
     t.need("wine", "Xvfb", "xdotool")
+    lock = prefix_lock(t)            # also keeps regress_windows_ui.py from building the exe meanwhile
+    try:
+        run_locked(t)
+    finally:
+        lock.close()
+
+
+def run_locked(t):
     bdir = os.path.dirname(t.gzt)
     exe = os.path.join(bdir, "GogitZip.exe")
     if shutil.which("i686-w64-mingw32-gcc") and os.path.dirname(os.path.abspath(bdir)) == ROOT:

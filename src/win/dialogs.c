@@ -166,8 +166,8 @@ void msg_box(HWND owner, const wchar_t *text, UINT icon)
 /* open a folder in Explorer, optionally with one item selected ("explorer /select," works on 2000) */
 void open_in_explorer(const wchar_t *dir, const wchar_t *select)
 {
-    if (select && select[0]) {
-        wchar_t a[MAX_PATH * 2 + 16];
+    wchar_t a[MAX_PATH * 2 + 16];
+    if (select && select[0] && wlen(select) + 12 < GZ_COUNTOF(a)) {     /* else just the folder */
         wfmt(a, L"/select,\"%s\"", select);
         if ((INT_PTR)ShellExecuteW(NULL, L"open", L"explorer.exe", a, NULL, SW_SHOWNORMAL) > 32) return;
     }
@@ -304,7 +304,7 @@ static INT_PTR CALLBACK xdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         set_bold(h, ID_X_DESTLABEL);
         HWND cb = GetDlgItem(h, ID_X_DEST);
         SetWindowTextW(cb, o->dest);
-        SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)x->here);
+        if (x->here[0]) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)x->here);
         wchar_t t[MAX_PATH * 2];
         special_dir(CSIDL_DESKTOPDIRECTORY, t);
         if (t[0]) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)t);
@@ -336,11 +336,26 @@ static INT_PTR CALLBACK xdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         case IDOK: {
             x_opts *o = x->o;
             wchar_t p[MAX_PATH * 2];
-            GetDlgItemTextW(h, ID_X_DEST, p, MAX_PATH * 2);
-            size_t n = wlen(p);
-            while (n && (p[n - 1] == ' ')) p[--n] = 0;
+            const DWORD cap = (DWORD)GZ_COUNTOF(o->dest);
+            /* a folder that does not fit is refused - never cut short, never replaced by
+             * the previous one (GetFullPathNameW leaves o->dest alone when it needs more) */
+            LRESULT tl = SendDlgItemMessageW(h, ID_X_DEST, WM_GETTEXTLENGTH, 0, 0);
+            int too_long = tl < 0 || (size_t)tl >= GZ_COUNTOF(p);
+            size_t n = 0;
+            DWORD fl = 0;
+            if (!too_long) {
+                GetDlgItemTextW(h, ID_X_DEST, p, GZ_COUNTOF(p));
+                n = wlen(p);
+                while (n && (p[n - 1] == ' ')) p[--n] = 0;
+                if (n) { fl = GetFullPathNameW(p, cap, o->dest, NULL); too_long = fl >= cap; }
+            }
+            if (too_long) {
+                msg_box(h, S(S_N_PATH_LONG), MB_ICONWARNING);
+                SetFocus(GetDlgItem(h, ID_X_DEST));
+                return TRUE;
+            }
             if (!n) { MessageBeep(MB_ICONWARNING); SetFocus(GetDlgItem(h, ID_X_DEST)); return TRUE; }
-            if (!GetFullPathNameW(p, MAX_PATH * 2, o->dest, NULL)) wcopy(o->dest, p, MAX_PATH * 2);
+            if (!fl) wcopy(o->dest, p, cap);
             o->make_folder = IsDlgButtonChecked(h, ID_X_MKDIR) == BST_CHECKED;
             o->open_folder = IsDlgButtonChecked(h, ID_X_OPEN) == BST_CHECKED;
             o->only_selected = o->nselected && IsDlgButtonChecked(h, ID_X_SEL) == BST_CHECKED;
@@ -371,7 +386,8 @@ int dlg_extract_options(HWND owner, x_opts *o)
     xdlg x;
     __builtin_memset(&x, 0, sizeof x);
     x.o = o;
-    path_dir(x.here, o->src_path, GZ_COUNTOF(x.here));
+    if (wlen(o->src_path) < GZ_COUNTOF(x.here)) path_dir(x.here, o->src_path, GZ_COUNTOF(x.here));
+    else x.here[0] = 0;                              /* would be cut short: no "next to the archive" */
     x.b.icon = IC_EXTRACT;
     wcopy(x.b.title, S(S_X_TITLE), 128);
     {
@@ -584,6 +600,15 @@ static INT_PTR CALLBACK pdlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         }
         EndDialog(h, 0);
         return TRUE;
+    case WM_DESTROY:
+        /* destroyed before the job ended (normally WM_APP_DONE ends the dialog): stop the job,
+         * run_job_with_progress waits for it; its questions now get "cancel" (no window) */
+        if (p && !p->done && p->u->j) {
+            gz_job_cancel(p->u->j);
+            if (p->paused) { p->paused = 0; gz_job_pause(p->u->j, 0); }
+        }
+        if (p && p->tb) { p->tb->v->Release(p->tb); p->tb = 0; }
+        return FALSE;
     case WM_COMMAND:
         if (LOWORD(wp) == ID_P_PAUSE && !p->done && p->u->j) {
             p->paused = !p->paused;
@@ -709,6 +734,7 @@ static INT_PTR CALLBACK ow_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     case WM_INITDIALOG: {
         x = (adlg *)lp;
         dlg_setup(h, &x->b, ID_OW_YES);
+        SetDlgItemTextW(h, ID_OW_PATH, x->a->path ? x->a->path : L"");   /* not in the template (dlgt.c) */
         set_bold(h, ID_OW_PATH);
         set_fg(h, ID_OW_L1, FG_GRAY);
         set_fg(h, ID_OW_L2, FG_GRAY);
@@ -745,6 +771,7 @@ static INT_PTR CALLBACK vol_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     case WM_INITDIALOG:
         x = (adlg *)lp;
         dlg_setup(h, &x->b, ID_V_BROWSE);
+        SetDlgItemTextW(h, ID_V_PATH, x->a->path ? x->a->path : L"");    /* not in the template (dlgt.c) */
         set_bold(h, ID_V_PATH);
         if (x->a->retry) set_fg(h, ID_V_TEXT, FG_RED);
         SetForegroundWindow(h);
@@ -807,7 +834,7 @@ int dlg_ask(HWND owner, gz_ask *a)
         x.b.foot_dlu = 88;
         dlgt_begin(&d, S(S_VOL_TITLE), 300, 114, 0);
         T_STATIC(&d, ID_V_TEXT, a->retry ? S(S_VOL_AGAIN) : S(S_VOL_PROMPT), 12, 44, 276, 18, 0);
-        T_STATIC(&d, ID_V_PATH, a->path ? a->path : L"", 12, 66, 276, 10, SS_PATHELLIPSIS);
+        T_STATIC(&d, ID_V_PATH, L"", 12, 66, 276, 10, SS_PATHELLIPSIS);
         T_BUTTON(&d, ID_V_BROWSE, S(S_BROWSE), 128, 94, 56, 15);
         T_BUTTON(&d, ID_V_RETRY, S(S_VOL_RETRY), 188, 94, 50, 15);
         T_BUTTON(&d, IDCANCEL, S(S_CANCEL), 242, 94, 46, 15);
@@ -819,7 +846,7 @@ int dlg_ask(HWND owner, gz_ask *a)
     wcopy(x.b.sub, S(S_OW_PROMPT), 512);
     x.b.foot_dlu = 124;
     dlgt_begin(&d, S(S_OW_TITLE), 300, 150, 0);
-    T_STATIC(&d, ID_OW_PATH, a->path ? a->path : L"", 12, 44, 276, 10, SS_PATHELLIPSIS);
+    T_STATIC(&d, ID_OW_PATH, L"", 12, 44, 276, 10, SS_PATHELLIPSIS);
     T_STATIC(&d, ID_OW_L1, S(S_OW_EXISTING), 12, 60, 276, 9, 0);
     T_STATIC(&d, ID_OW_I1, L"", 12, 70, 276, 10, 0);
     T_STATIC(&d, ID_OW_L2, S(S_OW_NEW), 12, 84, 276, 9, 0);
@@ -1070,13 +1097,28 @@ void dlg_about(HWND owner)
  * Archive information
  * ====================================================================== */
 
+/* Values that come from the archive (names, comment) never go into the template
+ * (see dlgt.c): the controls are created empty and filled here. */
+typedef struct {
+    dlg_base b;
+    int n;
+    const wchar_t *v[12];         /* text of controls 802, 804, ...      */
+    const wchar_t *comment;       /* edit control 841 (\r\n line breaks) */
+} idlg;
+
 static INT_PTR CALLBACK info_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
     INT_PTR ret;
     if (dlg_common(h, m, wp, lp, &ret)) return ret;
     if (m == WM_INITDIALOG) {
-        dlg_setup(h, (dlg_base *)lp, IDOK);
+        idlg *x = (idlg *)lp;
+        dlg_setup(h, &x->b, IDOK);
         for (int id = 801; id < 830; id += 2) if (GetDlgItem(h, id)) set_fg(h, id, FG_GRAY);
+        for (int i = 0; i < x->n; i++) SetDlgItemTextW(h, 802 + i * 2, x->v[i]);
+        if (x->comment) {
+            SendDlgItemMessageW(h, 841, EM_LIMITTEXT, 0, 0);      /* the largest an edit control holds */
+            SetDlgItemTextW(h, 841, x->comment);
+        }
         return TRUE;
     }
     if (m == WM_COMMAND && (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL)) { EndDialog(h, 0); return TRUE; }
@@ -1138,12 +1180,13 @@ void dlg_info(HWND owner, gz_handle *hd)
 {
     if (!hd) return;
     gz_archive *a = hd->arc;
-    dlg_base b;
-    __builtin_memset(&b, 0, sizeof b);
-    b.icon = IC_INFO;
-    wcopy(b.title, S(S_I_TITLE), 128);
-    wcopy(b.sub, hd->name, 512);
-    b.hdr_dlu = 40;
+    idlg x;
+    __builtin_memset(&x, 0, sizeof x);
+    dlg_base *bp = &x.b;
+    bp->icon = IC_INFO;
+    wcopy(bp->title, S(S_I_TITLE), 128);
+    wcopy(bp->sub, hd->name, 512);
+    bp->hdr_dlu = 40;
     wchar_t v[12][300], x1[40], x2[40], x3[40];
     int lab[12], n = 0;
     if (hd->parent || hd->temp) wcopy(v[n], hd->name, 300);      /* nested: "outer.zip/inner.tar" */
@@ -1187,31 +1230,35 @@ void dlg_info(HWND owner, gz_handle *hd)
     int y = 46;
     dlgt d;
     int h = 46 + n * 13 + (has_comment ? 62 : 0) + 6;
-    b.foot_dlu = h;
+    bp->foot_dlu = h;
     dlgt_begin(&d, S(S_I_TITLE), 300, h + 28, 0);
     for (int i = 0; i < n; i++) {
         if (lab[i] >= 0) T_STATIC(&d, 801 + i * 2, S(lab[i]), 12, y, 70, 10, 0);
-        T_STATIC(&d, 802 + i * 2, v[i], lab[i] >= 0 ? 86 : 12, y, lab[i] >= 0 ? 202 : 276, 10,
+        T_STATIC(&d, 802 + i * 2, L"", lab[i] >= 0 ? 86 : 12, y, lab[i] >= 0 ? 202 : 276, 10,
                  i == 0 ? SS_PATHELLIPSIS : SS_ENDELLIPSIS);
+        x.v[i] = v[i];
         y += 13;
     }
+    x.n = n;
+    wchar_t *cc = 0;
     if (has_comment) {
         T_STATIC(&d, 840, S(S_I_COMMENT), 12, y + 2, 276, 10, 0);
         /* convert lone \n to \r\n for the edit control */
         size_t cl = wlen(a->comment);
-        wchar_t *cc = (wchar_t *)mem_alloc((cl * 2 + 2) * sizeof(wchar_t));
+        cc = (wchar_t *)mem_alloc((cl * 2 + 2) * sizeof(wchar_t));
         size_t o = 0;
         for (size_t i = 0; i < cl && cc; i++) {
             if (a->comment[i] == '\n' && (i == 0 || a->comment[i - 1] != '\r')) cc[o++] = '\r';
             cc[o++] = a->comment[i];
         }
         if (cc) cc[o] = 0;
-        dlgt_item(&d, 841, DA_EDIT, 0, cc ? cc : L"", 12, y + 14, 276, 44,
+        x.comment = cc;
+        dlgt_item(&d, 841, DA_EDIT, 0, L"", 12, y + 14, 276, 44,
                   ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_AUTOVSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE);
-        mem_free(cc);
     }
     T_BUTTON(&d, IDOK, S(S_CLOSE), 238, h + 7, 50, 15);
-    dlgt_run(&d, owner, info_proc, (LPARAM)&b);
+    dlgt_run(&d, owner, info_proc, (LPARAM)&x);
+    mem_free(cc);
 }
 
 /* ======================================================================
@@ -1270,9 +1317,12 @@ static INT_PTR CALLBACK result_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         if (LOWORD(wp) == 903) {
             ui_job *u = x->u;
             if (u->op == OP_COMPRESS) {
-                wchar_t dir[MAX_PATH * 2];
-                path_dir(dir, u->out, GZ_COUNTOF(dir));
-                open_in_explorer(dir, u->out);
+                wchar_t *dir = wdup(u->out);              /* u->out may be longer than MAX_PATH */
+                if (dir) {
+                    path_dir(dir, u->out, wlen(dir) + 1);
+                    open_in_explorer(dir, u->out);
+                    mem_free(dir);
+                }
             } else {
                 const wchar_t *d = u->j ? gz_job_dest(u->j) : 0;
                 open_in_explorer(d ? d : u->dest, 0);
@@ -1534,6 +1584,7 @@ typedef struct {
 static int o_ask(void *user, gz_ask *q)
 {
     odlg *o = (odlg *)user;
+    if (gz_atomic_load(&o->cancel)) return GZ_ANS_CANCEL;       /* cancelled: ask nothing more */
     return (int)SendMessageW(o->hwnd, WM_APP_ASK, 0, (LPARAM)q);
 }
 
@@ -1603,7 +1654,7 @@ static INT_PTR CALLBACK open_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         else { o->phase++; InvalidateRect(GetDlgItem(h, 1001), NULL, FALSE); }
         return TRUE;
     case WM_APP_ASK: {
-        int r = dlg_ask(h, (gz_ask *)lp);
+        int r = gz_atomic_load(&o->cancel) ? GZ_ANS_CANCEL : dlg_ask(h, (gz_ask *)lp);
         SetWindowLongPtrW(h, DWLP_MSGRESULT, r);
         return TRUE;
     }
@@ -1614,6 +1665,21 @@ static INT_PTR CALLBACK open_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         if (th) { WaitForSingleObject(th, INFINITE); CloseHandle(th); }
         EndDialog(h, 0);
         return TRUE;
+    }
+    case WM_DESTROY: {
+        /* Destroyed while the opener still runs (normally WM_APP_DONE ends the dialog after
+         * the thread): o lives in open_archive_ui's frame, so stop the thread and wait for it
+         * here. Its questions (sent messages) are answered "cancel" meanwhile. */
+        HANDLE th = RemovePropW(h, L"gzth");
+        if (th) {
+            gz_atomic_store(&o->cancel, 1);
+            while (MsgWaitForMultipleObjects(1, &th, FALSE, INFINITE, QS_SENDMESSAGE) == WAIT_OBJECT_0 + 1) {
+                MSG msg;
+                PeekMessageW(&msg, NULL, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+            }
+            CloseHandle(th);
+        }
+        return FALSE;
     }
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) {
@@ -1629,7 +1695,7 @@ static INT_PTR CALLBACK open_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 gz_handle *open_archive_ui(HWND owner, const wchar_t *path, gz_handle *parent, u32 idx, int codepage, int *err)
 {
     odlg o;
-    wchar_t full[MAX_PATH * 2];
+    wchar_t *full = 0;
     __builtin_memset(&o, 0, sizeof o);
     o.pct = -1;
     o.cp = codepage;
@@ -1639,8 +1705,13 @@ gz_handle *open_archive_ui(HWND owner, const wchar_t *path, gz_handle *parent, u
         o.idx = idx;
         wcopy(o.b.sub, parent->arc->e[idx].base, 512);
     } else {
-        DWORD fl = GetFullPathNameW(path, GZ_COUNTOF(full), full, NULL);
-        if (!fl || fl >= GZ_COUNTOF(full)) wcopy(full, path, GZ_COUNTOF(full));
+        /* full path of any length (a shortened one would name another file) */
+        size_t pl = wlen(path);
+        DWORD need = GetFullPathNameW(path, 0, NULL, NULL);
+        full = (wchar_t *)mem_alloc(((size_t)need + pl + 2) * sizeof(wchar_t));
+        if (!full) { *err = GZ_E_NOMEM; return 0; }
+        DWORD fl = need ? GetFullPathNameW(path, need + pl + 2, full, NULL) : 0;
+        if (!fl || fl >= need + pl + 2) wcopy(full, path, pl + 1);
         o.path = full;
         wcopy(o.b.sub, path_base(full), 512);
     }
@@ -1659,6 +1730,7 @@ gz_handle *open_archive_ui(HWND owner, const wchar_t *path, gz_handle *parent, u
     dlgt_item(&d, 1001, DA_STATIC, 0, L"", 12, 46, 236, 6, SS_OWNERDRAW, 0);
     T_BUTTON(&d, IDCANCEL, S(S_CANCEL), 198, 67, 50, 15);
     dlgt_run(&d, owner, open_proc, (LPARAM)&o);
+    mem_free(full);                  /* the opener has ended (WM_APP_DONE / WM_DESTROY wait for it) */
     *err = o.h ? GZ_OK : (o.err ? o.err : GZ_E_FORMAT);
     return o.h;
 }

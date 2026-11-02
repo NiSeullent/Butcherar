@@ -32,10 +32,9 @@ static void a2w(wchar_t *o, const char *s, size_t cap)
     o[i] = 0;
 }
 
-/* default archive name (without extension) for the inputs */
+/* default archive name (without extension) for the inputs; o holds wlen(in[0]) + 8 */
 static void default_stem(const wchar_t *const *in, u32 n, wchar_t *o, size_t cap)
 {
-    wchar_t dir[MAX_PATH * 2];
     if (n == 1) {
         wcopy(o, path_base(in[0]), cap);
         if (!path_is_dir(in[0])) {
@@ -43,16 +42,20 @@ static void default_stem(const wchar_t *const *in, u32 n, wchar_t *o, size_t cap
             if (dot && dot != o) *dot = 0;
         }
     } else {
-        path_dir(dir, in[0], GZ_COUNTOF(dir));
-        wcopy(o, path_base(dir), cap);
+        /* the folder holding them: path_dir in o itself ("C:" grows to "C:\") */
+        wcopy(o, in[0], cap);
+        path_dir(o, o, cap);
+        const wchar_t *b = path_base(o);
+        if (b != o) __builtin_memmove(o, b, (wlen(b) + 1) * sizeof(wchar_t));
     }
     size_t k = wlen(o);
     while (k && (o[k - 1] == '.' || o[k - 1] == ' ' || o[k - 1] == '\\' || o[k - 1] == ':')) o[--k] = 0;
     if (!k) wcopy(o, L"archive", cap);
 }
 
-/* replace the archive extension of path (if any) by the writer's */
-static void set_ext(wchar_t *path, size_t cap, const gz_writer *w)
+/* replace the archive extension of path (if any) by the writer's; 0 (path unchanged)
+ * when the result would not fit in cap */
+static int set_ext(wchar_t *path, size_t cap, const gz_writer *w)
 {
     size_t n = wlen(path);
     const wchar_t *b = path_base(path);
@@ -66,21 +69,34 @@ static void set_ext(wchar_t *path, size_t cap, const gz_writer *w)
             const wchar_t *dot = gz_wcsrchr(b, '.');
             if (dot && dot != b) cut = (size_t)(path + n - dot);
         }
-        path[n - cut] = 0;
+        n -= cut;
     }
     wchar_t e[24];
     e[0] = '.';
     a2w(e + 1, w->ext, 23);
+    if (n + wlen(e) >= cap) return 0;
+    path[n] = 0;
     wcat(path, e, cap);
+    return 1;
+}
+
+static void path_too_long(HWND h, int focus_id)
+{
+    msg_box(h, S(S_N_PATH_LONG), MB_ICONWARNING);
+    if (focus_id) SetFocus(GetDlgItem(h, focus_id));
 }
 
 static const gz_writer *writer_or_null(int f) { return f ? gz_writer_find(f) : 0; }
 
 /* ---------------- running a compression job ---------------- */
 
+/* overwrite: GZ_OW_ALL only when the user confirmed replacing out; otherwise GZ_OW_ASK,
+ * so an archive that exists after all (a race, a check that could not see it) is asked
+ * about by the engine instead of being replaced */
 static int run_compress(HWND owner, const wchar_t *const *in, u32 n, const wchar_t *out, int format, int method,
-                        int level, int enc, const wchar_t *pw, int encnames, int solid)
+                        int level, int enc, const wchar_t *pw, int encnames, int solid, int overwrite)
 {
+    if (wlen(out) >= GZ_LONGPATH) { msg_box(owner, S(S_N_PATH_LONG), MB_ICONWARNING); return GZ_E_CREATE; }
     ui_job *u = (ui_job *)mem_alloc(sizeof(ui_job));
     if (!u) return GZ_E_NOMEM;
     ui_job_init(u, OP_COMPRESS);
@@ -101,16 +117,19 @@ static int run_compress(HWND owner, const wchar_t *const *in, u32 n, const wchar
     c->solid = solid;
     c->threads = g_set.threads;
     c->flags = GZ_CF_FOLLOW_LINKS;           /* like Explorer: archive what links point to */
-    c->overwrite = GZ_OW_ALL;                /* the caller confirmed or picked a free name   */
+    c->overwrite = overwrite;
     int r = run_job_with_progress(owner, u);
     if (r == GZ_E_CANCEL) {
         /* nothing to report */
     } else if (r || ui_job_problems(u)) {
         dlg_errors(owner, u);
     } else if (u->open_folder) {
-        wchar_t dir[MAX_PATH * 2];
-        path_dir(dir, u->out, GZ_COUNTOF(dir));
-        open_in_explorer(dir, u->out);
+        wchar_t *dir = wdup(u->out);
+        if (dir) {
+            path_dir(dir, u->out, wlen(dir) + 1);
+            open_in_explorer(dir, u->out);
+            mem_free(dir);
+        }
     }
     SecureZeroMemory(u->pw, sizeof u->pw);
     ui_job_free(u);
@@ -123,23 +142,44 @@ int compress_direct(HWND owner, const wchar_t *const *in, u32 n, int format)
     const gz_writer *w = writer_or_null(format);
     if (!n) return GZ_E_FORMAT;
     if (!w) { msg_box(owner, S(S_C_NOWRITER), MB_ICONWARNING); return GZ_E_METHOD; }
-    wchar_t dir[MAX_PATH * 2], stem[MAX_PATH], out[MAX_PATH * 2], e[24];
-    path_dir(dir, in[0], GZ_COUNTOF(dir));
-    default_stem(in, n, stem, GZ_COUNTOF(stem));
-    e[0] = '.';
-    a2w(e + 1, w->ext, 23);
-    for (int k = 1; k < 10000; k++) {
-        wchar_t name[MAX_PATH + 32];
-        if (k == 1) wfmt(name, L"%s%s", stem, e);
-        else wfmt(name, L"%s (%d)%s", stem, k, e);
-        path_join(out, dir, name, GZ_COUNTOF(out));
-        if (!path_exists(out)) break;
-    }
     if (single_stream(format) && (n != 1 || path_is_dir(in[0]))) {
         msg_box(owner, S(S_C_ONEFILE), MB_ICONWARNING);
         return GZ_E_METHOD;
     }
-    return run_compress(owner, in, n, out, format, GZ_WM_DEFAULT, 5, GZ_WE_AES256, 0, 0, 1);
+    /* "<dir>\<stem>.zip", else the first free "<stem> (k).zip". The buffers are sized
+     * for the inputs (paths may be longer than MAX_PATH): a name is never cut short,
+     * so every candidate is a different file and the one picked is the one checked. */
+    wchar_t e[24];
+    e[0] = '.';
+    a2w(e + 1, w->ext, 23);
+    size_t il = wlen(in[0]), cap = 2 * il + wlen(e) + 32;
+    wchar_t *dir = (wchar_t *)mem_alloc((il + 8) * sizeof(wchar_t));
+    wchar_t *stem = (wchar_t *)mem_alloc((il + 8) * sizeof(wchar_t));
+    wchar_t *out = (wchar_t *)mem_alloc(cap * sizeof(wchar_t));
+    int r = GZ_E_NOMEM, found = 0;
+    if (dir && stem && out) {
+        path_dir(dir, in[0], il + 8);
+        default_stem(in, n, stem, il + 8);
+        for (int k = 1; k < 10000 && !found; k++) {
+            wchar_t num[24];
+            num[0] = 0;
+            if (k > 1) wfmt(num, L" (%d)", k);
+            path_join(out, dir, stem, cap);
+            wcat(out, num, cap);
+            wcat(out, e, cap);
+            found = !path_exists(out);
+        }
+        if (found) {
+            r = run_compress(owner, in, n, out, format, GZ_WM_DEFAULT, 5, GZ_WE_AES256, 0, 0, 1, GZ_OW_ASK);
+        } else {
+            msg_box(owner, S(S_N_EXISTS), MB_ICONWARNING);      /* every name up to "(9999)" is taken */
+            r = GZ_E_CREATE;
+        }
+    }
+    mem_free(dir);
+    mem_free(stem);
+    mem_free(out);
+    return r;
 }
 
 /* ---------------- dialog ---------------- */
@@ -151,10 +191,22 @@ typedef struct {
     dlg_base b;
     const wchar_t *const *in;
     u32 n;
-    wchar_t out[MAX_PATH * 2];
-    int format, method, level, enc, solid, encnames;
+    wchar_t out[GZ_LONGPATH];
+    int format, method, level, enc, solid, encnames, overwrite;
     wchar_t pw[256];
 } cdlg;
+
+/* text of control id in a new buffer of cap units (mem_free); NULL when out of memory or,
+ * with *too_long set, when the text does not fit: never a silently shortened path */
+static wchar_t *dlg_text(HWND h, int id, size_t cap, int *too_long)
+{
+    LRESULT n = SendDlgItemMessageW(h, id, WM_GETTEXTLENGTH, 0, 0);
+    *too_long = n < 0 || (size_t)n >= cap;
+    if (*too_long) return 0;
+    wchar_t *p = (wchar_t *)mem_alloc(cap * sizeof(wchar_t));
+    if (p) GetDlgItemTextW(h, id, p, (int)cap);
+    return p;
+}
 
 static int combo_data(HWND h, int id)
 {
@@ -178,9 +230,10 @@ static void c_format_changed(HWND h, cdlg *x, int fix_ext)
     if (!w) return;
     x->format = f;
     if (fix_ext) {
-        wchar_t p[MAX_PATH * 2];
-        GetDlgItemTextW(h, ID_C_OUT, p, GZ_COUNTOF(p));
-        if (p[0]) { set_ext(p, GZ_COUNTOF(p), w); SetDlgItemTextW(h, ID_C_OUT, p); }
+        int too_long;
+        wchar_t *p = dlg_text(h, ID_C_OUT, GZ_LONGPATH, &too_long);
+        if (p && p[0] && set_ext(p, GZ_LONGPATH, w)) SetDlgItemTextW(h, ID_C_OUT, p);
+        mem_free(p);
     }
     SendDlgItemMessageW(h, ID_C_MET, CB_RESETCONTENT, 0, 0);
     int any = 0;
@@ -242,27 +295,59 @@ static void c_browse(HWND h, cdlg *x)
     if (GetSaveFileNameW(&of)) SetDlgItemTextW(h, ID_C_OUT, file);
 }
 
-static int c_accept(HWND h, cdlg *x)
+/* the archive path typed in the dialog -> x->out (full path); 0 after telling why not */
+static int c_out_path(HWND h, cdlg *x)
 {
-    wchar_t p[MAX_PATH * 2], pw2[256];
-    GetDlgItemTextW(h, ID_C_OUT, p, GZ_COUNTOF(p));
+    const size_t cap = GZ_COUNTOF(x->out);
+    int too_long, ok = 0;
+    wchar_t *p = dlg_text(h, ID_C_OUT, cap, &too_long);
+    wchar_t *t = p ? (wchar_t *)mem_alloc(cap * sizeof(wchar_t)) : 0;
+    if (!t) {
+        if (too_long) path_too_long(h, ID_C_OUT);
+        mem_free(p);
+        return 0;
+    }
     size_t n = wlen(p);
     while (n && p[n - 1] == ' ') p[--n] = 0;
-    if (!n) { MessageBeep(MB_ICONWARNING); SetFocus(GetDlgItem(h, ID_C_OUT)); return 0; }
-    /* a relative name goes next to the inputs */
-    if (!(p[0] == '\\' || (p[0] && p[1] == ':'))) {
-        wchar_t dir[MAX_PATH * 2], t[MAX_PATH * 2];
-        path_dir(dir, x->in[0], GZ_COUNTOF(dir));
-        path_join(t, dir, p, GZ_COUNTOF(t));
-        wcopy(p, t, GZ_COUNTOF(p));
+    if (!n) {
+        MessageBeep(MB_ICONWARNING);
+        SetFocus(GetDlgItem(h, ID_C_OUT));
+    } else {
+        ok = 1;
+        /* a relative name goes next to the inputs */
+        if (!(p[0] == '\\' || (p[0] && p[1] == ':'))) {
+            if (wlen(x->in[0]) + n + 2 >= cap) ok = 0;
+            else {
+                path_dir(t, x->in[0], cap);
+                path_join(t, t, p, cap);
+                wcopy(p, t, cap);
+            }
+        }
+        /* GetFullPathNameW returns the size it needs (and leaves x->out alone) when the
+         * result does not fit: that is an error, not the previous path */
+        DWORD fl = ok ? GetFullPathNameW(p, (DWORD)cap, x->out, NULL) : 0;
+        if (ok && fl >= cap) ok = 0;
+        else if (ok && !fl) wcopy(x->out, p, cap);
+        if (!ok) path_too_long(h, ID_C_OUT);
     }
-    if (!GetFullPathNameW(p, GZ_COUNTOF(x->out), x->out, NULL)) wcopy(x->out, p, GZ_COUNTOF(x->out));
+    mem_free(t);
+    mem_free(p);
+    return ok;
+}
+
+static int c_accept(HWND h, cdlg *x)
+{
+    wchar_t pw2[256];
+    if (!c_out_path(h, x)) return 0;
     x->format = combo_data(h, ID_C_FMT);
     /* the typed extension names another format we can write: follow it */
     if (!writer_or_null(x->format)) { msg_box(h, S(S_C_NOWRITER), MB_ICONWARNING); return 0; }
     int typed = gz_format_from_name(x->out);
     if (typed && typed != x->format && gz_writer_find(typed)) x->format = typed;
-    else if (typed != x->format) set_ext(x->out, GZ_COUNTOF(x->out), gz_writer_find(x->format));
+    else if (typed != x->format && !set_ext(x->out, GZ_COUNTOF(x->out), gz_writer_find(x->format))) {
+        path_too_long(h, ID_C_OUT);
+        return 0;
+    }
     if (single_stream(x->format) && (x->n != 1 || path_is_dir(x->in[0]))) {
         msg_box(h, S(S_C_ONEFILE), MB_ICONWARNING);
         return 0;
@@ -288,11 +373,13 @@ static int c_accept(HWND h, cdlg *x)
         }
         SecureZeroMemory(pw2, sizeof pw2);
     }
+    x->overwrite = GZ_OW_ASK;                /* the engine asks if it exists after all */
     if (path_exists(x->out)) {
         wchar_t t[MAX_PATH * 2 + 128];
         wfmt(t, S(S_C_EXISTS), x->out);
         if (path_is_dir(x->out) || MessageBoxW(h, t, S(S_APP), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
             return 0;
+        x->overwrite = GZ_OW_ALL;            /* confirmed */
     }
     g_set.c_format = x->format;
     g_set.c_method = x->method;
@@ -388,11 +475,20 @@ int dlg_compress(HWND owner, const wchar_t *const *in, u32 n)
     x->solid = g_set.c_solid;
     x->encnames = g_set.c_encnames;
     {
-        wchar_t dir[MAX_PATH * 2], stem[MAX_PATH];
-        path_dir(dir, in[0], GZ_COUNTOF(dir));
-        default_stem(in, n, stem, GZ_COUNTOF(stem));
-        path_join(x->out, dir, stem, GZ_COUNTOF(x->out));
-        wcat(x->out, L".zip", GZ_COUNTOF(x->out));      /* extension follows the format */
+        /* "<dir>\<stem>.zip" (the extension follows the format); when that does not fit,
+         * just the name: accepting it then says the path is too long */
+        size_t il = wlen(in[0]);
+        wchar_t *stem = (wchar_t *)mem_alloc((il + 8) * sizeof(wchar_t));
+        if (!stem) { mem_free(x); return GZ_E_NOMEM; }
+        default_stem(in, n, stem, il + 8);
+        if (2 * il + 16 < GZ_COUNTOF(x->out)) {
+            path_dir(x->out, in[0], GZ_COUNTOF(x->out));
+            path_join(x->out, x->out, stem, GZ_COUNTOF(x->out));
+        } else {
+            wcopy(x->out, stem, GZ_COUNTOF(x->out));
+        }
+        wcat(x->out, L".zip", GZ_COUNTOF(x->out));
+        mem_free(stem);
     }
     x->b.icon = IC_COMPRESS;
     wcopy(x->b.title, S(S_C_TITLE), 128);
@@ -428,7 +524,8 @@ int dlg_compress(HWND owner, const wchar_t *const *in, u32 n)
     T_BUTTON(&d, IDCANCEL, S(S_CANCEL), 250, 177, 48, 15);
     int r = GZ_E_CANCEL;
     if (dlgt_run(&d, owner, cdlg_proc, (LPARAM)x) == 1)
-        r = run_compress(owner, in, n, x->out, x->format, x->method, x->level, x->enc, x->pw, x->encnames, x->solid);
+        r = run_compress(owner, in, n, x->out, x->format, x->method, x->level, x->enc, x->pw, x->encnames, x->solid,
+                         x->overwrite);
     SecureZeroMemory(x->pw, sizeof x->pw);
     mem_free(x);
     return r;

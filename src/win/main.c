@@ -42,7 +42,12 @@ int do_extract(HWND owner, gz_handle *h, const wchar_t *src_path, int mode, cons
     o.open_folder = g_set.open_folder;
     o.make_folder = g_set.smart_folder;
     wchar_t here[MAX_PATH * 2];
-    path_dir(here, src_path, GZ_COUNTOF(here));
+    int here_ok = wlen(src_path) < GZ_COUNTOF(here);       /* else "next to the archive" would be cut short */
+    path_dir(here, here_ok ? src_path : L"", GZ_COUNTOF(here));
+    if (!here_ok && (mode == X_HERE || mode == X_SMART)) {
+        msg_box(owner, S(S_N_PATH_LONG), MB_ICONWARNING);
+        return GZ_E_CREATE;
+    }
 
     switch (mode) {
     case X_DIALOG:
@@ -141,22 +146,26 @@ static struct { wchar_t **v; u32 n, cap; DWORD last; ULONG_PTR verb; } s_col;
 
 static void col_add(const wchar_t *p)
 {
-    wchar_t full[MAX_PATH * 4];
-    DWORD fl = GetFullPathNameW(p, GZ_COUNTOF(full), full, NULL);
-    if (!fl || fl >= GZ_COUNTOF(full)) wcopy(full, p, GZ_COUNTOF(full));
+    /* full path of any length (a shortened one would name another file) */
+    size_t pl = wlen(p);
+    DWORD need = GetFullPathNameW(p, 0, NULL, NULL);
+    size_t cap = (size_t)need + pl + 2;
+    wchar_t *full = (wchar_t *)mem_alloc(cap * sizeof(wchar_t));
+    if (!full) return;
+    DWORD fl = need ? GetFullPathNameW(p, (DWORD)cap, full, NULL) : 0;
+    if (!fl || fl >= cap) wcopy(full, p, pl + 1);
     size_t n = wlen(full);
     while (n > 3 && full[n - 1] == '\\') full[--n] = 0;      /* "C:\dir\" -> "C:\dir" */
-    for (u32 i = 0; i < s_col.n; i++) if (!wicmp(s_col.v[i], full)) return;
-    if (s_col.n >= COLLECT_MAX) return;
-    if (s_col.n == s_col.cap) {
+    int keep = s_col.n < COLLECT_MAX;
+    for (u32 i = 0; i < s_col.n && keep; i++) if (!wicmp(s_col.v[i], full)) keep = 0;
+    if (keep && s_col.n == s_col.cap) {
         u32 nc = s_col.cap ? s_col.cap * 2 : 16;
         wchar_t **nv = (wchar_t **)gz_realloc(s_col.v, nc * sizeof(wchar_t *));
-        if (!nv) return;
-        s_col.v = nv;
-        s_col.cap = nc;
+        if (nv) { s_col.v = nv; s_col.cap = nc; }
+        else keep = 0;
     }
-    wchar_t *d = wdup(full);
-    if (d) s_col.v[s_col.n++] = d;
+    if (keep) s_col.v[s_col.n++] = full;
+    else mem_free(full);
 }
 
 static LRESULT CALLBACK col_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
@@ -169,11 +178,12 @@ static LRESULT CALLBACK col_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
             const wchar_t *s = p;
             while (p < end && *p) p++;
             size_t len = (size_t)(p - s);
-            if (len && len < MAX_PATH * 4 - 1) {
-                wchar_t t[MAX_PATH * 4];
+            wchar_t *t = len && len < GZ_LONGPATH ? (wchar_t *)mem_alloc((len + 1) * sizeof(wchar_t)) : 0;
+            if (t) {
                 __builtin_memcpy(t, s, len * sizeof(wchar_t));
                 t[len] = 0;
                 col_add(t);
+                mem_free(t);
             }
             p++;
         }

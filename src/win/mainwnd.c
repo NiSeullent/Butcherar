@@ -48,12 +48,69 @@ static struct {
     HACCEL accel;
     HMENU menu, recent_menu, cp_menu;
     int tb_h, path_h, st_h;
+    int busy;                /* operations started from this window still on the stack (busy_*) */
+    int close_pending;       /* WM_CLOSE arrived while busy                                      */
 } M;
 
 static wchar_t s_txt[1024];
 
 static const wchar_t *root_path(void) { return M.depth ? M.lv[0].h->path : L""; }
 static const wchar_t *cur_label(void) { return M.depth ? M.lv[M.depth - 1].label : L""; }
+
+/* ======================================================================
+ * operations started from the main window
+ *
+ * Opening (nested) archives, extracting, testing, viewing and every dialog run a
+ * modal loop owned by this window and use M.h / M.lv[] - and their worker threads
+ * use the handles - until they return. The window is disabled meanwhile, but
+ * posted messages still arrive: a WM_CLOSE (taskkill without /f, an installer, a
+ * close-window tool) handled then would destroy the modal window and free the
+ * archives under the operation. So while busy, WM_CLOSE only asks the running
+ * dialogs to cancel and the window closes when the operation has returned;
+ * commands, drops and activations that arrive meanwhile are ignored.
+ * ====================================================================== */
+
+static int busy_enter(void)
+{
+    if (M.busy) return 0;
+    M.busy = 1;
+    return 1;
+}
+
+static void busy_leave(void)
+{
+    M.busy = 0;
+    if (M.close_pending) {
+        M.close_pending = 0;
+        PostMessageW(M.hwnd, WM_CLOSE, 0, 0);
+    }
+}
+
+/* "Cancel" pressed in dialog w - once: a dialog that keeps running while its
+ * operation stops (the opener, the progress window) must not get a stream of them */
+static HWND s_cancelled[32];
+static u32 s_ncancelled;
+
+static void cancel_once(HWND w)
+{
+    for (u32 i = 0; i < GZ_COUNTOF(s_cancelled); i++) if (s_cancelled[i] == w) return;
+    s_cancelled[s_ncancelled++ % GZ_COUNTOF(s_cancelled)] = w;
+    PostMessageW(w, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), (LPARAM)GetDlgItem(w, IDCANCEL));
+}
+
+/* every dialog of this thread owned (directly or through another dialog) by the main
+ * window: the opener, the progress window, questions, message boxes, file dialogs.
+ * Each one ends its own operation the usual way. Dialogs that come up later and wait
+ * for the user (the result of a cancelled test) are cancelled from WM_ENTERIDLE. */
+static BOOL CALLBACK cancel_dialog(HWND w, LPARAM lp)
+{
+    wchar_t cls[16];
+    (void)lp;
+    if (w == M.hwnd || !GetClassNameW(w, cls, 16) || wcmp(cls, L"#32770")) return TRUE;
+    for (HWND o = GetWindow(w, GW_OWNER); o; o = GetWindow(o, GW_OWNER))
+        if (o == M.hwnd) { cancel_once(w); break; }
+    return TRUE;
+}
 
 /* ======================================================================
  * shell icons / type names, cached per extension
@@ -626,7 +683,7 @@ static LRESULT CALLBACK path_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         return 0;
     case WM_LBUTTONUP: {
         POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
-        if (!M.h) return 0;
+        if (!M.h || M.busy) return 0;
         if (PtInRect(&s_up_r, pt)) { PostMessageW(GetParent(h), WM_COMMAND, CMD_UP, 0); return 0; }
         for (int i = 0; i < s_nseg; i++) {
             if (!PtInRect(&s_seg_r[i], pt)) continue;
@@ -1037,7 +1094,13 @@ static int open_nested(u32 idx, int quiet_format)
 {
     if (!M.h || M.depth >= MAXNEST || idx >= M.h->arc->n) return 0;
     int err;
-    gz_handle *c = open_archive_ui(M.hwnd, 0, M.h, idx, g_set.codepage, &err);
+    gz_handle *parent = M.h;
+    gz_handle *c = open_archive_ui(M.hwnd, 0, parent, idx, g_set.codepage, &err);
+    if (M.h != parent) {
+        /* cannot happen (nothing closes levels while busy, see busy_enter): never touch a level
+         * that went away - not even through c, whose close would read its parent */
+        return 1;
+    }
     if (!c) {
         if (err == GZ_E_CANCEL) return 1;
         if (quiet_format && (err == GZ_E_FORMAT || err == GZ_E_TRUNC)) return 0;
@@ -1156,14 +1219,17 @@ static void cmd_new(void)
     mem_free(buf);
 }
 
-/* selection -> entry mask */
+/* selection -> entry mask: the selected files, and everything inside the selected
+ * folders (one pass over the folder tree and the entries, see selmask.c) */
 static int collect_selection(u8 **mask, int *count)
 {
     gz_archive *a = M.h->arc;
     *count = 0;
     *mask = 0;
     u8 *m = (u8 *)mem_alloc(a->n + 8);
-    if (!m) return 0;
+    i32 *dirs = (i32 *)mem_alloc(((size_t)M.nrows + 1) * sizeof(i32));
+    if (!m || !dirs) { mem_free(m); mem_free(dirs); return 0; }
+    u32 nd = 0;
     int i = -1, any = 0;
     while ((i = (int)SendMessageW(M.list, LVM_GETNEXTITEM, (WPARAM)i, LVNI_SELECTED)) >= 0) {
         if ((u32)i >= M.nrows) break;
@@ -1171,15 +1237,12 @@ static int collect_selection(u8 **mask, int *count)
         if (r->kind == 0) continue;
         any = 1;
         (*count)++;
-        if (r->kind == 2) { m[r->idx] = 1; continue; }
-        const wchar_t *fn = a->f[r->idx].name;
-        size_t fl = wlen(fn);
-        for (u32 k = 0; k < a->n; k++) {
-            const wchar_t *n = a->e[k].name;
-            if (prefix_ieq(n, fn, fl) && (n[fl] == '/' || n[fl] == 0)) m[k] = 1;
-        }
+        if (r->kind == 2) m[r->idx] = 1;
+        else if (nd <= M.nrows) dirs[nd++] = r->idx;
     }
-    if (!any) { mem_free(m); return 0; }
+    int ok = any && sel_mask_folders(a, dirs, nd, m) == GZ_OK;
+    mem_free(dirs);
+    if (!ok) { mem_free(m); return 0; }
     *mask = m;
     return 1;
 }
@@ -1189,9 +1252,9 @@ static void cmd_extract(int mode, int selected_only)
     if (!M.h) return;
     u8 *mask = 0;
     int nsel = 0;
-    collect_selection(&mask, &nsel);
+    /* the selection only matters to the dialog ("selected files only") and to "extract selected" */
+    if (mode == X_DIALOG || selected_only) collect_selection(&mask, &nsel);
     const wchar_t *strip = M.cur ? M.h->arc->f[M.cur].name : 0;
-    if (mode != X_DIALOG && !selected_only) { mem_free(mask); mask = 0; nsel = 0; }
     if (selected_only && !mask) { do_extract(M.hwnd, M.h, root_path(), mode, 0, 0, 0, 0); return; }
     do_extract(M.hwnd, M.h, root_path(), mode, 0, mask, strip, nsel);
     mem_free(mask);
@@ -1266,12 +1329,13 @@ static void view_entry(u32 idx)
 /* archives inside open as a new level; everything else in its own program */
 static void open_entry(u32 idx, int force_inside)
 {
-    gz_archive *a = M.h->arc;
+    gz_handle *h = M.h;
+    gz_archive *a = h->arc;
     if (idx >= a->n || a->e[idx].is_dir) return;
     int inside = force_inside || is_archive_name(a->e[idx].base, 1) ||
                  (a->fmt && (a->fmt->flags & GZ_FMT_CONTAINER));
     if (inside && open_nested(idx, !force_inside)) return;
-    if (!force_inside) view_entry(idx);
+    if (!force_inside && M.h == h) view_entry(idx);     /* the level is still the one shown */
 }
 
 static void delete_tree(const wchar_t *dir)
@@ -1533,11 +1597,17 @@ static LRESULT on_notify(NMHDR *nh)
             list_dispinfo((NMLVDISPINFOW *)nh);
             return 0;
         case LVN_ITEMACTIVATE:
-            activate_row(((NMITEMACTIVATE *)nh)->iItem, 0);
+            if (busy_enter()) {
+                activate_row(((NMITEMACTIVATE *)nh)->iItem, 0);
+                busy_leave();
+            }
             return 0;
         case LVN_KEYDOWN: {
             NMLVKEYDOWN *k = (NMLVKEYDOWN *)nh;
-            if (k->wVKey == VK_BACK) go_up();
+            if (k->wVKey == VK_BACK && busy_enter()) {
+                go_up();
+                busy_leave();
+            }
             return 0;
         }
         case LVN_COLUMNCLICK: {
@@ -1619,6 +1689,62 @@ static int focused_or_selected(void)
     return i;
 }
 
+static void on_command(HWND h, WPARAM wp, LPARAM lp)
+{
+    int id = LOWORD(wp);
+    if (id >= CMD_RECENT0 && id < CMD_RECENT0 + 6) {
+        wchar_t p[MAX_PATH];
+        wcopy(p, g_set.recent[id - CMD_RECENT0], MAX_PATH);
+        if (p[0]) open_archive(p);
+        return;
+    }
+    if (id >= CMD_CP0 && id < CMD_CP0 + g_cp_count) { set_codepage(g_cp_list[id - CMD_CP0].cp); return; }
+    switch (id) {
+    case CMD_NEW: cmd_new(); break;
+    case CMD_OPEN: cmd_open(); break;
+    case CMD_WELCOME_EXTRACT:
+        cmd_open();
+        if (M.h) cmd_extract(X_DIALOG, 0);
+        break;
+    case CMD_CLOSE: close_archive(); break;
+    case CMD_EXIT: PostMessageW(h, WM_CLOSE, 0, 0); break;
+    case CMD_INFO: dlg_info(h, M.h); break;
+    case CMD_EXTRACT: cmd_extract(X_DIALOG, 0); break;
+    case CMD_SMART: cmd_extract(X_SMART, 0); break;
+    case CMD_HERE: cmd_extract(X_HERE, 0); break;
+    case CMD_EXTRACT_SEL: cmd_extract(X_DIALOG, 1); break;
+    case CMD_TEST: if (M.h) do_extract(h, M.h, root_path(), X_TEST, 0, 0, 0, 0); break;
+    case CMD_VIEW: if (M.h) activate_row(focused_or_selected(), 0); break;
+    case CMD_OPENINSIDE: if (M.h) activate_row(focused_or_selected(), 1); break;
+    case CMD_UP: go_up(); break;
+    case CMD_SELALL:
+        if (M.h) { ListView_SetItemState(M.list, -1, LVIS_SELECTED, LVIS_SELECTED); SetFocus(M.list); }
+        break;
+    case CMD_TREE: g_set.show_tree = !g_set.show_tree; layout(); break;
+    case CMD_SETTINGS: {
+        int cp = g_set.codepage;
+        dlg_settings(h);
+        if (cp != g_set.codepage) set_codepage(g_set.codepage);
+        InvalidateRect(M.status, NULL, FALSE);
+        InvalidateRect(M.welcome, NULL, FALSE);
+        break;
+    }
+    case CMD_BENCH: dlg_bench(h); break;
+    case CMD_HOME: ShellExecuteW(h, L"open", GZ_HOMEPAGE, NULL, NULL, SW_SHOWNORMAL); break;
+    case CMD_ABOUT: dlg_about(h); break;
+    case CMD_CODEPAGE: {
+        refresh_cp_menu();
+        int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        if (HIWORD(wp) != 1) { POINT pt; GetCursorPos(&pt); x = pt.x; y = pt.y; }
+        /* the choice is returned (not posted: a command posted now would arrive while busy) */
+        int c = (int)TrackPopupMenu(M.cp_menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
+                                    x, y, 0, h, NULL);
+        if (c >= CMD_CP0 && c < CMD_CP0 + g_cp_count) set_codepage(g_cp_list[c - CMD_CP0].cp);
+        break;
+    }
+    }
+}
+
 static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
     switch (m) {
@@ -1672,7 +1798,12 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         if (wp == 7) { KillTimer(h, 7); update_status(); }
         return 0;
     case WM_DROPFILES:
-        on_drop((HDROP)wp);
+        if (busy_enter()) {
+            on_drop((HDROP)wp);
+            busy_leave();
+        } else {
+            DragFinish((HDROP)wp);
+        }
         return 0;
     case WM_INITMENUPOPUP: {
         HMENU pm = (HMENU)wp;
@@ -1683,59 +1814,23 @@ static LRESULT CALLBACK main_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         CheckMenuItem(pm, CMD_TREE, MF_BYCOMMAND | (g_set.show_tree ? MF_CHECKED : MF_UNCHECKED));
         return 0;
     }
-    case WM_COMMAND: {
-        int id = LOWORD(wp);
-        if (id >= CMD_RECENT0 && id < CMD_RECENT0 + 6) {
-            wchar_t p[MAX_PATH];
-            wcopy(p, g_set.recent[id - CMD_RECENT0], MAX_PATH);
-            if (p[0]) open_archive(p);
-            return 0;
-        }
-        if (id >= CMD_CP0 && id < CMD_CP0 + g_cp_count) { set_codepage(g_cp_list[id - CMD_CP0].cp); return 0; }
-        switch (id) {
-        case CMD_NEW: cmd_new(); break;
-        case CMD_OPEN: cmd_open(); break;
-        case CMD_WELCOME_EXTRACT:
-            cmd_open();
-            if (M.h) cmd_extract(X_DIALOG, 0);
-            break;
-        case CMD_CLOSE: close_archive(); break;
-        case CMD_EXIT: PostMessageW(h, WM_CLOSE, 0, 0); break;
-        case CMD_INFO: dlg_info(h, M.h); break;
-        case CMD_EXTRACT: cmd_extract(X_DIALOG, 0); break;
-        case CMD_SMART: cmd_extract(X_SMART, 0); break;
-        case CMD_HERE: cmd_extract(X_HERE, 0); break;
-        case CMD_EXTRACT_SEL: cmd_extract(X_DIALOG, 1); break;
-        case CMD_TEST: if (M.h) do_extract(h, M.h, root_path(), X_TEST, 0, 0, 0, 0); break;
-        case CMD_VIEW: if (M.h) activate_row(focused_or_selected(), 0); break;
-        case CMD_OPENINSIDE: if (M.h) activate_row(focused_or_selected(), 1); break;
-        case CMD_UP: go_up(); break;
-        case CMD_SELALL:
-            if (M.h) { ListView_SetItemState(M.list, -1, LVIS_SELECTED, LVIS_SELECTED); SetFocus(M.list); }
-            break;
-        case CMD_TREE: g_set.show_tree = !g_set.show_tree; layout(); break;
-        case CMD_SETTINGS: {
-            int cp = g_set.codepage;
-            dlg_settings(h);
-            if (cp != g_set.codepage) set_codepage(g_set.codepage);
-            InvalidateRect(M.status, NULL, FALSE);
-            InvalidateRect(M.welcome, NULL, FALSE);
-            break;
-        }
-        case CMD_BENCH: dlg_bench(h); break;
-        case CMD_HOME: ShellExecuteW(h, L"open", GZ_HOMEPAGE, NULL, NULL, SW_SHOWNORMAL); break;
-        case CMD_ABOUT: dlg_about(h); break;
-        case CMD_CODEPAGE: {
-            refresh_cp_menu();
-            int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
-            if (HIWORD(wp) != 1) { POINT pt; GetCursorPos(&pt); x = pt.x; y = pt.y; }
-            TrackPopupMenu(M.cp_menu, TPM_LEFTALIGN | TPM_TOPALIGN, x, y, 0, h, NULL);
-            break;
-        }
+    case WM_COMMAND:
+        if (busy_enter()) {          /* else posted while an operation runs: ignored */
+            on_command(h, wp, lp);
+            busy_leave();
         }
         return 0;
-    }
+    case WM_ENTERIDLE:
+        /* a dialog of this window waits for input while the close waits for its operation */
+        if (M.close_pending && wp == MSGF_DIALOGBOX && lp) cancel_once((HWND)lp);
+        break;
     case WM_CLOSE:
+        if (M.busy) {
+            /* an operation still uses the archives: stop it, close when it has returned */
+            M.close_pending = 1;
+            EnumThreadWindows(GetCurrentThreadId(), cancel_dialog, 0);
+            return 0;
+        }
         save_window();
         DestroyWindow(h);
         return 0;
@@ -1820,7 +1915,10 @@ HWND mainwnd_create(const wchar_t *open_path, int show)
     if (!h) return 0;
     ShowWindow(h, g_set.win_max ? SW_SHOWMAXIMIZED : show);
     UpdateWindow(h);
-    if (open_path && open_path[0]) open_archive(open_path);
+    if (open_path && open_path[0] && busy_enter()) {
+        open_archive(open_path);
+        busy_leave();                 /* a WM_CLOSE that came meanwhile is posted again */
+    }
     return h;
 }
 
