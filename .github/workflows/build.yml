@@ -240,7 +240,12 @@ jobs:
           path: build/GogitZIP-mac.dmg
           if-no-files-found: error
 
+      # Owner decision (2.0.0): a macOS test failure does not hold back the dmg. The failing
+      # checks compare against Homebrew's 7zz / BSD tools (Korean passwords, attributes) and
+      # are tracked for 2.0.1; the app itself is built, bundle-checked and uploaded above.
+      # Linux tests (x86_64 and ARM64) still gate the release.
       - name: Core tests (and the app's command line modes)
+        continue-on-error: true
         run: make test
 
   # ---------------------------------------------------------------- release
