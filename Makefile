@@ -5,7 +5,8 @@
 #   make cli        -> build/gogitzip (portable command line tool, this machine)
 #   make linux      -> build/linux/gogitzip-gtk (GTK 3 GUI) + build/gogitzip
 #   make install    -> Linux: programs, launcher, MIME package, icons (PREFIX=/usr/local, DESTDIR=)
-#   make mac        -> build/mac/GogitZIP.app (on macOS, universal x86_64 + arm64)
+#   make mac        -> build/mac/GogitZIP.app (on macOS, universal x86_64 + arm64) + build/gogitzip
+#   make dmg        -> build/GogitZIP-mac.dmg (on macOS)
 #
 # Sources: src/core (model, crypto, CPU dispatch), src/codec (compression codecs),
 # src/fmt (archive formats and writers), src/win (Windows UI), src/posix (Linux/macOS
@@ -178,6 +179,68 @@ uninstall:
 	  $(SHARE)/metainfo/gogitzip.metainfo.xml
 	for s in $(ICON_SIZES); do rm -f $(SHARE)/icons/hicolor/$${s}x$${s}/apps/gogitzip.png; done
 
+# ---- macOS Cocoa front end (on macOS, Xcode command line tools; see docs/BUILD-mac.md) ----
+# One universal build: the arm64 slice gets macOS 11 as its minimum automatically (the first
+# release on Apple silicon). Objects live in build/mac/obj (not build/host: test drivers link
+# every build/host object). The bundle is signed ad hoc (MACSIGN="Developer ID ..." to sign).
+MACCC    ?= clang
+MACARCHS ?= -arch x86_64 -arch arm64
+MACMIN   ?= -mmacosx-version-min=10.13
+MACOPT   ?= -O2
+MACSIGN  ?= -
+MACFLAGS  = -std=gnu11 $(WARN) -finput-charset=UTF-8 $(INC) $(MACARCHS) $(MACMIN) $(MACOPT)
+# Objective-C: ARC; no -Isrc/app (its strings.h must not shadow the SDK's <strings.h>)
+MACMFLAGS = -x objective-c -std=gnu11 -fobjc-arc $(WARN) -Isrc/core -Isrc/codec -Isrc/fmt \
+            $(MACARCHS) $(MACMIN) -Os
+MACLIBS  := -framework Cocoa -framework CoreGraphics -framework CoreServices -lobjc -liconv
+MACCORE  := $(patsubst src/%.c,$(B)/mac/obj/%.o,$(CORE) $(POSIX) $(filter-out src/app/cli.c,$(APP))) \
+            $(B)/mac/obj/gen/registry.o
+MACSRC   := $(sort $(wildcard src/mac/*.m))
+MACOBJ   := $(patsubst src/mac/%.m,$(B)/mac/obj/mac/%.o,$(MACSRC))
+MACHDRS  := $(wildcard src/mac/*.h) src/win/asset_ids.h
+MACAPP   := $(B)/mac/GogitZIP.app
+MACVER    = $(shell sed -n 's/^\#define GZ_APP_VERSION "\(.*\)"/\1/p' src/app/engine.h)
+
+$(B)/mac/obj/gen/registry.o: $(REG) $(HDRS)
+	@mkdir -p $(dir $@)
+	$(MACCC) $(MACFLAGS) -c $< -o $@
+$(B)/mac/obj/mac/%.o: src/mac/%.m $(HDRS) $(MACHDRS)
+	@mkdir -p $(dir $@)
+	$(MACCC) $(MACMFLAGS) -c $< -o $@
+$(B)/mac/obj/%.o: src/%.c $(HDRS)
+	@mkdir -p $(dir $@)
+	$(MACCC) $(MACFLAGS) -c $< -o $@
+# (file names differ by more than case: macOS file systems usually ignore case)
+$(B)/mac/obj/GogitZIP-app: $(MACOBJ) $(MACCORE)
+	$(MACCC) $(MACARCHS) $(MACMIN) -o $@ $(MACOBJ) $(MACCORE) $(MACLIBS)
+$(B)/mac/obj/gogitzip-cli: src/app/cli.c $(MACCORE)
+	$(MACCC) $(MACFLAGS) -o $@ src/app/cli.c $(MACCORE) -liconv
+
+# GogitZIP.app: Info.plist (version from engine.h), icons, localizations, the icon atlas,
+# the command line tool in Contents/Helpers; signed inside out
+mac: $(B)/mac/obj/GogitZIP-app $(B)/mac/obj/gogitzip-cli $(B)/gogitzip
+	rm -rf $(MACAPP)
+	mkdir -p $(MACAPP)/Contents/MacOS $(MACAPP)/Contents/Helpers $(MACAPP)/Contents/Resources
+	sed 's/@VERSION@/$(MACVER)/g' data/mac/Info.plist > $(MACAPP)/Contents/Info.plist
+	printf 'APPL????' > $(MACAPP)/Contents/PkgInfo
+	cp $(B)/mac/obj/GogitZIP-app $(MACAPP)/Contents/MacOS/GogitZIP
+	cp $(B)/mac/obj/gogitzip-cli $(MACAPP)/Contents/Helpers/gogitzip
+	cp data/mac/AppIcon.icns data/mac/ArchiveIcon.icns res/assets.bin $(MACAPP)/Contents/Resources/
+	cp -R data/mac/en.lproj data/mac/ko.lproj $(MACAPP)/Contents/Resources/
+	plutil -lint $(MACAPP)/Contents/Info.plist
+	codesign --force --sign "$(MACSIGN)" $(MACAPP)/Contents/Helpers/gogitzip
+	codesign --force --sign "$(MACSIGN)" $(MACAPP)
+	codesign --verify --strict $(MACAPP)
+
+# disk image: the app and a link to /Applications (HFS+, zlib: opens on every supported macOS)
+dmg: mac
+	rm -rf $(B)/mac/dmg $(B)/GogitZIP-mac.dmg
+	mkdir -p $(B)/mac/dmg
+	ditto $(MACAPP) $(B)/mac/dmg/GogitZIP.app
+	ln -s /Applications $(B)/mac/dmg/Applications
+	hdiutil create -volname GogitZIP -srcfolder $(B)/mac/dmg -fs HFS+ -format UDZO -imagekey zlib-level=9 \
+	  -ov $(B)/GogitZIP-mac.dmg
+
 ICORE := src/core/cpu.c src/core/crc32.c src/codec/inflate.c src/core/crypto.c src/core/stream.c \
          src/core/crc64.c src/core/sha1.c src/core/sha256.c src/core/aes.c src/core/blake2.c
 $(B)/test_inflate: tests/test_inflate.c $(ICORE) $(HDRS)
@@ -198,4 +261,4 @@ assets:
 clean:
 	rm -rf $(B)
 
-.PHONY: all win cli linux install uninstall test assets clean clean-host
+.PHONY: all win cli linux mac dmg install uninstall test assets clean clean-host
