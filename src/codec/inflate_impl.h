@@ -201,7 +201,8 @@ GZV_ATTR int GZV_FN(gz_inflater *z, const gz_stream_io *io)
             }
         } else if (type == 2) {
             /* ---- dynamic Huffman ---- */
-            static const u8 ord[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+            static const u8 std_ord[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+            const u8 *ord = z->pre_ord ? z->pre_ord : std_ord;
             u8 pl[19];
             u8 *l = z->lens;
             u32 i;

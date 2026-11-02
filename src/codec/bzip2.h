@@ -46,6 +46,13 @@ int gz_bzip2_decode(gz_bzip2_dec *d, const gz_stream_io *io, u64 out_size, int m
  * Same return values and in_used semantics as gz_bzip2_decode. */
 int gz_bzip2_decode_nsis(gz_bzip2_dec *d, const gz_stream_io *io, u64 out_size, u64 *in_used);
 
+/* ALZip variant (.alz method 1, ALZip 4.x; see unalz's UnAlzBz2decompress.c): the
+ * NSIS layout, but each block starts with the 32-bit marker "DLZ\x01" and the stream
+ * ends with "DLZ\x02" (both MSB first, not byte aligned). No "BZh" header, no CRCs,
+ * no randomized bit, 900k blocks. Same return values and in_used semantics as
+ * gz_bzip2_decode_nsis. */
+int gz_bzip2_decode_alz(gz_bzip2_dec *d, const gz_stream_io *io, u64 out_size, u64 *in_used);
+
 /* bzip2's CRC-32 (polynomial 0x04C11DB7, MSB first). tab is filled by
  * gz_bzip2_crc_table; crc starts at 0xFFFFFFFF and is inverted at the end. */
 void gz_bzip2_crc_table(u32 tab[8][256]);
