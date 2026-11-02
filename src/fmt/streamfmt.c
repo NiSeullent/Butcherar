@@ -1,10 +1,12 @@
 /*
- * 고깃ZIP - shared code for single-stream compressed files and tarballs inside them
+ * 고깃ZIP - shared code for single-stream compressed files and tarballs / cpio
+ * archives inside them
  */
 #include "streamfmt.h"
 #include "tar.h"
+#include "cpio.h"
 
-typedef struct { int is_tar; } sfmt_priv;
+typedef struct { int is_tar, is_cpio; } sfmt_priv;
 
 static const gz_stream_codec *codec_of(const gz_archive *a)
 {
@@ -114,6 +116,25 @@ int gz_sfmt_open(gz_archive *a, gz_src *s, const gz_open_opts *o, gz_ctx *c)
         a->raw_len = 0;
     }
 
+    /* a cpio archive (.cpio.gz, initramfs, macOS Payload): "CPIO.GZ" etc. */
+    if (gz_cpio_magic(pk, peek.n)) {
+        prog_src ps = { { prog_read, s->size, 0, 0 }, s, c, 0 };
+        r = gz_cpio_list_stream(a, &ps.s, codec->decode, c);
+        if (r == GZ_E_CANCEL || r == GZ_E_NOMEM) return r;
+        if (!r && a->n > 0) {
+            char tn[40] = "CPIO";
+            const char *x = codec->tar_name ? codec->tar_name : "";
+            if (x[0] == 'T' && x[1] == 'A' && x[2] == 'R') x += 3;
+            for (u32 i = 4; *x && i + 1 < sizeof tn; i++) tn[i] = *x++;
+            pv->is_cpio = 1;
+            a->solid = 1;
+            gz_arc_set_type(a, tn);
+            return GZ_OK;
+        }
+        a->n = 0;
+        a->raw_len = 0;
+    }
+
     /* a single compressed file */
     gz_stream_info inf;
     __builtin_memset(&inf, 0, sizeof inf);
@@ -148,7 +169,7 @@ static int single_write(void *u, const u8 *p, size_t n)
 int gz_sfmt_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, gz_ctx *c)
 {
     sfmt_priv *pv = (sfmt_priv *)a->priv;
-    if (pv->is_tar) {
+    if (pv->is_tar || pv->is_cpio) {
         /* random access is impossible: decode up to the entry */
         u8 *sel = (u8 *)gz_alloc(a->n + 1);
         if (!sel) return GZ_E_NOMEM;
@@ -170,6 +191,7 @@ int gz_sfmt_extract(gz_archive *a, gz_src *s, u32 idx, gz_out *out, gz_ctx *c)
 int gz_sfmt_extract_solid(gz_archive *a, gz_src *s, const u8 *sel, gz_out *out, gz_ctx *c)
 {
     sfmt_priv *pv = (sfmt_priv *)a->priv;
+    if (pv->is_cpio) return gz_cpio_extract_stream(a, s, codec_of(a)->decode, sel, out, c);
     if (!pv->is_tar) return sel[0] ? gz_sfmt_extract(a, s, 0, out, c) : GZ_OK;
     gz_tar_parser *t = gz_tar_parser_new(a, sel, out, c);
     if (!t) return GZ_E_NOMEM;
