@@ -255,10 +255,19 @@ test: $(B)/test_inflate $(B)/gzt $(B)/gogitzip
 clean-host:
 	rm -rf $(B)/host $(B)/gzt $(B)/gogitzip $(B)/test_inflate $(B)/linux
 
+# ---- libFuzzer harness over every format (clang + compiler-rt) ----
+FUZZCC ?= clang
+FUZZFLAGS := -std=gnu11 -O1 -g -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
+             -fno-sanitize-recover=undefined -finput-charset=UTF-8 -pthread $(INC)
+$(B)/fuzz/fuzz_arc: tests/fuzz/fuzz_arc.c $(CORE) $(POSIX) $(REG) $(HDRS)
+	@mkdir -p $(dir $@)
+	$(FUZZCC) $(FUZZFLAGS) -o $@ tests/fuzz/fuzz_arc.c $(CORE) $(POSIX) $(REG) -pthread $(if $(filter Darwin,$(shell uname -s)),-liconv,)
+fuzz: $(B)/fuzz/fuzz_arc
+
 assets:
 	python3 tools/gen_assets.py
 
 clean:
 	rm -rf $(B)
 
-.PHONY: all win cli linux mac dmg install uninstall test assets clean clean-host
+.PHONY: all win cli linux mac dmg install uninstall test assets clean clean-host fuzz
