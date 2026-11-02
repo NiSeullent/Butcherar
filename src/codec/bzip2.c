@@ -1,5 +1,5 @@
 /*
- * 고깃ZIP - BZip2 decoder (standard streams + the NSIS variant)
+ * 고깃ZIP - BZip2 decoder (standard streams + the NSIS and ALZip variants)
  *
  * Block pipeline:
  *   1. header: symbol map, Huffman tables (2..6), selectors
@@ -568,6 +568,8 @@ static int emit_block(gz_bzip2_dec *d, const u8 *s, u32 n, u32 *pcrc)
 
 /* ---------------- streams ---------------- */
 
+/* variant: 0 standard, 1 NSIS (8-bit block markers), 2 ALZip ("DLZ\1" / "DLZ\2" 32-bit
+ * markers); the headerless variants have no CRCs, no randomized bit and 900k blocks */
 static int dec_run(gz_bzip2_dec *d, const gz_stream_io *io, u64 out_size, int multi, int nsis, u64 *in_used)
 {
     d->io = io;
@@ -610,7 +612,12 @@ static int dec_run(gz_bzip2_dec *d, const gz_stream_io *io, u64 out_size, int mu
         for (;;) {
             int is_end;
             u32 crc = 0;
-            if (nsis) {
+            if (nsis == 2) {
+                if ((r = getbits(d, 32, &v))) return r;
+                if (overrun(d)) return GZ_E_TRUNC;
+                if (v != 0x444C5A01u && v != 0x444C5A02u) return GZ_E_DATA;
+                is_end = v == 0x444C5A02u;
+            } else if (nsis) {
                 if ((r = getbits(d, 8, &v))) return r;
                 if (overrun(d)) return GZ_E_TRUNC;
                 if (v != 0x31 && v != 0x17) return GZ_E_DATA;
@@ -670,4 +677,9 @@ int gz_bzip2_decode(gz_bzip2_dec *d, const gz_stream_io *io, u64 out_size, int m
 int gz_bzip2_decode_nsis(gz_bzip2_dec *d, const gz_stream_io *io, u64 out_size, u64 *in_used)
 {
     return dec_run(d, io, out_size, 0, 1, in_used);
+}
+
+int gz_bzip2_decode_alz(gz_bzip2_dec *d, const gz_stream_io *io, u64 out_size, u64 *in_used)
+{
+    return dec_run(d, io, out_size, 0, 2, in_used);
 }

@@ -41,6 +41,7 @@ typedef struct gz_inflater {
     const u8 *rest;
     u32 rest_len;
     int nsis;            /* stored blocks without NLEN (gz_inflate_run_nsis) */
+    const u8 *pre_ord;   /* code length code order (gz_inflate_run_order), NULL = RFC 1951 */
 } gz_inflater;
 
 gz_inflater *gz_inflater_new(void);
@@ -59,6 +60,11 @@ int gz_inflate_run_nsis(gz_inflater *z, const gz_stream_io *io);
  * block's window. Only the new data is pushed, CRC'ed and counted in total_out. */
 #define GZ_INFLATE_DICT_MAX 32768u
 int gz_inflate_run_dict(gz_inflater *z, const gz_stream_io *io, const u8 *dict, u32 dict_len);
+
+/* Deflate with a non-standard order of the code length code lengths in dynamic
+ * block headers (ALZip "obfuscated deflate", .alz method 3). ord: a permutation of
+ * 0..18 that replaces RFC 1951's 16, 17, 18, 0, 8, ... Otherwise gz_inflate_run(z, io, 0). */
+int gz_inflate_run_order(gz_inflater *z, const gz_stream_io *io, const u8 ord[19]);
 
 /* Copy a stored stream (no compression) with CRC, using the inflater's buffer. */
 int gz_store_run(gz_inflater *z, const gz_stream_io *io);
