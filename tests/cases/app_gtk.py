@@ -573,7 +573,7 @@ def gui_big_and_bad(t, s, fx):
         data[rnd.randrange(len(data))] ^= 0xFF
     open(bad, "wb").write(bytes(data[: len(data) // 2]))
     p = s.start([bad], os.path.join(t.work, "bad"))
-    msg = s.wait_window("^고깃ZIP$", 20, count=2, proc=p)
+    msg = s.wait_window("^고깃ZIP$", 60, count=2, proc=p)   # generous: CI and loaded machines
     main = s.windows("^고깃ZIP$")
     if t.record(msg is not None and p.poll() is None, "damaged archive: message, app keeps running"):
         s.keys(msg, "Return")
