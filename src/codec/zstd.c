@@ -660,6 +660,9 @@ static int z_literals(gz_zstd_dec *d, const u8 *ip, size_t n, size_t *used, cons
         hl = 5; rs = (size_t)(h >> 4) & 0x3FFFF; cs = (size_t)(h >> 22) & 0x3FFFF;
     }
     if (rs > ZB_MAX || cs > n - hl) return GZ_E_DATA;
+    /* four streams need at least 6 literals (reference decoder:
+     * MIN_LITERALS_FOR_4_STREAMS); smaller sections are malformed */
+    if (sf && rs < 6) return GZ_E_DATA;
     const u8 *src = ip + hl;
     size_t sn = cs;
     if (type == 2) {
