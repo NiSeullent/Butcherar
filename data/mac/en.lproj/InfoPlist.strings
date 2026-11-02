@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>GogitZIP</string>
+	<key>CFBundleName</key>
+	<string>GogitZIP</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Butcherar project. Free software under the MIT license.</string>
+</dict>
+</plist>
