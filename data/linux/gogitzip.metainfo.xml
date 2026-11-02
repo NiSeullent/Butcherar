@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>gogitzip</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>GogitZIP</name>
+  <name xml:lang="ko">고깃ZIP</name>
+  <summary>Lightweight, fast archive manager</summary>
+  <summary xml:lang="ko">가볍고 빠른 압축 프로그램</summary>
+  <description>
+    <p>
+      GogitZIP opens, tests and extracts ZIP, TAR, GZIP, BZIP2, ZSTD, ISO, CAB and many more
+      archive and disk image formats, and creates new archives. Korean file names from old
+      Windows archives (CP949) are detected automatically.
+    </p>
+    <p xml:lang="ko">
+      고깃ZIP은 ZIP, TAR, GZIP, BZIP2, ZSTD, ISO, CAB 등 여러 압축 파일과 디스크 이미지를 열고,
+      검사하고, 풀고, 새로 만듭니다. 옛 Windows 압축 파일의 한글 이름(CP949)도 자동으로 알아봅니다.
+    </p>
+  </description>
+  <launchable type="desktop-id">gogitzip.desktop</launchable>
+  <url type="homepage">https://niseullent.github.io/Butcherar/</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://niseullent.github.io/Butcherar/assets/screens/linux-main.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>gogitzip-gtk</binary>
+    <binary>gogitzip</binary>
+  </provides>
+</component>
