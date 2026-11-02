@@ -9,23 +9,40 @@
   <summary xml:lang="ko">가볍고 빠른 압축 프로그램</summary>
   <description>
     <p>
-      GogitZIP opens, tests and extracts ZIP, TAR, GZIP, BZIP2, ZSTD, ISO, CAB and many more
-      archive and disk image formats, and creates new archives. Korean file names from old
-      Windows archives (CP949) are detected automatically.
+      GogitZIP opens, tests and extracts more than 50 archive, installer, disk image and file
+      system formats (ZIP, 7z, RAR, ALZ, EGG, TAR, GZIP, XZ, ZSTD, CAB, MSI, ISO, DMG, VHD,
+      WIM, SquashFS, NTFS ...) and creates ZIP, 7z, TAR, GZIP, BZIP2, XZ, ZSTD and ISO files,
+      with AES-256 encryption. Korean file names from old Windows archives (CP949) are
+      detected automatically.
     </p>
     <p xml:lang="ko">
-      고깃ZIP은 ZIP, TAR, GZIP, BZIP2, ZSTD, ISO, CAB 등 여러 압축 파일과 디스크 이미지를 열고,
-      검사하고, 풀고, 새로 만듭니다. 옛 Windows 압축 파일의 한글 이름(CP949)도 자동으로 알아봅니다.
+      고깃ZIP은 ZIP, 7z, RAR, ALZ, EGG, TAR, GZIP, XZ, ZSTD, CAB, MSI, ISO, DMG, VHD, WIM,
+      SquashFS, NTFS 등 50가지가 넘는 압축 파일, 설치 파일, 디스크 이미지, 파일 시스템을 열고,
+      검사하고, 풉니다. ZIP, 7z, TAR, GZIP, BZIP2, XZ, ZSTD, ISO 파일을 AES-256 암호와 함께
+      새로 만들 수 있고, 옛 Windows 압축 파일의 한글 이름(CP949)도 자동으로 알아봅니다.
     </p>
   </description>
   <launchable type="desktop-id">gogitzip.desktop</launchable>
   <url type="homepage">https://niseullent.github.io/Butcherar/</url>
+  <url type="bugtracker">https://github.com/NiSeullent/Butcherar/issues</url>
+  <url type="vcs-browser">https://github.com/NiSeullent/Butcherar</url>
+  <developer id="io.github.niseullent">
+    <name>Butcherar project</name>
+  </developer>
   <screenshots>
     <screenshot type="default">
       <image>https://niseullent.github.io/Butcherar/assets/screens/linux-main.png</image>
     </screenshot>
   </screenshots>
   <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="2.0.0" date="2026-11-02">
+      <description>
+        <p>Linux and macOS apps, more than 50 readable formats, archive creation (ZIP, 7z, TAR, GZIP, BZIP2, XZ, ZSTD, ISO) and AES-256 encryption.</p>
+      </description>
+    </release>
+    <release version="1.0.0" date="2026-11-01"/>
+  </releases>
   <provides>
     <binary>gogitzip-gtk</binary>
     <binary>gogitzip</binary>

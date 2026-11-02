@@ -46,7 +46,7 @@ the include path (as in the C builds); the mac sources include it by relative pa
 
 ```
 GogitZIP.app/Contents/
-  Info.plist                 data/mac/Info.plist with @VERSION@ = GZ_APP_VERSION (src/app/engine.h)
+  Info.plist                 data/mac/Info.plist with @VERSION@ = GZ_APP_VERSION (src/core/version.h)
   PkgInfo
   MacOS/GogitZIP             the app (universal)
   Helpers/gogitzip           the command line tool (src/app/cli.c, universal)

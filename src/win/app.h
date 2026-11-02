@@ -40,8 +40,10 @@
 #include "strings.h"
 #include "asset_ids.h"
 
-#define GZ_VERSION_W   L"1.0.0"
-#define GZ_VERSION_A   "1.0.0"
+#define GZ_WIDEN_(s)   L##s
+#define GZ_WIDEN(s)    GZ_WIDEN_(s)
+#define GZ_VERSION_W   GZ_WIDEN(GZ_APP_VERSION)   /* src/core/version.h */
+#define GZ_VERSION_A   GZ_APP_VERSION
 #define GZ_HOMEPAGE    L"https://niseullent.github.io/Butcherar/"
 #define GZ_REGKEY      L"Software\\GogitZIP"
 
