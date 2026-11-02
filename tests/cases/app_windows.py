@@ -520,6 +520,10 @@ def run_wine(t, w):
     elif len(made) == 1 and made[0].endswith(".zip"):          # default format once a ZIP writer exists
         with zipfile.ZipFile(os.path.join(multi, made[0])) as zf:
             names = sorted(zf.namelist()) if zf.testzip() is None else []
+    elif len(made) == 1 and made[0].endswith(".7z") and shutil.which("7z"):    # ... or a 7z writer
+        lst = subprocess.run(["7z", "l", "-slt", os.path.join(multi, made[0])], capture_output=True)
+        body = lst.stdout.decode("utf-8", "replace").split("\n----------\n", 1)[-1]
+        names = sorted(l[7:].strip() for l in body.splitlines() if l.startswith("Path = "))
     t.record(win is not None and rcs == [0, 0, 0] and names == ["a.txt", "b.txt", "c 다.txt"],
              "/add from 3 processes (Explorer multi-selection) -> one archive", "rc=%s made=%s names=%s" %
              (rcs, made, names))
