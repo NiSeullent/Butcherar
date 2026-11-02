@@ -1,5 +1,7 @@
 #!/bin/sh
 # Nautilus script: extract the selected archives next to them.
 # Install: copy to ~/.local/share/nautilus/scripts/ and chmod +x (see data/linux/README.md).
+# Nautilus passes the selection as names relative to the folder shown: "--" keeps a name
+# such as "-y" or "-photos.zip" from being read as an option.
 [ $# -gt 0 ] || exit 0
-exec gogitzip-gtk --extract-here "$@"
+exec gogitzip-gtk --extract-here -- "$@"

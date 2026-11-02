@@ -17,7 +17,8 @@ The readable extensions are collected from the format modules (src/fmt/*.c,
 the second string of every gz_format / GZ_STREAM_FORMAT definition).
 
   python3 tools/gen_linux_data.py            regenerate
-  python3 tools/gen_linux_data.py --check    exit 1 when a generated text file is stale
+  python3 tools/gen_linux_data.py --check    exit 1 when a generated text file is stale, or when
+                                             a readable extension is in neither EXT_MIME nor DOCS
 """
 import os, re, sys
 
@@ -30,6 +31,10 @@ EXT_MIME = [
     ("zipx", ["application/zip"]),
     ("7z", ["application/x-7z-compressed"]),
     ("rar", ["application/vnd.rar", "application/x-rar"]),
+    ("r00", ["application/x-rar-volume"]),
+    ("alz", ["application/x-alz"]),
+    ("egg", ["application/x-egg"]),
+    ("001", ["application/x-split-archive"]),
     ("tar", ["application/x-tar"]),
     ("gz", ["application/gzip", "application/x-gzip"]),
     ("gzip", ["application/gzip"]),
@@ -51,6 +56,7 @@ EXT_MIME = [
     ("lz4", ["application/x-lz4"]),
     ("tlz4", ["application/x-lz4-compressed-tar"]),
     ("lzo", ["application/x-lzop"]),
+    ("tzo", ["application/x-tzo"]),
     ("z", ["application/x-compress"]),
     ("cab", ["application/vnd.ms-cab-compressed"]),
     ("iso", ["application/x-cd-image", "application/x-iso9660-image"]),
@@ -62,6 +68,8 @@ EXT_MIME = [
     ("cpio", ["application/x-cpio"]),
     ("rpm", ["application/x-rpm"]),
     ("deb", ["application/vnd.debian.binary-package", "application/x-deb"]),
+    ("udeb", ["application/vnd.debian.binary-package"]),
+    ("ipk", ["application/x-ipk"]),
     ("ar", ["application/x-archive"]),
     ("a", ["application/x-archive"]),
     ("wim", ["application/x-ms-wim"]),
@@ -73,6 +81,10 @@ EXT_MIME = [
     ("squashfs", ["application/vnd.squashfs"]),
     ("sqfs", ["application/vnd.squashfs"]),
     ("sfs", ["application/vnd.squashfs"]),
+    ("squash", ["application/vnd.squashfs"]),
+    ("snap", ["application/vnd.snap"]),
+    ("cramfs", ["application/x-cramfs-image"]),
+    ("cram", ["application/x-cramfs-image"]),
     ("vhd", ["application/x-vhd-disk"]),
     ("vhdx", ["application/x-vhdx-disk"]),
     ("avhdx", ["application/x-vhdx-disk"]),
@@ -85,6 +97,7 @@ EXT_MIME = [
     ("msp", ["application/x-ms-patch"]),
     ("mst", ["application/x-ms-transform"]),
     ("msm", ["application/x-msm"]),
+    ("nsis", ["application/x-nsis"]),
     ("vfd", ["application/x-raw-floppy-disk-image"]),
     ("flp", ["application/x-raw-floppy-disk-image"]),
     ("ima", ["application/x-raw-floppy-disk-image"]),
@@ -92,12 +105,15 @@ EXT_MIME = [
     ("ext3", ["application/x-ext3-image"]),
     ("ext4", ["application/x-ext4-image"]),
     ("exfat", ["application/x-exfat-image"]),
+    ("ntfs", ["application/x-ntfs-image"]),
     ("simg", ["application/x-android-sparse-image"]),
     ("ace", ["application/x-ace"]),
     ("zoo", ["application/x-zoo"]),
     ("arc", ["application/x-arc"]),
     ("sit", ["application/x-stuffit"]),
     ("hfs", ["application/x-hfs-image"]),
+    ("hfsx", ["application/x-hfs-image"]),
+    ("hfsplus", ["application/x-hfs-image"]),
     ("apfs", ["application/x-apfs-image"]),
     ("chm", ["application/vnd.ms-htmlhelp"]),
     ("jar", ["application/x-java-archive", "application/java-archive"]),
@@ -106,10 +122,18 @@ EXT_MIME = [
     ("xpi", ["application/x-xpinstall"]),
 ]
 
-# documents and generic names: readable, but never claimed as their default program
+# documents, packages other programs install, programs, libraries, system files, later volumes of
+# a set and generic names: readable, but never claimed as their default program (nor offered in
+# the extract menus). Every readable extension is in EXT_MIME or here (--check fails otherwise).
 DOCS = {"docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", "doc", "xls", "ppt", "msg", "jar", "war", "ear",
         "apk", "ipa", "xpi", "appx", "nupkg", "whl", "chm", "chi", "chq", "chw", "exe", "dll", "bin", "raw",
-        "mbr", "gpt", "dsk", "hdd", "fat", "ext", "img", "a"}
+        "mbr", "gpt", "dsk", "hdd", "fat", "ext", "img", "a",
+        "snap", "ddeb", "mpkg", "xip", "pbzx", "smi",                       # packages, installers
+        "so", "o", "ko", "dylib", "bundle", "macho", "elf", "efi", "sys", "drv", "ocx", "cpl", "scr", "mui",
+        "ax", "acm", "tsp", "prx", "lib", "te", "axf", "mod",                # programs, libraries, drivers
+        "38_", "bm_", "ch_", "cp_", "dl_", "dr_", "ex_", "fo_", "hl_", "in_", "ov_", "sy_", "tx_",
+        "lzs",                                                                # compressed setup files
+        "a00", "z01"}                                                         # later volumes
 
 # types the freedesktop database does not define: described in gogitzip-mime.xml
 CUSTOM = {
@@ -126,6 +150,13 @@ CUSTOM = {
     "application/x-android-sparse-image": ("Android sparse image", "Android 스파스 이미지", None),
     "application/x-hfs-image": ("HFS+ disk image", "HFS+ 디스크 이미지", "application/x-raw-disk-image"),
     "application/x-apfs-image": ("APFS disk image", "APFS 디스크 이미지", "application/x-raw-disk-image"),
+    "application/x-ntfs-image": ("NTFS file system image", "NTFS 파일 시스템 이미지", "application/x-raw-disk-image"),
+    "application/x-cramfs-image": ("CramFS file system image", "CramFS 파일 시스템 이미지", None),
+    "application/x-egg": ("EGG archive", "EGG 압축 파일", None),
+    "application/x-rar-volume": ("RAR archive volume", "RAR 분할 압축 파일", None),
+    "application/x-split-archive": ("Split archive (first part)", "분할 압축 파일 (첫 부분)", None),
+    "application/x-ipk": ("OpenWrt package", "OpenWrt 패키지", None),
+    "application/x-nsis": ("NSIS installer", "NSIS 설치 파일", None),
 }
 # extra globs for existing freedesktop types
 EXTRA_GLOBS = {"tpz": "application/x-compressed-tar", "zstd": "application/zstd", "esd": "application/x-ms-wim",
@@ -333,6 +364,11 @@ def write_icons():
         gen_assets.logo(s).save(os.path.join(d, "gogitzip.png"), optimize=True)
 
 
+def unmapped(readable):
+    """readable extensions neither mapped to a MIME type nor deliberately left out"""
+    return sorted(set(readable) - {e for e, _ in EXT_MIME} - DOCS)
+
+
 def main():
     check = "--check" in sys.argv
     texts = {
@@ -343,8 +379,7 @@ def main():
         os.path.join("data", "linux", "dolphin", "gogitzip-compress.desktop"): DOLPHIN_COMPRESS,
         os.path.join("data", "linux", "thunar", "uca-gogitzip.xml"): thunar_text(),
     }
-    known = {e for e, _ in EXT_MIME} | DOCS
-    missing = sorted(readable_exts() - known)
+    missing = unmapped(readable_exts())
     stale = []
     for rel, txt in texts.items():
         p = os.path.join(ROOT, rel)
@@ -356,15 +391,18 @@ def main():
                 with open(p, "w", encoding="utf-8") as f:
                     f.write(txt)
     if check:
-        if missing:     # a new reader: still works, the launcher just does not advertise it
-            print("note: extensions without a MIME mapping (add them to EXT_MIME or DOCS):", " ".join(missing))
+        # a new reader nobody classified: the launcher, the file manager menus and
+        # --set-default-apps would silently leave its files out (as .alz/.egg once were)
+        if missing:
+            print("unmapped: readable extensions in neither EXT_MIME nor DOCS:", " ".join(missing))
         if stale:
             print("stale:", " ".join(stale))
-        sys.exit(1 if stale else 0)
+        sys.exit(1 if stale or missing else 0)
     write_icons()
-    if missing:
-        print("note: extensions without a MIME mapping:", " ".join(missing))
     print("wrote", ", ".join(texts), "and the hicolor icons")
+    if missing:
+        print("error: readable extensions in neither EXT_MIME nor DOCS:", " ".join(missing))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

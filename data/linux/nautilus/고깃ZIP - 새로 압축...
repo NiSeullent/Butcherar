@@ -1,4 +1,6 @@
 #!/bin/sh
 # Nautilus script: create an archive from the selected files and folders.
+# "--": the selected (relative) names are never options ("-o", "--level"...), even when they
+# start with "-".
 [ $# -gt 0 ] || exit 0
-exec gogitzip-gtk --compress "$@"
+exec gogitzip-gtk --compress -- "$@"

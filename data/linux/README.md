@@ -29,7 +29,7 @@ is not installed, a user launcher for the running program is created in
 | `gogitzip-gtk --extract-to DIR ARCHIVE...` | extract into DIR |
 | `gogitzip-gtk --extract ARCHIVE...` | extract dialog |
 | `gogitzip-gtk --test ARCHIVE...` | test |
-| `gogitzip-gtk --compress FILE...` | create dialog (`--output A --format zip --level 5 --yes`: no dialog) |
+| `gogitzip-gtk --compress FILE...` | create dialog, proposing `--output A`, `--format zip` and `--level 5` when given (with `--yes`: no dialog) |
 | `--yes` | no questions: overwrite, errors on stderr |
 
 Only progress windows (and questions) appear in these modes. Exit codes: 0 ok, 1 warnings,

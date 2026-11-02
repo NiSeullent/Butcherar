@@ -8,6 +8,7 @@
     <glob pattern="*.squashfs"/>
     <glob pattern="*.sqfs"/>
     <glob pattern="*.sfs"/>
+    <glob pattern="*.squash"/>
   </mime-type>
   <mime-type type="application/x-android-sparse-image">
     <comment>Android sparse image</comment>
@@ -21,6 +22,19 @@
     <sub-class-of type="application/x-raw-disk-image"/>
     <generic-icon name="package-x-generic"/>
     <glob pattern="*.apfs"/>
+  </mime-type>
+  <mime-type type="application/x-cramfs-image">
+    <comment>CramFS file system image</comment>
+    <comment xml:lang="ko">CramFS 파일 시스템 이미지</comment>
+    <generic-icon name="package-x-generic"/>
+    <glob pattern="*.cramfs"/>
+    <glob pattern="*.cram"/>
+  </mime-type>
+  <mime-type type="application/x-egg">
+    <comment>EGG archive</comment>
+    <comment xml:lang="ko">EGG 압축 파일</comment>
+    <generic-icon name="package-x-generic"/>
+    <glob pattern="*.egg"/>
   </mime-type>
   <mime-type type="application/x-exfat-image">
     <comment>exFAT file system image</comment>
@@ -56,6 +70,14 @@
     <sub-class-of type="application/x-raw-disk-image"/>
     <generic-icon name="package-x-generic"/>
     <glob pattern="*.hfs"/>
+    <glob pattern="*.hfsx"/>
+    <glob pattern="*.hfsplus"/>
+  </mime-type>
+  <mime-type type="application/x-ipk">
+    <comment>OpenWrt package</comment>
+    <comment xml:lang="ko">OpenWrt 패키지</comment>
+    <generic-icon name="package-x-generic"/>
+    <glob pattern="*.ipk"/>
   </mime-type>
   <mime-type type="application/x-lz4-compressed-tar">
     <comment>Tar archive (LZ4-compressed)</comment>
@@ -83,6 +105,31 @@
     <sub-class-of type="application/x-ole-storage"/>
     <generic-icon name="package-x-generic"/>
     <glob pattern="*.msm"/>
+  </mime-type>
+  <mime-type type="application/x-nsis">
+    <comment>NSIS installer</comment>
+    <comment xml:lang="ko">NSIS 설치 파일</comment>
+    <generic-icon name="package-x-generic"/>
+    <glob pattern="*.nsis"/>
+  </mime-type>
+  <mime-type type="application/x-ntfs-image">
+    <comment>NTFS file system image</comment>
+    <comment xml:lang="ko">NTFS 파일 시스템 이미지</comment>
+    <sub-class-of type="application/x-raw-disk-image"/>
+    <generic-icon name="package-x-generic"/>
+    <glob pattern="*.ntfs"/>
+  </mime-type>
+  <mime-type type="application/x-rar-volume">
+    <comment>RAR archive volume</comment>
+    <comment xml:lang="ko">RAR 분할 압축 파일</comment>
+    <generic-icon name="package-x-generic"/>
+    <glob pattern="*.r00"/>
+  </mime-type>
+  <mime-type type="application/x-split-archive">
+    <comment>Split archive (first part)</comment>
+    <comment xml:lang="ko">분할 압축 파일 (첫 부분)</comment>
+    <generic-icon name="package-x-generic"/>
+    <glob pattern="*.001"/>
   </mime-type>
   <mime-type type="application/x-udf-image">
     <comment>UDF disk image</comment>

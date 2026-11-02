@@ -7,6 +7,8 @@ typedef const struct __CFData *CFDataRef;
 typedef signed int OSStatus;
 typedef unsigned int OSType;
 typedef unsigned int LSRolesMask;
+typedef signed long CFIndex;
+CFIndex CFStringGetMaximumSizeOfFileSystemRepresentation(CFStringRef string);
 enum { noErr = 0 };
 enum { kLSRolesAll = 0xFFFFFFFF };
 enum { kGenericDocumentIcon = 0x646F6375 };

@@ -120,7 +120,8 @@ static NSMutableSet *s_batches;
         const char *why = gz_ui_code_text(res ? res : GZ_E_FORMAT);
         fprintf(stderr, "%s: %s : %s\n", gz_ui_str(STR_L_ERROR), displayPath(p).UTF8String, why);
         if (res != GZ_E_CANCEL && !_yes)
-            msgBox(nil, NSAlertStyleWarning, TR(STR_OPEN_FAIL), [NSString stringWithFormat:@"%@\n%s", displayPath(p), why]);
+            msgBox(nil, NSAlertStyleWarning, TR(STR_OPEN_FAIL),
+                   [NSString stringWithFormat:@"%@\n%@", displayPath(p), gzU8(why)]);
         [self worst:res == GZ_E_CANCEL ? EXIT_BREAK : EXIT_FATAL];
         if (res == GZ_E_CANCEL) _stopped = YES;
         [self next];
@@ -420,7 +421,7 @@ static NSArray<NSString *> *pasteboardPaths(NSPasteboard *pb)
     [self noteService];
     NSWindow *main = [GZMainWindowController shared].window;
     NSWindow *par = main.visible ? main : nil;
-    dlgCreate(par, paths, ^(GZCreateChoice *c) {
+    dlgCreate(par, paths, nil, 0, ^(GZCreateChoice *c) {
         if (!c || !startCompress(paths, c, par, GZ_OW_ASK, RUN_QUIET_OK, ^(GZRun *r, int res) { [self serviceDone]; }))
             [self serviceDone];
     });
@@ -523,9 +524,10 @@ static NSArray<NSString *> *pasteboardPaths(NSPasteboard *pb)
         if (!startCompress(paths, c, nil, GZ_OW_ALL, flags, fin)) [self finishCommandLine:EXIT_FATAL];
         return;
     }
-    if (_format) set.cFormat = _format;
+    /* the dialog proposes what the command line gave: --output (absolute, as with --yes),
+     * --format (else the one of --output's extension), --level */
     if (_level >= 0) set.cLevel = _level;
-    dlgCreate(nil, paths, ^(GZCreateChoice *c) {
+    dlgCreate(nil, paths, _output.length ? absPath(_output) : nil, _format, ^(GZCreateChoice *c) {
         if (!c) {
             [self finishCommandLine:EXIT_BREAK];
             return;

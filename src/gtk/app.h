@@ -146,8 +146,9 @@ typedef struct cdlg_out {
     int format, method, level, encryption, encrypt_names, solid;
     char *password;            /* UTF-8, g_free (wiped)                       */
 } cdlg_out;
-/* inputs: absolute fs paths. Returns 1 on OK. */
-int  dlg_create(GtkWindow *parent, char **inputs, int n, cdlg_out *o);
+/* inputs: absolute fs paths. out0: archive path proposed (NULL: named after the inputs);
+ * fmt0: format proposed (0: from out0's extension, else the default). Returns 1 on OK. */
+int  dlg_create(GtkWindow *parent, char **inputs, int n, const char *out0, int fmt0, cdlg_out *o);
 void cdlg_out_free(cdlg_out *o);
 const gz_writer *writer_default(int ninputs, int single_file);
 char *default_archive_name(char **inputs, int n, const gz_writer *w);   /* g_free */

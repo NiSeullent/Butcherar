@@ -164,9 +164,13 @@ static gboolean start_compress(gpointer u)
             return G_SOURCE_REMOVE;
         }
     } else {
-        if (C.format) g_set.c_format = C.format;
+        /* the dialog proposes what the command line gave: --output (absolute, as with --yes),
+         * --format (else the one of --output's extension), --level */
         if (C.level >= 0) g_set.c_level = C.level;
-        if (!dlg_create(NULL, paths, n, &o)) {
+        char *out0 = C.out ? abs_path(C.out) : NULL;
+        int ok = dlg_create(NULL, paths, n, out0, C.format, &o);
+        g_free(out0);
+        if (!ok) {
             worst(EXIT_BREAK);
             gtk_main_quit();
             return G_SOURCE_REMOVE;

@@ -619,7 +619,14 @@ static GtkWidget *grid_row(GtkWidget *g, int row, const char *label, GtkWidget *
     return w;
 }
 
-int dlg_create(GtkWindow *parent, char **inputs, int n, cdlg_out *o)
+/* index of the usable writer of format f in the list, -1 when there is none (or f is 0) */
+static int cd_find(const cdlg *c, int f)
+{
+    for (int i = 0; f && i < c->nw; i++) if (c->wl[i]->format == f) return i;
+    return -1;
+}
+
+int dlg_create(GtkWindow *parent, char **inputs, int n, const char *out0, int fmt0, cdlg_out *o)
 {
     memset(o, 0, sizeof *o);
     cdlg *c = g_new0(cdlg, 1);
@@ -670,8 +677,17 @@ int dlg_create(GtkWindow *parent, char **inputs, int n, cdlg_out *o)
         gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(c->fmt), t);
         if (c->wl[i] == dw) act = i;
     }
+    /* an archive name given by the caller (--output) is kept as it is; its extension picks
+     * the format unless one was given too (as the --yes path does) */
+    int pick = cd_find(c, fmt0);
+    if (pick < 0 && out0 && *out0) {
+        gzch *w = fs2w(out0);
+        pick = cd_find(c, w ? gz_format_from_name(w) : 0);
+        gz_free(w);
+    }
+    if (pick >= 0) act = pick;
     grid_row(g, 1, TR(STR_C_FORMAT), c->fmt);
-    char *defname = default_archive_name(inputs, n, c->wl[act]);
+    char *defname = out0 && *out0 ? g_strdup(out0) : default_archive_name(inputs, n, c->wl[act]);
     path_entry_set(GTK_ENTRY(c->out), defname);
     g_free(defname);
 
@@ -912,27 +928,75 @@ void dlg_info(GtkWindow *parent, gz_handle *h, const char *arc_path)
 
 static const int k_threads[] = { 0, 1, 2, 4, 6, 8, 12, 16, 24, 32, 64 };
 
+/* one Exec argument as the Desktop Entry specification wants it: in double quotes with ", `, $
+ * and \ backslash-escaped, % doubled (field codes). Shell quoting ('...'\''...') is not valid
+ * there. The string escaping of the value itself (\ -> \\ ...) is GKeyFile's job. */
+static char *desktop_exec_arg(const char *arg)
+{
+    GString *q = g_string_new("\"");
+    for (const char *p = arg; *p; p++) {
+        if (*p == '"' || *p == '`' || *p == '$' || *p == '\\') g_string_append_c(q, '\\');
+        else if (*p == '%') g_string_append_c(q, '%');
+        g_string_append_c(q, *p);
+    }
+    g_string_append_c(q, '"');
+    return g_string_free(q, FALSE);
+}
+
+/* the program to name in Exec. GIO checks that the program exists by parsing Exec WITHOUT
+ * expanding field codes, so a "%%" (the only valid way to write a '%') never names an existing
+ * file there, while a single '%' would be eaten at launch: a program path with a '%' is
+ * reached through a symbolic link in the user's data folder instead. */
+static char *exec_program(const char *self)
+{
+    if (!strchr(self, '%')) return g_strdup(self);
+    char *dir = g_build_filename(g_get_user_data_dir(), "gogitzip", NULL);
+    char *link = g_build_filename(dir, "gogitzip-gtk", NULL);
+    g_mkdir_with_parents(dir, 0700);
+    unlink(link);
+    g_free(dir);
+    if (symlink(self, link) == 0) return link;
+    g_free(link);
+    return g_strdup(self);
+}
+
 /* the launcher entry: installed one, else a user entry for this executable */
 static GDesktopAppInfo *app_info(void)
 {
     GDesktopAppInfo *ai = g_desktop_app_info_new("gogitzip.desktop");
     if (ai) return ai;
-    char *self = g_file_read_link("/proc/self/exe", NULL);
-    if (!self) return NULL;
-    GString *s = g_string_new("[Desktop Entry]\nType=Application\nName=GogitZIP\nName[ko]=고깃ZIP\n"
-                              "Icon=gogitzip\nTerminal=false\nNoDisplay=false\nCategories=GTK;Utility;Archiving;\n");
-    char *q = g_shell_quote(self);
-    g_string_append_printf(s, "Exec=%s %%F\nMimeType=", q);
+    char *exe = g_file_read_link("/proc/self/exe", NULL);
+    if (!exe) return NULL;
+    char *self = exec_program(exe);
+    g_free(exe);
+    static const char grp[] = G_KEY_FILE_DESKTOP_GROUP;
+    GKeyFile *kf = g_key_file_new();
+    g_key_file_set_string(kf, grp, G_KEY_FILE_DESKTOP_KEY_TYPE, G_KEY_FILE_DESKTOP_TYPE_APPLICATION);
+    g_key_file_set_string(kf, grp, G_KEY_FILE_DESKTOP_KEY_NAME, "GogitZIP");
+    g_key_file_set_locale_string(kf, grp, G_KEY_FILE_DESKTOP_KEY_NAME, "ko", "고깃ZIP");
+    g_key_file_set_string(kf, grp, G_KEY_FILE_DESKTOP_KEY_ICON, "gogitzip");
+    g_key_file_set_boolean(kf, grp, G_KEY_FILE_DESKTOP_KEY_TERMINAL, FALSE);
+    g_key_file_set_boolean(kf, grp, G_KEY_FILE_DESKTOP_KEY_NO_DISPLAY, FALSE);
+    g_key_file_set_string(kf, grp, G_KEY_FILE_DESKTOP_KEY_CATEGORIES, "GTK;Utility;Archiving;");
+    char *q = desktop_exec_arg(self);
+    char *exec = g_strconcat(q, " %F", NULL);
+    g_key_file_set_string(kf, grp, G_KEY_FILE_DESKTOP_KEY_EXEC, exec);
+    g_free(exec);
     g_free(q);
-    for (int i = 0; k_ext_mime[i].ext; i++) g_string_append_printf(s, "%s;", k_ext_mime[i].mime);
-    g_string_append_c(s, '\n');
+    GString *mt = g_string_new(NULL);
+    for (int i = 0; k_ext_mime[i].ext; i++) g_string_append_printf(mt, "%s;", k_ext_mime[i].mime);
+    g_key_file_set_string(kf, grp, G_KEY_FILE_DESKTOP_KEY_MIME_TYPE, mt->str);
+    g_string_free(mt, TRUE);
+    gsize len = 0;
+    char *data = g_key_file_to_data(kf, &len, NULL);
+    g_key_file_free(kf);
     char *dir = g_build_filename(g_get_user_data_dir(), "applications", NULL);
     g_mkdir_with_parents(dir, 0700);
     char *fn = g_build_filename(dir, "gogitzip.desktop", NULL);
-    if (g_file_set_contents(fn, s->str, -1, NULL)) ai = g_desktop_app_info_new_from_filename(fn);
+    if (data && g_file_set_contents(fn, data, (gssize)len, NULL)) ai = g_desktop_app_info_new_from_filename(fn);
+    g_free(data);
     g_free(fn);
     g_free(dir);
-    g_string_free(s, TRUE);
     g_free(self);
     return ai;
 }
