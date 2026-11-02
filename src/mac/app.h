@@ -171,7 +171,10 @@ void dlgExtract(NSWindow *parent, gz_handle *h, NSString *arcPath, u32 nsel, voi
 @property (nonatomic) int format, method, level, encryption;
 @property (nonatomic) BOOL encryptNames, solid;
 @end
-void dlgCreate(NSWindow *parent, NSArray<NSString *> *inputs, void (^done)(GZCreateChoice *c));
+/* output: archive proposed (nil: named after the inputs); format: proposed (0: from output's
+ * extension, else the default). done gets nil when canceled. */
+void dlgCreate(NSWindow *parent, NSArray<NSString *> *inputs, NSString *output, int format,
+               void (^done)(GZCreateChoice *c));
 const gz_writer *writerDefault(NSUInteger ninputs, BOOL singleFile);
 NSString *defaultArchiveName(NSArray<NSString *> *inputs, const gz_writer *w);
 /* start compressing: owns nothing of c afterwards */

@@ -1,4 +1,5 @@
 #!/bin/sh
 # Nautilus script: choose the destination and options in the extract dialog.
+# "--": the selected (relative) names are never options, even when they start with "-".
 [ $# -gt 0 ] || exit 0
-exec gogitzip-gtk --extract "$@"
+exec gogitzip-gtk --extract -- "$@"

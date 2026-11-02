@@ -271,7 +271,7 @@ static NSTextField *plabel(NSView *parent, NSRect r, NSString *s, NSFont *f, NSC
         if (bps) {
             char sp[48];
             gz_ui_fmt_speed(sp, sizeof sp, bps);
-            _r1.stringValue = [NSString stringWithFormat:@"%@ %s", TR(STR_P_SPEED), sp];
+            _r1.stringValue = [NSString stringWithFormat:@"%@ %@", TR(STR_P_SPEED), gzU8(sp)];
         } else {
             _r1.stringValue = @"";
         }
@@ -279,7 +279,8 @@ static NSTextField *plabel(NSView *parent, NSRect r, NSString *s, NSFont *f, NSC
         gz_ui_fmt_duration(a, sizeof a, p.elapsed_ms / 1000);
         if (bps && p.total_bytes > p.done_bytes) gz_ui_fmt_duration(b, sizeof b, (p.total_bytes - p.done_bytes) / bps);
         else strcpy(b, "--:--");
-        _l2.stringValue = [NSString stringWithFormat:@"%@ %s  ·  %@ %s", TR(STR_P_ELAPSED), a, TR(STR_P_REMAIN), b];
+        _l2.stringValue = [NSString stringWithFormat:@"%@ %@  ·  %@ %@", TR(STR_P_ELAPSED), gzU8(a), TR(STR_P_REMAIN),
+                                                     gzU8(b)];
         if (p.total_files)
             _r2.stringValue = [NSString stringWithFormat:@"%@ %u / %u", TR(STR_P_FILES), p.done_files, p.total_files];
     }
@@ -383,9 +384,9 @@ static NSTextField *plabel(NSView *parent, NSRect r, NSString *s, NSFont *f, NSC
         for (u32 i = 0; i < n; i++) {
             const gz_log *l = gz_job_log_at(_job, i);
             if (!l || l->level < GZ_LOG_WARN) continue;
-            NSString *line = [NSString stringWithFormat:@"%@: %@ : %s%@%@\n",
+            NSString *line = [NSString stringWithFormat:@"%@: %@ : %@%@%@\n",
                                                         TR(l->level == GZ_LOG_ERROR ? STR_L_ERROR : STR_L_WARN),
-                                                        gzNS(l->name), gz_ui_code_text(l->code),
+                                                        gzNS(l->name), gzU8(gz_ui_code_text(l->code)),
                                                         l->detail ? @" : " : @"", l->detail ? gzNS(l->detail) : @""];
             fputs(line.UTF8String, stderr);
         }

@@ -104,12 +104,17 @@ void gzWipeFree(gzch *w)
 gzch *gzPathW(NSString *path)
 {
     if (!path.length) return gz_os_path_wide("");
-    NSUInteger cap = [path maximumLengthOfBytesUsingEncoding:NSUTF8StringEncoding] + 16;
-    char *b = (char *)malloc(cap);
+    /* the file system representation is decomposed UTF-8 (HFS+ rules): one precomposed Hangul
+     * syllable (1 UTF-16 unit) becomes 2-3 jamo = 6-9 bytes, more than the 3 per unit of
+     * plain UTF-8. Too small a buffer makes getFileSystemRepresentation fail (NULL here: a
+     * typed Korean destination, an NFC name from argv...). CF knows the bound (len * 9 + 1). */
+    CFIndex cap = CFStringGetMaximumSizeOfFileSystemRepresentation((__bridge CFStringRef)path);
+    if (cap <= 0) return NULL;
+    char *b = (char *)malloc((size_t)cap);
     if (!b) return NULL;
     gzch *w = NULL;
     /* getFileSystemRepresentation never throws (fileSystemRepresentation does) */
-    if ([path getFileSystemRepresentation:b maxLength:cap]) w = gz_os_path_wide(b);
+    if ([path getFileSystemRepresentation:b maxLength:(NSUInteger)cap]) w = gz_os_path_wide(b);
     free(b);
     return w;
 }
@@ -221,8 +226,8 @@ BOOL isArchiveName(NSString *name)
 
 NSString *engineLine(void)
 {
-    return [NSString stringWithFormat:@"%s  ·  CRC %s  ·  %s", gz_dispatch_inflate_name(), gz_dispatch_crc_name(),
-                                      gz_dispatch_aes_name()];
+    return [NSString stringWithFormat:@"%@  ·  CRC %@  ·  %@", gzU8(gz_dispatch_inflate_name()),
+                                      gzU8(gz_dispatch_crc_name()), gzU8(gz_dispatch_aes_name())];
 }
 
 static gzch fold(gzch c) { return c >= 'A' && c <= 'Z' ? (gzch)(c + 32) : c; }

@@ -33,6 +33,7 @@ static struct {
     GtkTreeViewColumn *cols[LC_COUNT];
     int sort_col, sort_desc, syncing;
     guint status_idle;
+    unsigned gen;                  /* bumped whenever M.h or its folder tree changes */
 } M;
 
 static void navigate(i32 f, i32 focus);
@@ -397,6 +398,7 @@ static u8 *selection_mask(u32 *nrows, GPtrArray *names)
 
 static void close_all(void)
 {
+    M.gen++;
     gtk_tree_view_set_model(GTK_TREE_VIEW(M.list), NULL);
     if (M.model) { g_object_unref(M.model); M.model = NULL; }
     gtk_tree_view_set_model(GTK_TREE_VIEW(M.tree), NULL);
@@ -410,6 +412,7 @@ static void close_all(void)
 
 static void show_archive(void)
 {
+    M.gen++;
     M.cur = 0;
     update_title();
     tree_build();
@@ -571,14 +574,23 @@ static void start_extract(const char *dest, int smart, int path_mode, int overwr
 static void cmd_extract(int mode)
 {
     if (!M.h || busy()) return;
+    gz_handle *h = M.h;
+    unsigned gen = M.gen;
     u32 nsel = 0;
-    u8 *mask = selection_mask(&nsel, NULL);
+    u8 *mask = selection_mask(&nsel, NULL);         /* sized for h->arc->n, folder M.cur of h */
     char *dir = arc_dir();
     if (mode == X_HERE || mode == X_SMART) {
         start_extract(dir, mode == X_SMART, GZ_PATH_FULL, g_set.overwrite, NULL, 0, 0, RUN_QUIET_OK);
     } else {
         xdlg_out o;
-        if (dlg_extract(GTK_WINDOW(M.win), M.h, M.path ? M.path : dir, mode == X_SELECTED || nsel ? nsel : 0, &o)) {
+        int ok = dlg_extract(GTK_WINDOW(M.win), h, M.path ? M.path : dir, mode == X_SELECTED || nsel ? nsel : 0, &o);
+        /* the dialog runs a nested main loop: if the archive shown was replaced, reopened in
+         * another code page or a job started meanwhile, the mask and folder are not for M.h */
+        if (ok && (M.h != h || M.gen != gen || busy())) {
+            g_free(o.dest);
+            ok = 0;
+        }
+        if (ok) {
             int sel = o.only_selected && mask;
             start_extract(o.dest, o.smart, o.path_mode, o.overwrite, sel ? mask : NULL, sel, 0,
                           RUN_QUIET_OK | (o.open_folder ? RUN_OPEN_DEST : 0));
@@ -703,7 +715,7 @@ void mainwnd_compress_paths(char **paths, int n)
 {
     if (n <= 0 || busy()) return;
     cdlg_out o;
-    if (!dlg_create(GTK_WINDOW(M.win), paths, n, &o)) return;
+    if (!dlg_create(GTK_WINDOW(M.win), paths, n, NULL, 0, &o)) return;
     gz_compress_opts co;
     memset(&co, 0, sizeof co);
     gzch **in = g_new0(gzch *, n + 1);
@@ -758,7 +770,12 @@ static const GtkTargetEntry k_uri_target[] = { { "text/uri-list", 0, 0 } };
 static void on_drop(GtkWidget *w, GdkDragContext *ctx, gint x, gint y, GtkSelectionData *sd, guint info, guint t,
                     gpointer u)
 {
-    if (gtk_drag_get_source_widget(ctx) == M.list) { gtk_drag_finish(ctx, FALSE, FALSE, t); return; }
+    /* drops reach the window even while a modal dialog (extract options, info, a question...)
+     * runs its nested main loop: refuse them then, as the rest of the window is */
+    if (gtk_drag_get_source_widget(ctx) == M.list || busy() || gtk_grab_get_current()) {
+        gtk_drag_finish(ctx, FALSE, FALSE, t);
+        return;
+    }
     char **uris = gtk_selection_data_get_uris(sd);
     GPtrArray *paths = g_ptr_array_new_with_free_func(g_free);
     for (int i = 0; uris && uris[i]; i++) {

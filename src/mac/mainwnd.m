@@ -775,7 +775,7 @@ static NSString *const TB_OPEN = @"open", *const TB_EXTRACT = @"extract", *const
         if (cp && !gz_plat_cp_valid(cp)) continue;
         NSString *t = TR(gz_ui_codepages[i].sid);
         if (_h && !cp && _h->arc->any_legacy && gz_ui_cp_name(_h->arc->used_cp))
-            t = [NSString stringWithFormat:@"%@ - %s", TR(STR_CP_AUTO), gz_ui_cp_name(_h->arc->used_cp)];
+            t = [NSString stringWithFormat:@"%@ - %@", TR(STR_CP_AUTO), gzU8(gz_ui_cp_name(_h->arc->used_cp))];
         NSMenuItem *it = [self item:m title:t action:@selector(cmdSetCodepage:) key:@""];
         it.tag = cp;
         it.state = cp == cur ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1303,7 +1303,8 @@ static NSString *baseOfName(const gzch *name)
         if (!h) {
             if (res != GZ_E_CANCEL)
                 msgBox(self.window, NSAlertStyleWarning, TR(STR_OPEN_FAIL),
-                       [NSString stringWithFormat:@"%@\n%s", displayPath(ab), gz_ui_code_text(res ? res : GZ_E_FORMAT)]);
+                       [NSString stringWithFormat:@"%@\n%@", displayPath(ab),
+                                                  gzU8(gz_ui_code_text(res ? res : GZ_E_FORMAT))]);
             return;
         }
         [self closeAll];
@@ -1446,9 +1447,14 @@ static NSString *baseOfName(const gzch *name)
         return;
     }
     u32 offer = mode == X_SELECTED || nsel ? nsel : 0;
+    /* the sheet does not block: Finder (application:openFiles:), Open Recent or a drop can
+     * replace the archive meanwhile. The mask (h->arc->n + 1 bytes) and the folder to strip
+     * belong to h as it is now: extract nothing when it changed */
+    gz_handle *h = _h;
+    unsigned gen = _gen;
     dlgExtract(self.window, _h, _path ? _path : [dir stringByAppendingPathComponent:@"-"], offer,
                ^(GZExtractChoice *c) {
-                   if (c && self->_h) {
+                   if (c && self->_h && self->_h == h && self->_gen == gen && !busy()) {
                        BOOL sel = c.onlySelected && mask;
                        [self startExtract:c.dest smart:c.smart pathMode:c.pathMode overwrite:c.overwrite
                                       sel:sel ? mask : NULL strip:sel test:NO
@@ -1562,7 +1568,7 @@ static NSString *baseOfName(const gzch *name)
 {
     if (!paths.count || busy()) return;
     NSWindow *par = self.window.visible ? self.window : nil;
-    dlgCreate(par, paths, ^(GZCreateChoice *c) {
+    dlgCreate(par, paths, nil, 0, ^(GZCreateChoice *c) {
         if (c) startCompress(paths, c, par, GZ_OW_ASK, RUN_QUIET_OK, nil);
     });
 }

@@ -3,8 +3,11 @@
  *
  * Engine callbacks arrive on worker threads:
  *   progress  copied into a snapshot under a mutex; a 100 ms UI timer shows it
- *   ask       handed to the UI thread with g_main_context_invoke(); the worker
- *             blocks on a GCond until the (non-blocking) question dialog answers
+ *   ask       queued to the UI thread (an idle source on the default context); the
+ *             worker blocks on a GCond until the (non-blocking) question dialog answers.
+ *             Never g_main_context_invoke(): it runs the function in the CALLING thread
+ *             whenever that thread can acquire the context, i.e. whenever the UI thread is
+ *             not inside a main loop - as before gtk_main() when main.c starts the first job.
  *   done      g_idle_add() -> run_finish() on the UI thread
  * The progress window appears at once, or after 400 ms for short internal jobs
  * (opening, viewing a file, drag and drop), so quick work never flickers.
@@ -106,7 +109,7 @@ static int cb_ask(void *user, gz_ask *q)
     r->q = q;
     r->answered = 0;
     g_mutex_unlock(&r->m);
-    g_main_context_invoke(NULL, ask_main, r);
+    g_idle_add_full(G_PRIORITY_DEFAULT, ask_main, r, NULL);       /* always on the UI thread */
     g_mutex_lock(&r->m);
     while (!r->answered) g_cond_wait(&r->c, &r->m);
     int a = r->ans;

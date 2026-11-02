@@ -284,14 +284,27 @@ def check_compile(t, cc):
         t.record(r.returncode == 0, "-Werror: " + src, r.stderr.decode("utf-8", "replace")[-1500:])
 
 
+def make_locked(bdir, args, timeout=900):
+    """make in the source tree, one module at a time: app_gtk and regress_gtk_mac run in
+    parallel and both need build/linux/gogitzip-gtk (two makes writing the same objects clash)"""
+    import fcntl
+    os.makedirs(bdir, exist_ok=True)
+    with open(os.path.join(bdir, ".gtk-make.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            return subprocess.run(["make", "-C", ROOT, "--no-print-directory"] + list(args), capture_output=True,
+                                  timeout=timeout)
+        finally:
+            fcntl.flock(lk, fcntl.LOCK_UN)
+
+
 def run(t):
     if os.environ.get("GZ_TEST_EXEC"):
         t.skip("GUI tests run on the build machine only")
     bdir = os.path.dirname(t.gzt)
     in_tree = os.path.realpath(bdir) == os.path.realpath(os.path.join(ROOT, "build"))
     if in_tree:      # engine + strings objects (build/host/app) for the driver; `make build/gzt` leaves them out
-        r = subprocess.run(["make", "-C", ROOT, "--no-print-directory", "build/gogitzip"], capture_output=True,
-                           timeout=900)
+        r = make_locked(bdir, ["build/gogitzip"])
         t.record(r.returncode == 0, "make build/gogitzip", (r.stdout + r.stderr).decode("utf-8", "replace")[-800:])
     if not os.path.exists(os.path.join(bdir, "host", "app", "strings.o")):
         t.skip("build/host/app objects missing: run make build/gogitzip")
@@ -304,15 +317,13 @@ def run(t):
     # build (the app links the host objects that `make build/gzt` made with the same HOST_CFLAGS)
     app = os.path.join(bdir, "linux", "gogitzip-gtk")
     if in_tree:
-        r = subprocess.run(["make", "-C", ROOT, "--no-print-directory", "build/linux/gogitzip-gtk"],
-                           capture_output=True, timeout=900)
+        r = make_locked(bdir, ["build/linux/gogitzip-gtk"])
         log = (r.stdout + r.stderr).decode("utf-8", "replace")
         t.record(r.returncode == 0 and "warning:" not in log, "make build/linux/gogitzip-gtk (no warnings)",
                  log[-2000:])
         st = os.path.join(t.work, "stage")
         shutil.rmtree(st, ignore_errors=True)
-        r = subprocess.run(["make", "-C", ROOT, "--no-print-directory", "install", "PREFIX=/usr", "DESTDIR=" + st],
-                           capture_output=True, timeout=900)
+        r = make_locked(bdir, ["install", "PREFIX=/usr", "DESTDIR=" + st])
         want = ["usr/bin/gogitzip-gtk", "usr/bin/gogitzip", "usr/share/applications/gogitzip.desktop",
                 "usr/share/mime/packages/gogitzip.xml", "usr/share/icons/hicolor/48x48/apps/gogitzip.png",
                 "usr/share/metainfo/gogitzip.metainfo.xml"]

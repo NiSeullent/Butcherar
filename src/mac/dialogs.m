@@ -586,7 +586,7 @@ NSString *defaultArchiveName(NSArray<NSString *> *inputs, const gz_writer *w)
         base = dir.lastPathComponent;
         if (!base.length || [base isEqual:@"/"]) base = @"archive";
     }
-    NSString *file = [NSString stringWithFormat:@"%@.%s", base, w ? w->ext : "zip"];
+    NSString *file = [NSString stringWithFormat:@"%@.%@", base, gzU8(w ? w->ext : "zip")];
     return [dir stringByAppendingPathComponent:file];
 }
 
@@ -628,7 +628,7 @@ NSString *defaultArchiveName(NSArray<NSString *> *inputs, const gz_writer *w)
         if (t.length > e.length && [t.lowercaseString hasSuffix:e]) base = [t substringToIndex:t.length - e.length];
     }
     if (!base) base = t;
-    _out.stringValue = [NSString stringWithFormat:@"%@.%s", base, nw->ext];
+    _out.stringValue = [NSString stringWithFormat:@"%@.%@", base, gzU8(nw->ext)];
 }
 
 - (void)update:(id)sender
@@ -717,7 +717,8 @@ NSString *defaultArchiveName(NSArray<NSString *> *inputs, const gz_writer *w)
 
 @end
 
-void dlgCreate(NSWindow *parent, NSArray<NSString *> *inputs, void (^done)(GZCreateChoice *c))
+void dlgCreate(NSWindow *parent, NSArray<NSString *> *inputs, NSString *output, int format,
+               void (^done)(GZCreateChoice *c))
 {
     if (!inputs.count) { done(nil); return; }
     GZSettings *set = [GZSettings shared];
@@ -748,11 +749,25 @@ void dlgCreate(NSWindow *parent, NSArray<NSString *> *inputs, void (^done)(GZCre
     const gz_writer *dw = writerDefault(n, single);
     int act = 0;
     for (int i = 0; i < c->_nw; i++) {
-        [c->_fmt addItemWithTitle:[NSString stringWithFormat:@"%s  (.%s)", c->_wl[i]->name, c->_wl[i]->ext]];
+        [c->_fmt addItemWithTitle:[NSString stringWithFormat:@"%@  (.%@)", gzU8(c->_wl[i]->name),
+                                                             gzU8(c->_wl[i]->ext)]];
         if (c->_wl[i] == dw) act = i;
     }
+    /* an archive name given by the caller (--output) is kept as it is; its extension picks
+     * the format unless one was given too (as the --yes path does) */
+    int want = format;
+    if (!want && output.length) {
+        gzch *w = gzPathW(output);
+        want = w ? gz_format_from_name(w) : 0;
+        gz_free(w);
+    }
+    for (int i = 0; want && i < c->_nw; i++)
+        if (c->_wl[i]->format == want) {
+            act = i;
+            break;
+        }
     [c->_fmt selectItemAtIndex:act];
-    c->_out.stringValue = displayPath(defaultArchiveName(inputs, c->_wl[act]));
+    c->_out.stringValue = displayPath(output.length ? output : defaultArchiveName(inputs, c->_wl[act]));
     c->_level = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     int lact = 3;
     for (int i = 0; i < 6; i++) {
@@ -904,7 +919,7 @@ void dlgInfo(NSWindow *parent, gz_handle *h, NSString *arcPath)
     if (a->total_usize) {
         char pc[16];
         gz_ui_fmt_percent(pc, sizeof pc, a->total_csize, a->total_usize);
-        add(STR_I_RATIO, [NSString stringWithFormat:@"%s  (%@)", pc, fmtSize(a->total_csize)]);
+        add(STR_I_RATIO, [NSString stringWithFormat:@"%@  (%@)", gzU8(pc), fmtSize(a->total_csize)]);
     }
     /* methods, most frequent first */
     NSCountedSet *ms = [[NSCountedSet alloc] init];
@@ -1016,7 +1031,7 @@ void dlgResult(NSWindow *parent, gz_job *j, int kind, int result, BOOL quietOk, 
                           msg];
         lines++;
     }
-    if (!shown && result) [txt appendFormat:@"%@\t%s\n", TR(STR_L_ERROR), gz_ui_code_text(result)];
+    if (!shown && result) [txt appendFormat:@"%@\t%@\n", TR(STR_L_ERROR), gzU8(gz_ui_code_text(result))];
     NSScrollView *sv = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 520, 180)];
     sv.hasVerticalScroller = YES;
     sv.borderType = NSBezelBorder;
