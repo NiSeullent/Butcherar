@@ -496,8 +496,10 @@ def run(t):
                      for f in a["folders"]]
             # pe_noext / elf_noexec look like data by name: found by their header after the
             # BCJ group was written, they get a second BCJ folder
-            want_arm = 1 if "ARM64" in exe.values() else 0     # ARM64 samples exist only with cross libs
-            if kinds.count("plain") != 1 or kinds.count("ARM64") != want_arm or kinds.count("BCJ") not in (1, 2):
+            # ARM64 samples exist with cross libs or on an ARM64 host; like BCJ, an ELF found only
+            # by its header after the group was written gets a second folder
+            arm_ok = (1, 2) if "ARM64" in exe.values() else (0,)
+            if kinds.count("plain") != 1 or kinds.count("ARM64") not in arm_ok or kinds.count("BCJ") not in (1, 2):
                 probs.append("solid folders %s" % kinds)
         if not a["encoded"] or a["hdr_coders"] != ["LZMA"]:
             probs.append("header not LZMA-encoded: %r" % a["hdr_coders"])

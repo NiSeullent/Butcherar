@@ -18,8 +18,10 @@ if sys.platform == 'darwin':
     os.environ.setdefault('LANG', 'en_US.UTF-8')
 
 def nfc(s):
-    """macOS file systems hand back decomposed (NFD) Hangul: compare names composed."""
-    return unicodedata.normalize('NFC', s)
+    """Only macOS file systems rewrite names (they hand back decomposed NFD Hangul), so the
+    names read back from disk are composed there; elsewhere names are compared as they are
+    (formats such as HFS+ legitimately keep NFD Latin names)."""
+    return unicodedata.normalize('NFC', s) if sys.platform == 'darwin' else s
 
 def normalize(name):
     """What 고깃ZIP shows for a raw entry name."""
