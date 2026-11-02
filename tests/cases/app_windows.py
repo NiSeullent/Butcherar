@@ -517,6 +517,9 @@ def run_wine(t, w):
     if len(made) == 1 and made[0].endswith(".tar"):
         with tarfile.open(os.path.join(multi, made[0])) as tf:
             names = sorted(tf.getnames())
+    elif len(made) == 1 and made[0].endswith(".zip"):          # default format once a ZIP writer exists
+        with zipfile.ZipFile(os.path.join(multi, made[0])) as zf:
+            names = sorted(zf.namelist()) if zf.testzip() is None else []
     t.record(win is not None and rcs == [0, 0, 0] and names == ["a.txt", "b.txt", "c 다.txt"],
              "/add from 3 processes (Explorer multi-selection) -> one archive", "rc=%s made=%s names=%s" %
              (rcs, made, names))
