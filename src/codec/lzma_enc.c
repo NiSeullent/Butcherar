@@ -885,13 +885,16 @@ static u32 opt_normal(gz_lzma_enc *e, u32 position, u32 *back_res)
         }
         if (new_len >= start_len) {
             u32 nmp = match_price + P0(pp, pr->is_rep[state]), offs = 0, cur_back, dp3;
-            const u32 *lpr = e->len_prices[pos_state] - LEN_MIN;
+            /* row indexed by len - LEN_MIN (start_len >= 2): a pointer biased by -LEN_MIN
+             * would point before the array (UB, aborts clang -fsanitize=undefined builds) */
+            const u32 *lpr = e->len_prices[pos_state];
             while (len_end < cur + new_len) o[++len_end].price = INF_PRICE;
             while (start_len > matches[offs]) offs += 2;
             cur_back = matches[offs + 1];
             dp3 = dist_price(e, cur_back, LEN_TO_POS - 1);   /* lengths >= 5 share it */
             for (u32 lt = start_len;; lt++) {
-                u32 cp = nmp + lpr[lt] + (lt < LEN_TO_POS + 1 ? dist_price(e, cur_back, lt - 2) : dp3);
+                u32 cp = nmp + lpr[lt - LEN_MIN] +
+                         (lt < LEN_TO_POS + 1 ? dist_price(e, cur_back, lt - 2) : dp3);
                 opt_t *op = &o[cur + lt];
                 if (cp < op->price) {
                     op->price = cp;

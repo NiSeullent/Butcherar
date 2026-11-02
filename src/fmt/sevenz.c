@@ -335,6 +335,9 @@ static int parse_folder(br *r, sz_streams *st, sz_folder *f)
     if (nc == 0 || nc > SZ_MAXS) return GZ_E_METHOD;
     int e = grow((void **)&st->co, &st->cap_co, (u64)st->nco + nc, sizeof(sz_coder));
     if (e) return e;
+    /* the property buffer exists even when no coder has properties (BZip2, Copy...):
+     * st->props + cd->prop is formed for every coder, and NULL + 0 is undefined */
+    if ((e = grow((void **)&st->props, &st->cap_props, (u64)st->nprops + 1, 1))) return e;
     f->coder0 = st->nco;
     f->ncoders = (u8)nc;
     u32 nin = 0;
