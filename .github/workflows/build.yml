@@ -83,3 +83,80 @@ jobs:
             build/GogitZip.exe
             build/GogitZip64.exe
             build/SHA256SUMS.txt
+
+  # macOS: universal GogitZIP.app (x86_64 10.13+, arm64 11+) + command line tool, disk image,
+  # then the core test suite on Apple silicon (tests whose tools are missing skip themselves)
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || '' }}
+
+      - name: Install test tools
+        run: |
+          brew install xz zstd lz4 lzip lzop cabextract cpio squashfs sevenzip || true
+          # the tests call 7-Zip as "7z"; Homebrew's sevenzip installs "7zz"
+          if ! command -v 7z >/dev/null && command -v 7zz >/dev/null; then
+            ln -s "$(command -v 7zz)" "$(brew --prefix)/bin/7z"
+          fi
+          python3 -m pip install --break-system-packages pyzipper \
+            || python3 -m pip install --user pyzipper || true
+
+      - name: Build GogitZIP.app (universal) and the command line tool
+        run: make -j"$(sysctl -n hw.ncpu)" mac
+
+      - name: Check the bundle
+        run: |
+          app=build/mac/GogitZIP.app
+          lipo -archs "$app/Contents/MacOS/GogitZIP"
+          lipo "$app/Contents/MacOS/GogitZIP" -verify_arch x86_64 arm64
+          lipo "$app/Contents/Helpers/gogitzip" -verify_arch x86_64 arm64
+          otool -arch x86_64 -l "$app/Contents/MacOS/GogitZIP" | grep -A4 -E "LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX" | grep -E "minos 10\.13|version 10\.13"
+          otool -arch arm64 -l "$app/Contents/MacOS/GogitZIP" | grep -A4 LC_BUILD_VERSION | grep "minos 11\.0"
+          plutil -lint "$app/Contents/Info.plist" "$app"/Contents/Resources/*.lproj/*.strings
+          codesign --verify --deep --strict --verbose=2 "$app"
+          "$app/Contents/MacOS/GogitZIP" --version
+          "$app/Contents/Helpers/gogitzip" --help || true
+
+      - name: Disk image
+        run: make dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GogitZIP-mac
+          path: build/GogitZIP-mac.dmg
+
+      - name: Core tests (and the app's command line modes)
+        run: make test
+
+  # attach the disk image to the release the Windows job published
+  release-mac:
+    needs: [build, macos]
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: >-
+        ${{ github.event_name == 'workflow_dispatch' && inputs.tag
+         || (github.event_name == 'release' && !startsWith(github.event.release.tag_name, 'v')) && github.event.release.tag_name
+         || startsWith(github.ref, 'refs/tags/v') && github.ref_name
+         || '' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        if: env.RELEASE_TAG != ''
+        with:
+          name: GogitZIP-mac
+          path: dist
+
+      - name: Checksum
+        if: env.RELEASE_TAG != ''
+        run: (cd dist && sha256sum GogitZIP-mac.dmg > GogitZIP-mac.dmg.sha256)
+
+      - name: Attach GogitZIP-mac.dmg
+        if: env.RELEASE_TAG != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            dist/GogitZIP-mac.dmg
+            dist/GogitZIP-mac.dmg.sha256

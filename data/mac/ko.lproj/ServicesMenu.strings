@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Compress with GogitZIP</key>
+	<string>고깃ZIP으로 압축</string>
+	<key>Extract Here</key>
+	<string>여기에 풀기</string>
+	<key>Extract to Folder</key>
+	<string>폴더를 만들어 풀기</string>
+</dict>
+</plist>

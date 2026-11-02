@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>고깃ZIP</string>
+	<key>CFBundleName</key>
+	<string>고깃ZIP</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Butcherar 프로젝트. MIT 라이선스로 배포되는 자유 소프트웨어.</string>
+	<key>ZIP archive</key>
+	<string>ZIP 압축 파일</string>
+	<key>7-Zip archive</key>
+	<string>7-Zip 압축 파일</string>
+	<key>RAR archive</key>
+	<string>RAR 압축 파일</string>
+	<key>ALZip archive</key>
+	<string>알집 압축 파일</string>
+	<key>EGG archive</key>
+	<string>EGG 압축 파일</string>
+	<key>TAR archive</key>
+	<string>TAR 압축 파일</string>
+	<key>Gzip archive</key>
+	<string>Gzip 압축 파일</string>
+	<key>Gzip-compressed TAR archive</key>
+	<string>Gzip으로 압축한 TAR 압축 파일</string>
+	<key>Bzip2 archive</key>
+	<string>Bzip2 압축 파일</string>
+	<key>Bzip2-compressed TAR archive</key>
+	<string>Bzip2로 압축한 TAR 압축 파일</string>
+	<key>XZ archive</key>
+	<string>XZ 압축 파일</string>
+	<key>LZMA archive</key>
+	<string>LZMA 압축 파일</string>
+	<key>Zstandard archive</key>
+	<string>Zstandard 압축 파일</string>
+	<key>LZ4 archive</key>
+	<string>LZ4 압축 파일</string>
+	<key>LZO archive</key>
+	<string>LZO 압축 파일</string>
+	<key>Unix compress archive</key>
+	<string>Unix compress 압축 파일</string>
+	<key>Cabinet archive</key>
+	<string>CAB 압축 파일</string>
+	<key>ARJ archive</key>
+	<string>ARJ 압축 파일</string>
+	<key>LHA archive</key>
+	<string>LHA 압축 파일</string>
+	<key>CPIO archive</key>
+	<string>CPIO 압축 파일</string>
+	<key>XAR archive</key>
+	<string>XAR 압축 파일</string>
+	<key>Windows image</key>
+	<string>Windows 이미지</string>
+	<key>Split archive</key>
+	<string>분할 압축 파일</string>
+	<key>Unix ar archive</key>
+	<string>Unix ar 압축 파일</string>
+	<key>RPM package</key>
+	<string>RPM 패키지</string>
+	<key>Debian package</key>
+	<string>Debian 패키지</string>
+	<key>Installer package</key>
+	<string>설치 패키지</string>
+	<key>Windows Installer package</key>
+	<string>Windows Installer 패키지</string>
+	<key>NSIS installer</key>
+	<string>NSIS 설치 파일</string>
+	<key>Disc image</key>
+	<string>디스크 이미지</string>
+	<key>Apple disk image</key>
+	<string>Apple 디스크 이미지</string>
+	<key>Virtual disk image</key>
+	<string>가상 디스크 이미지</string>
+	<key>File system image</key>
+	<string>파일 시스템 이미지</string>
+	<key>Floppy disk image</key>
+	<string>플로피 디스크 이미지</string>
+</dict>
+</plist>
